@@ -27,3 +27,4 @@ talk2api - Natural language interface for controlling APIs via voice or text. .
 git clone https://github.com/yourusername/talk2api.git
 cd talk2api
 pip install -r requirements.txt
+
