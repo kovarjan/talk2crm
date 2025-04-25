@@ -5,7 +5,7 @@ talk2api - Natural language interface for controlling APIs via voice or text. .
 
 **talk2api** is an open-source voice and natural language assistant that lets users interact with APIs — Currently supports CRM workflows — using simple voice commands.
 
-💬 _“Add a new contact named Jan Novák from Acme.”_  
+💬 _“Add a new contact named Jan Novák from Acmark”_  
 📇 _“Show deals closing this month.”_  
 📞 _“Log a call with Petra about the marketing campaign.”_
 
@@ -27,4 +27,3 @@ talk2api - Natural language interface for controlling APIs via voice or text. .
 git clone https://github.com/yourusername/talk2api.git
 cd talk2api
 pip install -r requirements.txt
-
