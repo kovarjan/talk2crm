@@ -57,3 +57,61 @@ $ python -m pytest tests
     ├── setup.py                     # Script for installation and packaging
     └── README.md                    # High-level project overview, setup instructions, and usage examples
 ```
+
+
+## dev server
+```
+torch version 2.8.0.dev20250425+cu128
+cuda version 12.8
+gpu NVIDIA GeForce RTX 5080
+``` 
+
+
+## Json output structure
+```json
+// podle url bude action reate, retrive, update, delete...
+{
+   "action": "create",
+   "module": "calls",
+   "parameters": {
+      "subject": "Projekt Nová Kampaň",
+      "contact_name": "Jana Malinová"
+      // "contact_id": "1234567890",
+      // fields... param: value
+   },
+   "metadata": {
+      "timestamp": "2025-04-26T08:40:20Z",
+      "date": "2025-04-26",
+   }
+}
+```
+
+Other options:
+```json
+{
+    "command": {
+        "action": "create",
+        "object": "lead",
+        "data": {
+            "name": "John Doe",
+            "email": "john@example.com",
+            "phone": "+1234567890",
+            "company": "Example Corp",
+            "address": {
+                "street": "123 Main St",
+                "city": "Anytown",
+                "state": "CA",
+                "zip": "12345"
+            }
+        }
+    },
+    "clarification": {
+        "question": "What is the lead's email address?",
+        "options": [
+            "Please provide the email address.",
+            "What is the email address of the lead?",
+            "Can you tell me the email address?"
+        ]
+    }
+}
+```

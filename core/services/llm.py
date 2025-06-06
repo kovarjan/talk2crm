@@ -63,7 +63,7 @@ def query_llm(
     messages = [
         {
             "role": "system", 
-            "content": f"""You are an assistant that generates valid JSON output for CRM commands. Provide clarifications if needed. Respond in Czech language.
+            "content": f"""You are an assistant that generates valid JSON output for CRM commands. Provide clarifications if needed. Respond in Czech language. Use correct czech declension of names.
                 {systemPrompt}
                 Current date and time: {current_datetime} and today is {current_day}
                 If any key information is missing, respond with a question to clarify.
@@ -76,7 +76,7 @@ def query_llm(
         messages[0]['content'] = systemPrompt
 
     # pretty print the system message
-    print(f"🛠️ [Prompt] system messages: {json.dumps(messages, indent=4)}")
+    # print(f"🛠️ [Prompt] system messages: {json.dumps(messages, indent=4)}")
 
     # Append any existing chat history (e.g. previous messages and clarifications)
     if chat_history:

@@ -1,5 +1,6 @@
+from jsonschema import validate, ValidationError
 
-def validate_json_command(json_command: dict) -> dict:
+def validate_json_command(json_command: dict, schema: dict = None) -> dict:
     """
     Validates the structure of a JSON command.
 
@@ -9,30 +10,71 @@ def validate_json_command(json_command: dict) -> dict:
     Returns:
         dict: A dictionary indicating whether the JSON command is valid and any errors found.
     """
-    required_fields = ["action", "parameters", "metadata"]
     errors = []
 
-    # Check for required fields
-    for field in required_fields:
-        if field not in json_command:
-            errors.append(f"Missing required field: {field}")
+    # {
+    #     "action": "create",
+    #     "module": "calls",
+    #     "parameters": {
+    #         "subject": "Projekt Nová Kampaň",
+    #         "contact_name": "Jana Malinová"
+    #     },
+    #     "metadata": {
+    #         "timestamp": "2025-04-26T08:40:20Z"
+    #     }
+    # }
 
-    # Check metadata structure
-    if "metadata" in json_command:
-        if not isinstance(json_command["metadata"], dict):
-            errors.append("Metadata should be a dictionary.")
-        else:
-            if "timestamp" not in json_command["metadata"]:
-                errors.append("Missing timestamp in metadata.")
-            elif not isinstance(json_command["metadata"]["timestamp"], str):
-                errors.append("Timestamp should be a string.")
+    if schema is None:
+        # Define a basic schema for validation
+        schema = {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string"},
+                "parameters": {"type": "object"},
+                "metadata": {"type": "object"}
+                # "metadata": {
+                #     "type": "object",
+                #     "properties": {
+                #         "timestamp": {"type": "string", "format": "date-time"},
+                #         "date": {"type": "string", "format": "date"},
+                #         "time": {"type": "string", "pattern": "^([01]?[0-9]|2[0-3]):[0-5][0-9]$"},
+                #         "duration": {"type": ["string", "null"]},
+                #         "participants": {"type": ["array", "null"]},
+                #         "location": {"type": ["string", "null"]}
+                #     },
+                #     "required": ["timestamp", "date", "time"],
+                # }
+            },
+            "required": ["action", "parameters", "metadata"],
+        }
 
-    # Validate action and parameters
-    if not isinstance(json_command.get("action"), str) or not json_command["action"]:
-        errors.append("Action should be a non-empty string.")
+    # Check if the JSON command is empty
+    if not json_command:
+        errors.append("JSON command is empty.")
+        return {
+            "is_valid": False,
+            "errors": errors
+        }
+    # Check if the JSON command is a dictionary
+    if not isinstance(json_command, dict):
+        errors.append("JSON command should be a dictionary.")
+        return {
+            "is_valid": False,
+            "errors": errors
+        }
     
-    if not isinstance(json_command.get("parameters"), dict) or not json_command["parameters"]:
-        errors.append("Parameters should be a non-empty dictionary.")
+    # Validate the JSON command structure by schema
+    try:
+        # Validate the JSON command against the schema
+        validate(instance=json_command, schema=schema)
+    except ValidationError as e:
+        errors.append(f"Validation error: {e.message}")
+        # If schema validation fails, add the error message to the errors list
+        return {
+            "is_valid": False,
+            "errors": errors
+        }
+
 
     return {
         "is_valid": len(errors) == 0,

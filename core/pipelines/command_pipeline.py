@@ -10,6 +10,7 @@ from core.services.llm import query_llm
 from core.utils.json_validator import validate_json_command
 from core.agents.module_data_extractor import ModuleDataExtractor
 from core.agents.modules.meetings_agent import MeetingsAgent
+import time
 # from core.services.crm_service import process_crm_command
 
 def process_voice_command(audio_path: str, chat_history: list = []) -> dict:
@@ -24,6 +25,9 @@ def process_voice_command(audio_path: str, chat_history: list = []) -> dict:
     Returns:
         dict: The final response from the CRM service or an error message if encountered.
     """
+    processTime = time.time()
+    command_text = ""
+
     # NOTE: Audio transcription is disabled out for now.
     try:
         # Convert audio to text using the STT agent.
@@ -33,11 +37,15 @@ def process_voice_command(audio_path: str, chat_history: list = []) -> dict:
         return {"error": f"🎙️ STT failed: {str(stt_error)}"}
 
     # NOTE: Manual override for testing
-    command_text = "Vytvoř schůzku s Pavlem Novotným ve 12 hodin v Brně."
+    # command_text = "Vytvoř schůzku s Pavlem Novotným ve 12 hodin v Brně."
 
     print("\n🗣️ User said (manual override):", command_text)
 
+    transcriptionTime = time.time() - processTime
+    print(f"⏳ [STT] Transcription Time: {round(transcriptionTime, 2)}s")
+    print()
 
+    processTime = time.time()
     # Extract module data
     module_data = ModuleDataExtractor(command_text)
     if not "error" in module_data:
@@ -48,10 +56,16 @@ def process_voice_command(audio_path: str, chat_history: list = []) -> dict:
             "content": f"[ModuleDataExtractor] Module: '{module_data.get('module')}', Action: '{module_data.get('action')}'"
         })
 
-        print(chat_history)
+        print(f"💬 [Chat] + {chat_history}")
     else:
         print(f"🛠️ [ModuleDataExtractor] Error: {module_data['error']}")
         
+    moduleExtractorTime = time.time() - processTime 
+    print(f"⏳ [ModuleDataExtractor] Process Time: {round(moduleExtractorTime, 2)}s")
+    print()
+    processTime = time.time()
+
+
     # based on module select correct module_agent default to query_llm
     if module_data.get("module") == "meetings":
         # meetings_agent = MeetingsAgent(command_text, chat_history=chat_history, action=module_data.get("action"))
@@ -71,14 +85,37 @@ def process_voice_command(audio_path: str, chat_history: list = []) -> dict:
             "question": "Omlouvám, nepodařilo se mi vyhodnotit tento úkol. Můžete to prosím zopakovat?"
         }}
 
+    agentProcessTime = time.time() - processTime
+    print(f"⏳ [Agent] Process Time: {round(agentProcessTime, 2)}s")
+    print()
+    
     # Validate the generated JSON command structure.
     validation = validate_json_command(response)
     if not validation["is_valid"]:
-        # If validation fails, return an error or trigger clarification (implementation-dependent).
-        return {
-            "error": "Invalid JSON command generated.",
-            "details": validation.get("errors", "Omlouvám, nepodařilo se mi vyhodnotit tento úkol. Můžete to prosím zopakovat?")
-        }
+        print(f"❌ [Validation] Errors: {validation.get('errors', 'Invalid JSON command generated.')}")
+        
+        # if json is not valid reprompt the llm with the command text and validation error in chat history 1 attempt
+        print(f"🔄 [LLM] Re-prompting LLM with command text and validation error.")
+        chat_history.append({
+            "role": "user",
+            "content": command_text,
+        })
+        print(f"💬 [Chat] + {chat_history}")
+        print(f"💬 [Chat] + {validation.get('errors', 'Invalid JSON command generated.')}")
+        response = query_llm(validation.get('errors', 'Invalid JSON command generated.'), chat_history=chat_history)
+
+        print(f"🤖 [LLM] Re-prompted JSON Command: {response}")
+
+        # Validate the JSON command again after re-prompting.
+        validation = validate_json_command(response)
+        if not validation["is_valid"]:
+            print(f"❌ [Validation] Errors: {validation.get('errors', 'Invalid JSON command generated.')}")
+            # If the JSON command is still invalid, return an error message.
+            return {
+                "error": "Invalid JSON command generated.",
+                "details": validation.get("errors", "Omlouvám, nepodařilo se mi vyhodnotit tento úkol. Můžete to prosím zopakovat?")
+            }
+        
 
     # If the command has property clarification.question rerun it
     if "clarification" in response:
@@ -101,7 +138,6 @@ def process_voice_command(audio_path: str, chat_history: list = []) -> dict:
         }]
 
         response = process_voice_command(user_input, user_corrected_text)
-        print("\n🤖 Assistant Response:\n", response)
 
     # Process the command through the CRM service.
     # crm_response = process_crm_command(response)

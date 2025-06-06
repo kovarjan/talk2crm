@@ -26,12 +26,8 @@ if __name__ == "__main__":
     # Process the voice command
     response = process_voice_command(audio_path)
     
-    # Print the response for debugging
-    print("Response from process_voice_command:")
-    # print(response)
-
     # return json end print
-    print("\n🤖 Assistant Response:\n", json.dumps(response))
+    print("\n🤖 Assistant Response:\n", response)
 
 
 

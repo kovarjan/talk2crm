@@ -1,4 +1,5 @@
 import whisper
+import time
 from pydub import AudioSegment
 from core.config import WHISPER_MODEL
 from core.agents.stt_corrector_agent import SttCorrectorAgent
@@ -10,8 +11,14 @@ def convert_mp3_to_wav(mp3_path: str, wav_path: str):
 
 
 def transcribe_audio(audio_path: str, correct: bool = False) -> str:
+    loadTime = time.time()
+   
     print("🛠️ > Loading Whisper model:", WHISPER_MODEL)
     model = whisper.load_model(WHISPER_MODEL)
+
+    modelLoadTime = time.time() - loadTime
+    print(f"⏳ [STT] Model Load Time: {round(modelLoadTime, 2)}s")
+    print()
 
     # if is mp3 convert to wav
     if audio_path.endswith('.mp3'):

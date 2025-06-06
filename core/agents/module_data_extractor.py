@@ -37,6 +37,4 @@ def ModuleDataExtractor(prompt: str) -> dict:
     if 'module' not in response or 'action' not in response:
         return {"error": "Response does not contain required fields."}
 
-    print("\n🛠️ > ModuleDataExtractor:", response)
-
     return response

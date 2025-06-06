@@ -2,6 +2,8 @@ import json
 from langchain.prompts import PromptTemplate
 from core.services.llm import query_llm
 from core.config import LLM_TEMPERATURE
+from core.utils.json_validator import validate_json_command
+
 
 def MeetingsAgent(command_text: str, chat_history: list = None, action: str = '') -> dict:
     """
@@ -33,7 +35,6 @@ def MeetingsAgent(command_text: str, chat_history: list = None, action: str = ''
             "<param_name>": "<param_value>"
         }},
         "metadata": {{
-            "timestamp": "<ISO-8601 timestamp>",
             "date": "<date> [required]",
             "time": "<time> [required]",
             "duration": "<duration minutes if specified>",
@@ -64,6 +65,11 @@ def MeetingsAgent(command_text: str, chat_history: list = None, action: str = ''
     # Generate JSON from the command text
     json_response = query_llm(final_prompt, chat_history=chat_history, temperature=LLM_TEMPERATURE, isTemplate=True, systemPrompt=systemPrompt)
     print(f"🤖 [LLM] Generated JSON Command: {json.dumps(json_response, indent=4)}")
+
+
+    validation = validate_json_command(json_response)
+    if not validation["is_valid"]:
+        print(f"❌ [Validation] Errors: {validation.get('errors', 'Invalid JSON command generated.')}")
 
 
     # Validate JSON output here
