@@ -62,6 +62,7 @@ def process_voice_command(audio_path: str, chat_history: list = []) -> dict:
         
     moduleExtractorTime = time.time() - processTime 
     print(f"⏳ [ModuleDataExtractor] Process Time: {round(moduleExtractorTime, 2)}s")
+    print(module_data)
     print()
     processTime = time.time()
 
@@ -70,7 +71,7 @@ def process_voice_command(audio_path: str, chat_history: list = []) -> dict:
     if module_data.get("module") == "meetings":
         # meetings_agent = MeetingsAgent(command_text, chat_history=chat_history, action=module_data.get("action"))
         # response = meetings_agent
-        response = MeetingsAgent(command_text, chat_history=chat_history, action=module_data.get("action"))
+        response = MeetingsAgent(command_text, chat_history=chat_history, action=module_data.get("action"), parameters=module_data.get("parameters", {}))
     elif module_data.get("module") == "tasks":
         print("🛠️ [TasksAgent] Not implemented yet.")
         return {"error": "Tasks module not implemented yet."}
@@ -118,26 +119,26 @@ def process_voice_command(audio_path: str, chat_history: list = []) -> dict:
         
 
     # If the command has property clarification.question rerun it
-    if "clarification" in response:
+    # if "clarification" in response:
 
-        if "question" in response["clarification"]:
-            # If the response contains a clarification question, ask the user for more details.
-            print("\n❓ Clarification needed:", response["clarification"]["question"])
+    #     if "question" in response["clarification"]:
+    #         # If the response contains a clarification question, ask the user for more details.
+    #         print("\n❓ Clarification needed:", response["clarification"]["question"])
 
-        # Handle clarification logic here
-        # For example, you can ask the user for more details
-        user_input = input("\n💡 Please provide more details: ")
+    #     # Handle clarification logic here
+    #     # For example, you can ask the user for more details
+    #     user_input = input("\n💡 Please provide more details: ")
 
-        # user_corrected_text = "original message: " + text + "\n\nyour response: " + response + "\n\nusers clarification: " + user_input
-        user_corrected_text = [{
-            "role": "user",
-            "content": command_text
-        }, {
-            "role": "assistant",
-            "content": json.dumps(response, indent=4)
-        }]
+    #     # user_corrected_text = "original message: " + text + "\n\nyour response: " + response + "\n\nusers clarification: " + user_input
+    #     user_corrected_text = [{
+    #         "role": "user",
+    #         "content": command_text
+    #     }, {
+    #         "role": "assistant",
+    #         "content": json.dumps(response, indent=4)
+    #     }]
 
-        response = process_voice_command(user_input, user_corrected_text)
+    #     response = process_voice_command(user_input, user_corrected_text)
 
     # Process the command through the CRM service.
     # crm_response = process_crm_command(response)

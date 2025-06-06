@@ -115,3 +115,8 @@ Other options:
     }
 }
 ```
+
+create embeddings from crm DB
+```bash
+python scripts/build_company_index.py
+```

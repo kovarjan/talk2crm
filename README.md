@@ -35,4 +35,6 @@ pip install -r requirements.txt
 conda activate talk2api
 # Ensure you have the correct environment activated
 python main.py
+uvicorn main:app --reload --port 3000 --host 0.0.0.
+# audio recording websites must use https - use nginx proxy same origin
 ```

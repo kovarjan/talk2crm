@@ -9,6 +9,7 @@ def ModuleDataExtractor(prompt: str) -> dict:
 
     availableModules = ["meetings", "tasks", "notes", "calls"]
     availableActions = ["create", "update", "delete", "get"]
+    availableSubjects = ["company", "contact", "user", "task", "note", "call", "meeting", "invoice"]
     
     # Use query_llm to call the LLM for structured output
     instruction = (
@@ -17,10 +18,16 @@ def ModuleDataExtractor(prompt: str) -> dict:
         f"Available modules: {', '.join(availableModules)}.\n"
         "And determine the action to take.\n"
         f"Available actions: {', '.join(availableActions)}.\n"
-        "Use this format strictly:\n"
+        "The subject of the request should be name of a record in following related modules: "
+        f"{', '.join(availableSubjects)}.\n"
+        "Use this JSON format strictly:\n"
         "{\n"
         "  \"module\": \"<module>\",\n"
         "  \"action\": \"<action>\"\n"
+        "  \"parameters\": {\n"
+        "    \"related_module\": \"<related_module>\",\n"
+        "    \"related_name\": \"<related_module>\",\n"
+        "  }\n"
         "}"
     )
 

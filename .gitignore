@@ -178,3 +178,7 @@ cython_debug/
 
 # Macos
 .DS_Store
+
+cache/
+data/recordings/
+temp.wav
