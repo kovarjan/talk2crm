@@ -21,7 +21,7 @@ DB_CONFIG = {
     "database": "coripo_localhost"
 }
 
-SQL_QUERY = "SELECT id, name FROM accounts WHERE deleted = 0 AND name IS NOT NULL ORDER BY name ASC;"
+SQL_QUERY = "SELECT id, name, billing_address_city FROM accounts WHERE deleted = 0 AND name IS NOT NULL ORDER BY name ASC;"
 
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384  # for MiniLM
@@ -40,19 +40,28 @@ def fetch_companies():
 
     company_ids = [str(row[0]) for row in rows]
     company_names = [row[1] for row in rows]
-    return company_ids, company_names
+    billing_address_citys = [row[2] for row in rows]
+    # Combine name and city for better context
+    return company_ids, company_names, billing_address_citys
 
 
 def build_index():
     print("🔍 Loading company data from database...")
-    company_ids, company_names = fetch_companies()
+    company_ids, company_names, billing_address_city = fetch_companies()
     print(f"✅ Retrieved {len(company_names)} companies.")
 
     print("🧠 Loading embedding model:", EMBEDDING_MODEL_NAME)
     model = SentenceTransformer(EMBEDDING_MODEL_NAME, cache_folder="cache/models/sentence_transformers")
 
     print("🔎 Encoding company names...")
-    embeddings = model.encode(company_names, normalize_embeddings=True)
+    # Combine company name and city for richer context
+    texts = [
+        f"{name}, {city}" if city else name
+        for name, city in zip(company_names, billing_address_city)
+    ]
+
+    print(f"📏 Encoding {len(texts)} texts with {EMBEDDING_DIM}-dimensional embeddings...")
+    embeddings = model.encode(texts, normalize_embeddings=True)
 
     print("📦 Building FAISS index...")
     index = faiss.IndexFlatIP(EMBEDDING_DIM)
@@ -62,7 +71,7 @@ def build_index():
     print("💾 Saving index and metadata...")
     faiss.write_index(index, INDEX_FILE)
     with open(METADATA_FILE, "wb") as f:
-        pickle.dump({"names": company_names, "ids": company_ids}, f)
+        pickle.dump({"names": company_names, "ids": company_ids, "cities": billing_address_city}, f)
 
     print("✅ Done! Index saved to:")
     print(f"  -> {INDEX_FILE}")

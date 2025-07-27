@@ -11,9 +11,12 @@ from core.utils.json_validator import validate_json_command
 from core.agents.module_data_extractor import ModuleDataExtractor
 from core.agents.modules.meetings_agent import MeetingsAgent
 import time
+from core.utils.chat import ChatSession
+from core.config import SHOW_TIMING
+
 # from core.services.crm_service import process_crm_command
 
-def process_voice_command(audio_path: str, chat_history: list = []) -> dict:
+def process_voice_command(audio_path: str, chat_history: ChatSession = ChatSession(), input_text: str = None) -> dict:
     """
     Processes a voice command from an audio file and executes the corresponding CRM action.
 
@@ -26,69 +29,81 @@ def process_voice_command(audio_path: str, chat_history: list = []) -> dict:
         dict: The final response from the CRM service or an error message if encountered.
     """
     processTime = time.time()
-    command_text = ""
+    command_text = input_text
 
-    # NOTE: Audio transcription is disabled out for now.
-    try:
-        # Convert audio to text using the STT agent.
-        command_text = transcribe_audio(audio_path)
-        print(f"🎙️ [STT] Transcribed Text: {command_text}")
-    except Exception as stt_error:
-        return {"error": f"🎙️ STT failed: {str(stt_error)}"}
+    if audio_path:
+        try:
+            # Convert audio to text using the STT agent.
+            command_text = transcribe_audio(audio_path)
+            print(f"🎙️ [STT] Transcribed Text: {command_text}")
+        except Exception as stt_error:
+            return {"error": f"🎙️ STT failed: {str(stt_error)}"}
 
-    # NOTE: Manual override for testing
-    # command_text = "Vytvoř schůzku s Pavlem Novotným ve 12 hodin v Brně."
+    print("\n🗣️ User said:", command_text)
 
-    print("\n🗣️ User said (manual override):", command_text)
-
-    transcriptionTime = time.time() - processTime
-    print(f"⏳ [STT] Transcription Time: {round(transcriptionTime, 2)}s")
-    print()
+    if SHOW_TIMING:
+        transcriptionTime = time.time() - processTime
+        print(f"⏳ [STT] Transcription Time: {round(transcriptionTime, 2)}s")
+        print()
+    
+    print(f"🛠️ [ModuleDataExtractor] -------------------------------")
 
     processTime = time.time()
     # Extract module data
     module_data = ModuleDataExtractor(command_text)
-    if not "error" in module_data:
+    if module_data and not "error" in module_data:
         # If module data extraction is successful, proceed with the command text.
         print(f"🛠️ [ModuleDataExtractor]", module_data)
-        chat_history.append({
-            "role": "assistant",
-            "content": f"[ModuleDataExtractor] Module: '{module_data.get('module')}', Action: '{module_data.get('action')}'"
-        })
-
-        print(f"💬 [Chat] + {chat_history}")
+        chat_history.add_assistant(f"ModuleDataExtractor - user request context: \n"
+                                    f"{json.dumps(module_data, indent=2, ensure_ascii=False)}")
     else:
-        print(f"🛠️ [ModuleDataExtractor] Error: {module_data['error']}")
+        if module_data and "error" in module_data:
+            print(f"🛠️ [ModuleDataExtractor] Error: {module_data['error']}")
+        else:
+            print(f"🛠️ [ModuleDataExtractor] No module data extracted.")
         
-    moduleExtractorTime = time.time() - processTime 
-    print(f"⏳ [ModuleDataExtractor] Process Time: {round(moduleExtractorTime, 2)}s")
-    print(module_data)
-    print()
-    processTime = time.time()
+    if SHOW_TIMING:
+        moduleExtractorTime = time.time() - processTime 
+        print(f"⏳ [ModuleDataExtractor] Process Time: {round(moduleExtractorTime, 2)}s")
+        print(module_data)
+        print()
+        processTime = time.time()
 
+
+    print(f"🛠️ [ModuleDataExtractor] -------------------------------")
+    print()
+
+    # if no module data is extracted, check if chat history has module data
+    if not module_data and chat_history.get_count() > 2:
+        module_data = chat_history.get_module_data()
+        print(f"🛠️ [ModuleDataExtractor] --->  Module Data from Chat History: {module_data}")
 
     # based on module select correct module_agent default to query_llm
-    if module_data.get("module") == "meetings":
+    if module_data and module_data.get("module") == "meetings":
         # meetings_agent = MeetingsAgent(command_text, chat_history=chat_history, action=module_data.get("action"))
         # response = meetings_agent
         response = MeetingsAgent(command_text, chat_history=chat_history, action=module_data.get("action"), parameters=module_data.get("parameters", {}))
-    elif module_data.get("module") == "tasks":
+    elif module_data and module_data.get("module") == "tasks":
         print("🛠️ [TasksAgent] Not implemented yet.")
         return {"error": "Tasks module not implemented yet."}
     else:
+        print("🛠️ [ModuleDataExtractor] No specific module found, using default LLM query Chat Mode.")
         # Generate the JSON command using the LLM agent, including any chat history if available.
-        response = query_llm(command_text, chat_history=chat_history)
+        response = query_llm(chat_history=chat_history, command_text=command_text)
         print(f"🤖 [LLM] Generated JSON Command: {response}")
 
     if "error" in response:
         # Optionally, trigger a clarification/confirmation step
-        response = {"clarification": {
-            "question": "Omlouvám, nepodařilo se mi vyhodnotit tento úkol. Můžete to prosím zopakovat?"
-        }}
+        response = {
+            "action": "question",
+            "message_to_user": "Omlouvám, nepodařilo se mi vyhodnotit tento úkol. Můžete to prosím zopakovat?"
+        }
 
-    agentProcessTime = time.time() - processTime
-    print(f"⏳ [Agent] Process Time: {round(agentProcessTime, 2)}s")
-    print()
+    if SHOW_TIMING:
+        agentProcessTime = time.time() - processTime
+        print(f"⏳ [Agent] Process Time: {round(agentProcessTime, 2)}s")
+        print()
+    
     
     # Validate the generated JSON command structure.
     validation = validate_json_command(response)
@@ -97,13 +112,10 @@ def process_voice_command(audio_path: str, chat_history: list = []) -> dict:
         
         # if json is not valid reprompt the llm with the command text and validation error in chat history 1 attempt
         print(f"🔄 [LLM] Re-prompting LLM with command text and validation error.")
-        chat_history.append({
-            "role": "user",
-            "content": command_text,
-        })
-        print(f"💬 [Chat] + {chat_history}")
-        print(f"💬 [Chat] + {validation.get('errors', 'Invalid JSON command generated.')}")
-        response = query_llm(validation.get('errors', 'Invalid JSON command generated.'), chat_history=chat_history)
+        chat_history.add_assistant(validation.get('errors', 'Invalid JSON command generated.'))
+        chat_history.pretty_print()
+
+        response = query_llm(chat_history=chat_history, command_text=validation.get('errors', 'Invalid JSON command generated.'))
 
         print(f"🤖 [LLM] Re-prompted JSON Command: {response}")
 
@@ -118,30 +130,12 @@ def process_voice_command(audio_path: str, chat_history: list = []) -> dict:
             }
         
 
-    # If the command has property clarification.question rerun it
-    # if "clarification" in response:
+    chat_history.pretty_print()
 
-    #     if "question" in response["clarification"]:
-    #         # If the response contains a clarification question, ask the user for more details.
-    #         print("\n❓ Clarification needed:", response["clarification"]["question"])
 
-    #     # Handle clarification logic here
-    #     # For example, you can ask the user for more details
-    #     user_input = input("\n💡 Please provide more details: ")
+    # log chat history to file
+    with open("logs/chat_history.log", "a", encoding="utf-8") as log_file:
+        log_file.write(f"Chat History:\n{json.dumps(chat_history.get_messages(), indent=4, ensure_ascii=False)}\n\n")
 
-    #     # user_corrected_text = "original message: " + text + "\n\nyour response: " + response + "\n\nusers clarification: " + user_input
-    #     user_corrected_text = [{
-    #         "role": "user",
-    #         "content": command_text
-    #     }, {
-    #         "role": "assistant",
-    #         "content": json.dumps(response, indent=4)
-    #     }]
-
-    #     response = process_voice_command(user_input, user_corrected_text)
-
-    # Process the command through the CRM service.
-    # crm_response = process_crm_command(response)
-    # return crm_response
 
     return response

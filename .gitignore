@@ -181,4 +181,5 @@ cython_debug/
 
 cache/
 data/recordings/
+data/embeddings/
 temp.wav

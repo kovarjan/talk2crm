@@ -5,7 +5,8 @@ import tempfile
 import shutil
 import os
 from core.pipelines.command_pipeline import process_voice_command
-
+from core.utils.chat import ChatSession
+from pydantic import BaseModel
 
 app = FastAPI()
 
@@ -31,9 +32,11 @@ def process_audio_and_generate_crm_call(file_path: str) -> dict:
     audio_path = file_path
 
     print("audio_path:", audio_path)
+
+    chat_history = ChatSession(True)
     
     # Process the voice command
-    response = process_voice_command(audio_path)
+    response = process_voice_command(audio_path, chat_history)
 
     # save recoding to file data/recordings
     recordings_dir = "data/recordings"
@@ -45,7 +48,11 @@ def process_audio_and_generate_crm_call(file_path: str) -> dict:
     # return json end print
     print("\n🤖 Assistant Response:\n", response)
 
-    return response
+    return {
+        "success": True,
+        "response": response,
+        "chat_history": chat_history.get_messages(),
+    }
 
 @app.get("/")
 def read_root():
@@ -63,3 +70,36 @@ async def process_audio(file: UploadFile = File(...)):
     finally:
         os.remove(temp_path)
 
+class InputPayload(BaseModel):
+    input_text: str
+    chat_history: list = None
+
+@app.post("/process-input/")
+async def process_input(payload: InputPayload):
+    """
+    Process a text input and generate a CRM command.
+    """
+
+    print("Received input payload history:", payload.chat_history)
+    
+    input_text = payload.input_text
+    chat_history = ChatSession(True)
+
+    if payload.chat_history:
+        # Load chat history if provided
+        chat_history.reset()
+        # print("Loading chat history:", payload.chat_history)
+        chat_history.load_history(payload.chat_history)
+        # Compose the following user message
+        input_text = chat_history.compose_following_user_message(input_text)
+
+    print("Processing input text:", input_text)
+
+    # Process the voice command
+    response = process_voice_command(None, chat_history, input_text)
+
+    return JSONResponse(content={
+        "success": True,
+        "response": response,
+        "chat_history": chat_history.get_messages(),
+    })

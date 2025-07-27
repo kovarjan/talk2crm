@@ -30,22 +30,14 @@ def validate_json_command(json_command: dict, schema: dict = None) -> dict:
             "type": "object",
             "properties": {
                 "action": {"type": "string"},
+                "message_to_user": {"type": "string"},
                 "parameters": {"type": "object"},
                 "metadata": {"type": "object"}
-                # "metadata": {
-                #     "type": "object",
-                #     "properties": {
-                #         "timestamp": {"type": "string", "format": "date-time"},
-                #         "date": {"type": "string", "format": "date"},
-                #         "time": {"type": "string", "pattern": "^([01]?[0-9]|2[0-3]):[0-5][0-9]$"},
-                #         "duration": {"type": ["string", "null"]},
-                #         "participants": {"type": ["array", "null"]},
-                #         "location": {"type": ["string", "null"]}
-                #     },
-                #     "required": ["timestamp", "date", "time"],
-                # }
             },
-            "required": ["action", "parameters", "metadata"],
+            "anyOf": [
+                {"required": ["action"]},
+                {"required": ["message_to_user"]}
+            ]
         }
 
     # Check if the JSON command is empty
