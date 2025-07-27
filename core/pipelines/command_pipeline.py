@@ -55,7 +55,9 @@ def process_voice_command(audio_path: str, chat_history: ChatSession = ChatSessi
         # If module data extraction is successful, proceed with the command text.
         print(f"🛠️ [ModuleDataExtractor]", module_data)
         chat_history.add_assistant(f"ModuleDataExtractor - user request context: \n"
-                                    f"{json.dumps(module_data, indent=2, ensure_ascii=False)}")
+                                    f"Module: '{module_data.get('module')}', \n"
+                                    f"Action: '{module_data.get('action')}', \n"
+                                    f"{json.dumps(module_data.get('parameters', {}), indent=2, ensure_ascii=False)}")
     else:
         if module_data and "error" in module_data:
             print(f"🛠️ [ModuleDataExtractor] Error: {module_data['error']}")
@@ -74,7 +76,7 @@ def process_voice_command(audio_path: str, chat_history: ChatSession = ChatSessi
     print()
 
     # if no module data is extracted, check if chat history has module data
-    if not module_data and chat_history.get_count() > 2:
+    if not module_data or not module_data.get("module") and chat_history.get_count() > 2:
         module_data = chat_history.get_module_data()
         print(f"🛠️ [ModuleDataExtractor] --->  Module Data from Chat History: {module_data}")
 
@@ -82,7 +84,7 @@ def process_voice_command(audio_path: str, chat_history: ChatSession = ChatSessi
     if module_data and module_data.get("module") == "meetings":
         # meetings_agent = MeetingsAgent(command_text, chat_history=chat_history, action=module_data.get("action"))
         # response = meetings_agent
-        response = MeetingsAgent(command_text, chat_history=chat_history, action=module_data.get("action"), parameters=module_data.get("parameters", {}))
+        response = MeetingsAgent(command_text, chat_history=chat_history, action=module_data.get("action"), module_context=module_data.get("parameters", {}))
     elif module_data and module_data.get("module") == "tasks":
         print("🛠️ [TasksAgent] Not implemented yet.")
         return {"error": "Tasks module not implemented yet."}
@@ -132,6 +134,7 @@ def process_voice_command(audio_path: str, chat_history: ChatSession = ChatSessi
 
     chat_history.pretty_print()
 
+    print(f"🤖 [Final Response] Action: {response}")
 
     # log chat history to file
     with open("logs/chat_history.log", "a", encoding="utf-8") as log_file:

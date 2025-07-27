@@ -4,125 +4,125 @@ from core.config import LLM_TEMPERATURE
 from core.utils.json_validator import validate_json_command
 from core.services.company_lookup import find_company_by_name
 from core.utils.chat import ChatSession
+from core.services.tools import tools
+from langchain.agents import initialize_agent, AgentType
+from langchain_ollama import OllamaLLM
+from core.config import LLM_MODEL_NAME, LLM_TEMPERATURE
 
 FUZZY_MATCH_THRESHOLD = 0.6
 
+llm = OllamaLLM(model=LLM_MODEL_NAME, temperature=LLM_TEMPERATURE)
+
+agent = initialize_agent(
+    tools=tools,
+    llm=llm,
+    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    verbose=True
+)
 
 def MeetingsAgent(
     command_text: str,
     chat_history: ChatSession,
     action: str = "",
-    parameters: list = None,
+    module_context: dict = None,
 ) -> dict:
-    """
-    Process the command text and generate a JSON response for meeting-related tasks.
-
-    Args:
-        command_text (str): The command text to process.
-        chat_history (list, optional): The chat history for context. Defaults to None.
-
-    Returns:
-        dict: A JSON response containing the action, parameters, and metadata.
-    """
-
     print(f"🤖 [MeetingsAgent] Command Text: {command_text}")
 
-    matched_company = ""
-    extra_context = ""
-    resolved_company = None
+    if not chat_history:
+        chat_history = ChatSession()
 
-
-    if parameters.get("related_module") == "company" and parameters.get("related_name"):
-        print(f"🔎 Matched company from command: {matched_company}")
-        matched_company = parameters.get("related_name")
-
-        if matched_company:
-            print(f"🔎 Trying to resolve company name: {matched_company}")
-            results = find_company_by_name(matched_company)
-            print(f"🔎 Found {len(results)} results for '{matched_company}'")
-            print(f"🔎 Results: {results}")
-            if results and results[0]["score"] > FUZZY_MATCH_THRESHOLD:
-                resolved_company = results[0]
-                print(f"✅ Resolved to: {resolved_company}")
-            else:
-                print("⚠️ Could not confidently resolve company name.")
-
-        if resolved_company:
-            extra_context += f'\nMatched company from CRM:\n- Name: {resolved_company["name"]}\n- ID: {resolved_company["id"]}\n'
-
-    # Inject the resolved company context into the chat history
-    if resolved_company:
-        chat_history.inject_context(
-            label="Company",
-            name=resolved_company["name"],
-            id=resolved_company["id"],
-        )
-
-    # Add user message to chat history
+    # Add user command and prompt to history
     chat_history.add_user(command_text)
 
-    # Define the prompt template for generating the JSON command
-    prompt_template = f"""
-You are an meetings agent your task is to schedule or retrieve meetings for user of CRM system.
-Given users command and conversation history, generate a JSON action according to the schema provided below.
+    # Prepare context string if module_context is provided
+    context_str = ""
+    if module_context:
+        context_items = []
+        for key, value in module_context.items():
+            context_items.append(f"{key}: {value}")
+        context_str = "CONTEXT:\n" + "\n".join(context_items) + "\n"
 
-Schema:
+        chat_history.set_module("meetings")
+        chat_history.set_action(action)
+
+    # Schema and prompt guidance
+    schema_prompt = f"""
+{context_str}
+You are a CRM meetings agent. Your job is to schedule or retrieve meetings.
+You can use tools like `find_company_by_name` or `get_user_agenda` if needed.
+Default meeting duration is 1 hour. Check user's agenda for conflicts.
+
+Your final output must follow this JSON schema:
+
 {{
     "action": "{action}",
     "module": "meetings",
     "parameters": {{
-        "name": "<meeting_name> [required]",
-        "related_to": "<related_to meeting with (company, contact, etc.) name from context> [required]",
-        "related_to_id": "<related_to_id related module ID from context> [required]",
-        "related_module": "<related_module companies, contacts, users, etc.> [required]",
-        "<param_name>": "<param_value>"
+        "name": "<meeting_name>",
+        "related_to": "<related_to name>",
+        "related_to_id": "<related_to_id>",
+        "related_module": "<companies, contacts, users>",
+        "...": "..."
     }},
     "metadata": {{
-        "date": "<date> [required]",
-        "time": "<time> [required]",
-        "duration": "<duration minutes if specified>",
-        "participants": "<participants if specified>",
-        "location": "<location if specified>",
+        "date": "<date>",
+        "time": "<time>",
+        "duration": "<minutes>",
+        "participants": "...",
+        "location": "..."
     }},
-    "message_to_user": "<message to user with confirmation or error message> [required]"
+    "message_to_user": "<clear message to user in Czech>"
 }}
 
-If any of the required fields are missing, please add clarification schema JSON with message to ask the user for more details and action like question, error, or confirmation.
-
-Clarification schema:
+If required data is missing, respond with:
 {{
-    ...
-    "message_to_user": "<clarification message to user>",
-    "action": "<action required like question, error, or confirmation>",
+    "action": "question",
+    "message_to_user": "<ask for missing info in Czech>"
 }}
 
-Please ensure the output is a valid JSON object with no extra text. If additional information or confirmation is needed,
-add clarification schema with message and action "question". 
-Always include message_to_user field with a clear message for the user in czech language, every action must be confirmed by user.
-    """
+Always use JSON format only. No comments or extra text.
+"""
+    chat_history.add_system(schema_prompt)
 
-    # Add schema as another system message to the chat history
-    chat_history.add_system(prompt_template)
-    
-    with open("logs/llm_response.log", "a", encoding="utf-8") as log_file:
-        log_file.write(f"MeetingsAgent\n")
-
-    # Generate JSON from the command text
-    json_response = query_llm(chat_history=chat_history, temperature=LLM_TEMPERATURE)
-    print(f"🤖 [LLM] Generated JSON Command: {json.dumps(json_response, indent=4)}")
-
-    validation = validate_json_command(json_response)
-    if not validation["is_valid"]:
-        print(
-            f"❌ [Validation] Errors: {validation.get('errors', 'Invalid JSON command generated.')}"
-        )
-
-    # Validate JSON output here
-    if "error" in json_response:
-        # Optionally, trigger a clarification/confirmation step
-        json_response = {
-            "action": "question",
-            "message_to_user": "Omlouvám, nepodařilo se mi vyhodnotit tento úkol. Můžete to prosím zopakovat?"
+    # Let the agent process the full instruction
+    langchain_messages = chat_history.to_langchain_messages()
+    try:
+        output_text = agent.invoke(langchain_messages)
+    except Exception as e:
+        print(f"❌ Agent failed: {e}")
+        return {
+            "action": "error",
+            "message_to_user": "Omlouvám se, došlo k chybě při zpracování požadavku. Můžete to prosím zkusit znovu?"
         }
 
-    return json_response
+    # Parse the output as JSON (LLM should return JSON as per your prompt)
+    try:
+        print(f"🤖 [MeetingsAgent] Raw Output: {output_text}")
+        # Use the .output property if present (LangChain agent returns a dict)
+        if isinstance(output_text, dict) and "output" in output_text:
+            cleaned = output_text["output"].strip()
+        else:
+            cleaned = str(output_text).strip()
+
+        print(f"🤖 [MeetingsAgent] Cleaned Output: {cleaned}")
+        result = json.loads(cleaned)
+    except Exception as e:
+        print(f"❌ JSON parse error: {e}")
+        return {
+            "action": "question",
+            "message_to_user": "Omlouvám se, došlo k chybě při zpracování požadavku. Můžete to prosím zkusit znovu?"
+        }
+
+    # Optional: Validate JSON schema
+    validation = validate_json_command(result)
+    if not validation["is_valid"]:
+        print(f"❌ Validation error: {validation['errors']}")
+        return {
+            "action": "error",
+            "message_to_user": "Omlouvám se, došlo k chybě při zpracování požadavku. Můžete prosím specifikovat požadavek přesněji?"
+        }
+    
+    # Add the response to chat history
+    chat_history.add_llm_response(result)
+
+    return result

@@ -1,6 +1,7 @@
 import datetime
 import textwrap
 import json
+from langchain.schema.messages import HumanMessage, AIMessage, SystemMessage
 from core.config import CRM_SYSTEM, CRM_INSTANCE
 
 class ChatSession:
@@ -149,6 +150,7 @@ class ChatSession:
         for msg in self.messages:
             if msg["role"] == "assistant":
                 content = msg["content"]
+                print(f" --> get_module_data --> Checking message: {content}")
                 if "ModuleDataExtractor - user request context:" in content:
                     lines = content.split("\n")
                     module = None
@@ -161,6 +163,21 @@ class ChatSession:
                     if module and action:
                         return {"module": module, "action": action}
         return {}
+    
+    def to_langchain_messages(self):
+        langchain_messages = []
+        for msg in self.get_messages():
+            role = msg["role"]
+            content = msg["content"]
+
+            if role == "user":
+                langchain_messages.append(HumanMessage(content=content))
+            elif role == "assistant":
+                langchain_messages.append(AIMessage(content=content))
+            elif role == "system":
+                langchain_messages.append(SystemMessage(content=content))
+
+        return langchain_messages
 
     def pretty_print(self, return_as_string=False, indent=2):
         COLORS = {
