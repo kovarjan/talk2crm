@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import tempfile
 import shutil
 import os
-from core.pipelines.command_pipeline import process_voice_command
+from core.pipelines.command_pipeline import run_command_pipeline
 from core.utils.chat import ChatSession
 from pydantic import BaseModel
 
@@ -36,7 +36,7 @@ def process_audio_and_generate_crm_call(file_path: str) -> dict:
     chat_history = ChatSession(True)
     
     # Process the voice command
-    response = process_voice_command(audio_path, chat_history)
+    response = run_command_pipeline(audio_path, None, chat_history)
 
     # save recoding to file data/recordings
     recordings_dir = "data/recordings"
@@ -96,7 +96,7 @@ async def process_input(payload: InputPayload):
     print("Processing input text:", input_text)
 
     # Process the voice command
-    response = process_voice_command(None, chat_history, input_text)
+    response = run_command_pipeline(None, input_text, chat_history)
 
     return JSONResponse(content={
         "success": True,

@@ -51,9 +51,9 @@ class ChatSession:
                 raise ValueError("Each message must be a dictionary with 'role' and 'content'.")
 
     def add_user(self, content: str):
-        # check if ist's composed message (separated by comma) and if so, split it and add only the last part
-        if ", " in content:
-            content = content.split(", ")[-1].strip()
+        # check if ist's composed message (separated by pipe) and if so, split it and add only the last part
+        if "| " in content:
+            content = content.split("| ")[-1].strip()
         self.messages.append({"role": "user", "content": content})
 
     def add_system(self, content: str):
@@ -81,6 +81,12 @@ class ChatSession:
         else:
             raise ValueError("Unsupported format: choose 'ollama' or 'raw'")
 
+    def prepend_system(self, content: str):
+        """
+        Prepend a system message to the chat session.
+        """
+        self.messages.insert(0, {"role": "system", "content": content})
+
     def compose_following_user_message(self, user_message: str):
         """
         Compose following user message, join all previous user messages into one string separated by comma.
@@ -90,8 +96,8 @@ class ChatSession:
             return user_message
         
         # Join all previous user messages into one string
-        previous_user_messages = ", ".join(msg["content"] for msg in user_messages)
-        return f"{previous_user_messages}, {user_message}" if previous_user_messages else user_message
+        previous_user_messages = " | ".join(msg["content"] for msg in user_messages)
+        return f"{previous_user_messages} | {user_message}" if previous_user_messages else user_message
 
     def get_messages(self):
         return self.messages

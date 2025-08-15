@@ -1,15 +1,15 @@
 
-from core.pipelines.command_pipeline import process_voice_command
+from core.pipelines.command_pipeline import run_command_pipeline
 
-def test_process_voice_command():
+def test_run_command_pipeline():
     # Sample audio path (replace with actual audio file for real testing)
     audio_path = "assets/audio/untitled_exmaple2.mp3"
     
     # Process the voice command
-    response = process_voice_command(audio_path)
+    response = run_command_pipeline(audio_path)
     
     # Print the response for debugging
-    print("Response from process_voice_command:")
+    print("Response from run_command_pipeline:")
     print(response)
     
     # Validate the response structure

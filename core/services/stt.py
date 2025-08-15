@@ -16,10 +16,12 @@ def convert_mp3_to_wav(mp3_path: str, wav_path: str):
     audio.export(wav_path, format="wav")
 
 # Transcription function (uses preloaded model)
-def transcribe_audio(audio_path: str, correct: bool = False) -> str:
+def transcribe_audio(audio_path: str, correct: bool = False, language: str = "cs-CZ") -> str:
     print("🛠️ > Transcribing audio:", audio_path)
 
-    result = whisper_model.transcribe(audio_path)
+    language = language.split("-")[0]  # Use only the language code (e.g., "cs" from "cs-CZ")
+
+    result = whisper_model.transcribe(audio_path, language=language)
     text = result['text']
     print("🛠️ > Transcription result:", text)
 
