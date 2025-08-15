@@ -21,8 +21,6 @@ DB_CONFIG = {
     "database": "coripo_localhost"
 }
 
-SQL_QUERY = "SELECT id, name, billing_address_city FROM accounts WHERE deleted = 0 AND name IS NOT NULL ORDER BY name ASC;"
-
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384  # for MiniLM
 
@@ -30,6 +28,22 @@ SAVE_DIR = "data/embeddings"
 INDEX_FILE = os.path.join(SAVE_DIR, "company_faiss.index")
 METADATA_FILE = os.path.join(SAVE_DIR, "company_index.pkl")
 
+SQL_QUERY = """
+SELECT
+    id,
+    name,
+    industry,
+    account_type,
+    annual_revenue,
+    employees,
+    website,
+    billing_address_city,
+    billing_address_country,
+    description
+FROM accounts
+WHERE deleted = 0 AND name IS NOT NULL
+ORDER BY name ASC;
+"""
 
 def fetch_companies():
     conn = mysql.connector.connect(**DB_CONFIG)
@@ -38,26 +52,56 @@ def fetch_companies():
     rows = cursor.fetchall()
     conn.close()
 
-    company_ids = [str(row[0]) for row in rows]
-    company_names = [row[1] for row in rows]
-    billing_address_citys = [row[2] for row in rows]
-    # Combine name and city for better context
-    return company_ids, company_names, billing_address_citys
+    # Unpack columns
+    (
+        company_ids,
+        company_names,
+        industries,
+        account_types,
+        annual_revenues,
+        employees,
+        websites,
+        billing_address_citys,
+        billing_address_countries,
+        descriptions
+    ) = zip(*rows) if rows else ([], [], [], [], [], [], [], [], [], [])
 
+    return {
+        "ids": [str(x) for x in company_ids],
+        "names": list(company_names),
+        "industries": list(industries),
+        "account_types": list(account_types),
+        "annual_revenues": list(annual_revenues),
+        "employees": list(employees),
+        "websites": list(websites),
+        "cities": list(billing_address_citys),
+        "countries": list(billing_address_countries),
+        "descriptions": list(descriptions)
+    }
 
 def build_index():
     print("🔍 Loading company data from database...")
-    company_ids, company_names, billing_address_city = fetch_companies()
-    print(f"✅ Retrieved {len(company_names)} companies.")
+    data = fetch_companies()
+    print(f"✅ Retrieved {len(data['names'])} companies.")
 
     print("🧠 Loading embedding model:", EMBEDDING_MODEL_NAME)
     model = SentenceTransformer(EMBEDDING_MODEL_NAME, cache_folder="cache/models/sentence_transformers")
 
-    print("🔎 Encoding company names...")
-    # Combine company name and city for richer context
+    print("🔎 Encoding company profiles...")
+    # Combine selected fields for richer context
     texts = [
-        f"{name}, {city}" if city else name
-        for name, city in zip(company_names, billing_address_city)
+        ", ".join([
+            str(data["names"][i] or ""),
+            str(data["industries"][i] or ""),
+            str(data["account_types"][i] or ""),
+            str(data["annual_revenues"][i] or ""),
+            str(data["employees"][i] or ""),
+            str(data["websites"][i] or ""),
+            str(data["cities"][i] or ""),
+            str(data["countries"][i] or ""),
+            str(data["descriptions"][i] or "")
+        ]).strip(", ")
+        for i in range(len(data["names"]))
     ]
 
     print(f"📏 Encoding {len(texts)} texts with {EMBEDDING_DIM}-dimensional embeddings...")
@@ -71,12 +115,11 @@ def build_index():
     print("💾 Saving index and metadata...")
     faiss.write_index(index, INDEX_FILE)
     with open(METADATA_FILE, "wb") as f:
-        pickle.dump({"names": company_names, "ids": company_ids, "cities": billing_address_city}, f)
+        pickle.dump(data, f)
 
     print("✅ Done! Index saved to:")
     print(f"  -> {INDEX_FILE}")
     print(f"  -> {METADATA_FILE}")
-
 
 if __name__ == "__main__":
     build_index()

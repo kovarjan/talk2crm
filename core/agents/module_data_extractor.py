@@ -1,67 +1,100 @@
+# core/agents/module_extractor.py
+import json
 from core.services.llm import query_llm
 from core.utils.chat import ChatSession
+from core.agents.schemas import ModuleExtraction
+# from .lexicon import CONTACT_NAMES, COMPANY_NAMES  # preload at app start
+# from rapidfuzz import process, fuzz
 
 
-def ModuleDataExtractor(prompt: str, chat_history: ChatSession = None) -> dict:
-    """
-    This function takes a prompt and returns the module data extracted from it.
-    It uses a LLM to process the prompt and extract the module and action.
-    """
+INSTRUCTION = """
+You are an extractor. Return ONLY valid JSON matching this schema:
 
+{
+"module": "meetings|tasks|notes|calls",
+"action": "create|update|delete|get",
+"parameters": {
+    "related_module": "company|contact|user|task|note|call|meeting|invoice" | null,
+    "related_name": string | null
+}
+}
+
+Rules:
+- Use ONLY the allowed values above (lowercase).
+- If uncertain, set fields to null.
+- Do NOT include any extra fields or text outside JSON.
+- Do NOT include "message_to_user".
+
+Examples:
+User: "Vytvoř schůzku s Janem Piknou z firmy INVEX na pátek 10:45."
+Return:
+{"module":"meetings","action":"create","parameters":{"related_module":"contact","related_name":"Jan Pikna"}}
+
+User: "Zruš úkol u firmy IMOS."
+Return:
+{"module":"tasks","action":"delete","parameters":{"related_module":"company","related_name":"IMOS"}}
+"""
+
+
+# def _snap(name, pool):
+#     if not name: return name
+#     m = process.extractOne(name, pool, scorer=fuzz.WRatio, score_cutoff=87)
+#     return m[0] if m else name
+
+def ModuleDataExtractor(prompt: str, chat_history: ChatSession = None) -> dict | None:
     availableModules = ["meetings", "tasks", "notes", "calls"]
-    availableActions = ["create", "update", "delete", "get"]
-    availableSubjects = [
-        "company",
-        "contact",
-        "user",
-        "task",
-        "note",
-        "call",
-        "meeting",
-        "invoice",
-    ]
 
-    # Use query_llm to call the LLM for structured output
-    instruction = (
-        "Determine which module to call based on the user's request.\n"
-        f"Available modules: {', '.join(availableModules)}.\n"
-        "And determine the action to take.\n"
-        f"Available actions: {', '.join(availableActions)}.\n"
-        "The subject of the request should be name of a record in following related modules: "
-        f"{', '.join(availableSubjects)}.\n"
-        "Use this JSON format strictly:\n"
-        "{\n"
-        '  "module": "<module>",\n'
-        '  "action": "<action>"\n'
-        '  "parameters": {\n'
-        '    "related_module": "<related_module>",\n'
-        '    "related_name": "<related_module>",\n'
-        "  }\n"
-        "} \n"
-        "If the request is not clear, return empty structure.\n"
-        "Respond ONLY with specified JSON. Do NOT return property message_to_user.\n"
-    )
-    
-    with open("logs/llm_response.log", "a", encoding="utf-8") as log_file:
-        log_file.write(f"ModuleDataExtractor\n")
+    # Build system prompt with light hints
+    def heuristics(p):
+        p = p.lower()
+        mh = "meetings" if "schůzk" in p or "meeting" in p else None
+        if "úkol" in p: mh = mh or "tasks"
+        if "poznámk" in p: mh = mh or "notes"
+        if any(w in p for w in ["hovor", "telefon", "call"]): mh = mh or "calls"
 
-    history = None
+        if any(w in p for w in ["vytvoř", "vytvor", "naplánuj", "založ"]): ah = "create"
+        elif any(w in p for w in ["uprav", "změň", "přesuň"]): ah = "update"
+        elif any(w in p for w in ["smaž", "zruš"]): ah = "delete"
+        elif any(w in p for w in ["ukaž", "získej", "najdi", "vypiš"]): ah = "get"
+        else: ah = None
+        return mh, ah
 
-    if not chat_history:
-        # Initialize a new chat session if no history is provided
-        history = ChatSession(system_prompt=instruction)
-    else:
-        history = ChatSession(system_prompt=instruction)
+    mh, ah = heuristics(prompt)
+    system_prompt = INSTRUCTION + f"\nHINTS: module={mh or 'unknown'}, action={ah or 'unknown'}\n"
+
+    print(f"🤖 [ModuleDataExtractor] System Prompt: {system_prompt}")
+
+    history = ChatSession(system_prompt=system_prompt)
+    if chat_history:
         history.load_history(chat_history.get_user_assistant_messages())
 
-    response = query_llm(history, prompt, 0.4)
+    raw = query_llm(history, prompt, temperature=0)
 
-    history.pretty_print(False, 8)
+    print(f"🤖 [ModuleDataExtractor] Raw Output: {raw}")
 
-    # Check if the response contains the required fields
-    if "module" not in response or "action" not in response:
-        print("❗ [ModuleDataExtractor] Response does not contain required fields.")
-        print("❗ Response:", response)
+    # extract json
+    # start, end = raw.find("{"), raw.rfind("}")
+    # data = json.loads(raw[start:end+1]) if start!=-1 and end!=-1 else {}
+    data = raw
+
+    try:
+        parsed = ModuleExtraction(**data)
+    except Exception:
+        # one retry with stricter reminder
+        retry = query_llm(history, f"{system_prompt}\nReturn ONLY valid JSON for: {prompt}", temperature=0)
+        s2, e2 = retry.find("{"), retry.rfind("}")
+        data = json.loads(retry[s2:e2+1]) if s2!=-1 and e2!=-1 else {}
+        parsed = ModuleExtraction(**data)
+
+    # snap related_name to known entities when appropriate
+    # if parsed.parameters and parsed.parameters.related_name:
+    #     if parsed.parameters.related_module == "contact":
+    #         parsed.parameters.related_name = _snap(parsed.parameters.related_name, CONTACT_NAMES)
+    #     elif parsed.parameters.related_module == "company":
+    #         parsed.parameters.related_name = _snap(parsed.parameters.related_name, COMPANY_NAMES)
+
+    # final guardrails: null-out unsupported values
+    if parsed.module not in availableModules or not parsed.action:
         return None
-    
-    return response
+
+    return json.loads(parsed.json())
