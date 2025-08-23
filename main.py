@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from core.pipelines.command_pipeline import run_command_pipeline
 from core.utils.chat import ChatSession
+from fastapi import Header
 from core.services.chat_store import (
     make_redis, create_chat, chat_exists, get_history, set_history, append_messages, delete_chat
 )
@@ -45,6 +46,7 @@ class ProcessAudioResponse(BaseModel):
     success: bool
     response: Dict[str, Any]
     chat_id: Optional[str] = None
+    chat_history: Optional[List[Dict[str, Any]]] = None
 
 class ProcessInputResponse(BaseModel):
     success: bool
@@ -91,7 +93,16 @@ def read_root():
 # ---------------------- Audio processing (opt) -----------------------
 
 @app.post("/process-audio/", response_model=ProcessAudioResponse)
-async def process_audio(file: UploadFile = File(...), chat_id: Optional[str] = None):
+async def process_audio(
+    file: UploadFile = File(...), 
+    chat_id: Optional[str] = None, 
+    x_chat_id: Optional[str] = Header(None)
+):
+    # Prefer chat_id from header if provided
+    chat_id = x_chat_id or chat_id
+
+    print(f"Received audio file: {file.filename}, chat_id: {chat_id}")
+
     # persist upload to tmp
     with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as temp:
         shutil.copyfileobj(file.file, temp)
@@ -101,13 +112,21 @@ async def process_audio(file: UploadFile = File(...), chat_id: Optional[str] = N
         r = make_redis()
         # create or load chat
         if chat_id and await chat_exists(chat_id, r):
+            print("LOADING existing chat history in Redis...")
             history_list = await get_history(chat_id, r)
         else:
+            print("CREATING new chat...")
             chat_id = await create_chat(r)
             history_list = []
 
         chat_history = ChatSession(True)
-        chat_history.load_history(history_list)
+
+        if history_list:
+            chat_history.reset()
+            chat_history.load_history(history_list)
+            # TODO: add composing user prompts from history like in text input
+            # input_text = chat_history.compose_following_user_message(input_text)
+
 
         # pipeline expects (voice_path, raw_text, chat_history)
         response = run_command_pipeline(temp_path, None, chat_history)
@@ -115,7 +134,12 @@ async def process_audio(file: UploadFile = File(...), chat_id: Optional[str] = N
         # save back
         await set_history(chat_id, chat_history.get_messages(), r)
 
-        return {"success": True, "response": response, "chat_id": chat_id}
+        return {
+            "success": True,
+            "response": response,
+            "chat_id": chat_id,
+            "chat_history": chat_history.get_messages()  # Debug only
+        }
     finally:
         try:
             os.remove(temp_path)
