@@ -1,6 +1,7 @@
 import base64, hashlib, hmac, json
 from datetime import datetime, timezone
 import requests, uuid
+from core.clients.client import Client
 
 # ---- HMAC
 def sign(secret: bytes, ts: str, nonce: str, body: bytes) -> str:
@@ -8,10 +9,15 @@ def sign(secret: bytes, ts: str, nonce: str, body: bytes) -> str:
     return base64.b64encode(hmac.new(secret, to_sign, hashlib.sha256).digest()).decode()
 
 # ---- HTTP send
-def send(cmd: dict, base_url: str, key_id: str, secret: str, path="/ai/v1/command"):
+# def send(cmd: dict, base_url: str, key_id: str, secret: str, path="/ai/v1/command"):
+def send(cmd: dict, client: Client, path="") -> dict:
     # 1) Validate payload shape early
     if not isinstance(cmd, dict) or "action" not in cmd['command'] or "module" not in cmd['command']:
         raise ValueError("cmd must be a dict with top-level 'action' and 'module' keys")
+
+    base_url = client.get_base_url()
+    key_id = client.get_api_key_id()
+    secret = client.get_api_key()
 
     body = json.dumps(cmd, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
@@ -29,7 +35,7 @@ def send(cmd: dict, base_url: str, key_id: str, secret: str, path="/ai/v1/comman
         "X-Command-Schema": "crm.v1",
     }
 
-    url = base_url.rstrip("/") + path  # e.g. "/ai/v1/command" 
+    url = base_url + path
     r = requests.post(url, headers=headers, data=body, timeout=15)
 
     # Helpful debugging if things go sideways
@@ -52,22 +58,20 @@ def send(cmd: dict, base_url: str, key_id: str, secret: str, path="/ai/v1/comman
 
 # ---- Public function used by your FastAPI code
 def call_crm_api(command: dict) -> dict:
-    CRM_API_URL = "https://rest-ai.coripo.app/"  # or your custom URL
-    CRM_API_KEY_ID = "acmark-ai"
-    CRM_API_SECRET = "VYNZrsOfdVB390E+M41dxy5fQ7RjKiaPKtWyrFUrR0MZOvtttrdb0jd0Kk/wGJrC"
-
+    client = Client("ai")
+    
     # IMPORTANT: the gateway expects the LLM command at top-level + user
     # If `command` already contains action/module/etc, just add user here.
     enriched = {
         "command": dict(command)
-    }  # shallow copy
+    }
     enriched.setdefault("user", {
         "id": "28",  # Sugar Users.id GUID
         "username": "jkovar"
     })
 
     # Choose the correct path based on your route name:
-    path = "/ai/v1/command"   # or "/ai/v1/command" if your method is singular
-    return send(enriched, CRM_API_URL, CRM_API_KEY_ID, CRM_API_SECRET, path=path)
+    path = "command"   # or "/ai/v1/command" if your method is singular
+    return send(enriched, client, path=path)
 
 
