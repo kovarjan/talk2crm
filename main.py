@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from core.pipelines.command_pipeline import run_command_pipeline
 from core.utils.chat import ChatSession
 from fastapi import Header
-from core.services.crm_api import call_crm_api
+from core.interfaces.crm_api import call_crm_api
 from core.services.chat_store import (
     make_redis, create_chat, chat_exists, get_history, set_history, append_messages, delete_chat
 )
@@ -192,6 +192,8 @@ async def process_input(payload: ProcessInputPayload):
 
     # Persist history
     await set_history(chat_id, chat_history.get_messages(), r)
+
+    crm_response = None
 
     # call to coripo API 
     if response.get("action") == "create":

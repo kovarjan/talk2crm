@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import json
-import os
+import json, os
 from dataclasses import dataclass
-
-# ---------------- Config types ----------------
+from typing import Dict
 
 @dataclass(frozen=True)
 class ClientConfig:
@@ -12,31 +10,13 @@ class ClientConfig:
     api_key_id: str
     api_key: str
     api_url: str
-    api_version: str
-
-
-# ---------------- Client manager ----------------
+    api_version: str = "v1"  # default if not in JSON
 
 class Client:
-    """
-    Connection manager for CRM AI Gateways defined in clients_config.json.
-
-    Example:
-        mgr = Client("clients_config.json")
-        cmd = {
-            "actor": {"id": "c7b6e1a2-1b23-44a0-9a31-0ad8f9c5d001", "username": "jkovar"},
-            "action": "create",
-            "module": "meetings",
-            "parameters": {...},
-            "metadata": {...}
-        }
-        resp = mgr.send_command("ai", cmd)  # returns JSON dict
-    """
-
     api_path = "/ai/"
 
-    def __init__(self, client_name: str, config_path: str = "clients_config.json") -> None:
-        self._configs: dict[str, ClientConfig] = {}
+    def __init__(self, client_name: str, config_path: str = "core/clients/clients_config.json") -> None:
+        self._configs: Dict[str, ClientConfig] = {}
         self._load_config(config_path)
         self.client_name = client_name
         self._config = self.get_client_config(client_name)
@@ -46,19 +26,17 @@ class Client:
         if not cfg:
             raise ValueError(f"Client config '{name}' not found")
         return cfg
-    
+
     def get_base_url(self) -> str:
         # e.g. "https://rest-ai.coripo.app/ai/v1/"
-        return self._config.api_url.rstrip("/") + self.api_path + self._config.api_version + "/"
+        base = self._config.api_url.rstrip("/")
+        return f"{base}{self.api_path}{self._config.api_version}/"
 
     def get_api_key_id(self) -> str:
         return self._config.api_key_id
 
     def get_api_key(self) -> str:
         return self._config.api_key
-    
-
-    # ---------- Internals ----------
 
     def _load_config(self, path: str) -> None:
         if not os.path.exists(path):
@@ -75,6 +53,7 @@ class Client:
             api_key_id = item.get("api_key_id")
             api_key = item.get("api_key")
             api_url = item.get("api_url")
+            api_version = item.get("api_version", "v1")
 
             if not all([name, api_key_id, api_key, api_url]):
                 raise ValueError(f"Incomplete client config entry: {item}")
@@ -84,8 +63,6 @@ class Client:
                 api_key_id=api_key_id,
                 api_key=api_key,
                 api_url=api_url,
-                path=item.get("path", "/ai/v1/commands"),
-                timeout=float(item.get("timeout", 15.0)),
+                api_version=api_version,
             )
             self._configs[name] = cfg
-

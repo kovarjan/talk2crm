@@ -58,7 +58,7 @@ def send(cmd: dict, client: Client, path="") -> dict:
 
 # ---- Public function used by your FastAPI code
 def call_crm_api(command: dict) -> dict:
-    client = Client("ai")
+    client = Client(client_name="ai")
     
     # IMPORTANT: the gateway expects the LLM command at top-level + user
     # If `command` already contains action/module/etc, just add user here.

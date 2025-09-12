@@ -207,6 +207,7 @@ def run_react_agent(chat_history: ChatSession) -> Dict[str, Any]:
         messages = chat_history.to_langchain_messages()
         output = _react_agent().invoke(messages)
     except Exception as e:
+        print(f"❗ Agent execution error: {str(e)}")
         return {
             "action": "error",
             "message_to_user": "Omlouvám se, došlo k chybě při zpracování požadavku. Zkuste to prosím znovu."
@@ -215,6 +216,8 @@ def run_react_agent(chat_history: ChatSession) -> Dict[str, Any]:
     try:
         result = parse_agent_output(output)
     except Exception:
+        print("❗ Failed to parse agent output.")
+        print(f"Raw output: {output}")
         return {
             "action": "question",
             "message_to_user": "Omlouvám se, nerozumím přesně zadání. Můžete upřesnit, koho a kdy mám naplánovat?"
