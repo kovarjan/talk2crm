@@ -184,3 +184,9 @@ cache/
 data/recordings/
 data/embeddings/
 temp.wav
+
+var/
+logs/
+*.faiss
+*.pkl
+*.ndjson.gz

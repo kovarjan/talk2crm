@@ -4,20 +4,24 @@ from core.services.llm import query_llm
 from core.utils.chat import ChatSession
 from core.agents.schemas import ModuleExtraction
 
-INSTRUCTION = """
+availableModules = {"meetings", "tasks"}
+# availableModules = {"meetings", "tasks", "notes", "calls"}
+
+INSTRUCTION = f"""
 You are an extractor. Return ONLY valid JSON matching this schema:
 
-{
-"module": "meetings|tasks|notes|calls" | null,
+{{
+"module": "{'|'.join(availableModules)}" | null,
 "action": "create|update|delete|get" | null,
-"parameters": {
+"parameters": {{
     "related_module": "company|contact|user|task|note|call|meeting|invoice" | null,
     "related_name": string | null
-}
-}
+}}
+}}
 
 Rules:
 - Use ONLY the allowed values above (lowercase).
+- For "module", use one of: {'|'.join(availableModules)} or null.
 - If uncertain, set fields to null.
 - Do NOT include any extra fields or text outside JSON.
 - Do NOT include "message_to_user".
@@ -43,9 +47,14 @@ def ModuleDataExtractor(prompt: str, chat_history: ChatSession = None) -> dict |
     mh, ah = _heuristics(prompt)
     system_prompt = INSTRUCTION + f"\\nHINTS: module={mh or 'unknown'}, action={ah or 'unknown'}\\n"
 
-    # Single-shot: no prior history is necessary for extraction
-    history = ChatSession(system_prompt=system_prompt)
+    print(f"🛠️  ModuleDataExtractor prompt: {system_prompt}")
 
+    # Single-shot: no prior history is necessary for extraction
+    history = ChatSession(system_prompt=system_prompt, init=False)
+
+    print("🛠️  ModuleDataExtractor querying LLM...")
+    history.pretty_print()
+    
     raw = query_llm(history, prompt, temperature=0, add_history=False, returnJson=True)
 
     print(f"🛠️  ModuleDataExtractor raw: {raw}")

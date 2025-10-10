@@ -58,7 +58,9 @@ def send(cmd: dict, client: Client, path="") -> dict:
 
 # ---- Public function used by your FastAPI code
 def call_crm_api(command: dict) -> dict:
-    client = Client(client_name="ai")
+    # TODO: cache the client per (client_name) if you have multiple clients
+    # For now we hardcode "ai-local" as the client name
+    client = Client(client_name="ai-local")
     
     # IMPORTANT: the gateway expects the LLM command at top-level + user
     # If `command` already contains action/module/etc, just add user here.
@@ -75,3 +77,12 @@ def call_crm_api(command: dict) -> dict:
     return send(enriched, client, path=path)
 
 
+def process_crm_response(response: dict) -> str:
+    if "error" in response:
+        return f"Error from CRM API: {response['error']}"
+    if response.get("status") and response.get("code") == 200 and "data" in response:
+        result = response["data"].get("result", {})
+        name = result.get("name", "unknown")
+        id = result.get("id", "unknown")
+        return f"CREATED: meeting\nname: {name}\nid: {id}"
+    return f"CRM API response: {response}"

@@ -20,6 +20,7 @@ class ChatSession:
                 f"Current date and time: {current_datetime} and today is {current_day}\n "
                 "If any key information is missing, respond with a question to clarify.\n "
                 "ALWAYS respond in a single valid JSON format with correct schema! No json comments, include your points in property message_to_user\n"
+                "Absolutely no text or commentary between the last Observation and \"Final Answer:\". If you include any other text, the run fails.\n"
             )
         elif system_prompt:
             self.add_system(system_prompt)

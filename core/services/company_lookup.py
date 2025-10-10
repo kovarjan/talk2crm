@@ -1,31 +1,29 @@
-from sentence_transformers import SentenceTransformer
-import numpy as np, faiss, pickle
+# core/services/company_lookup.py
+from typing import List, Dict, Any
+from core.services.vector_search import VectorSearcher
 
 class CompanyLookupService:
-    def __init__(self):
-        with open("data/embeddings/company_index.pkl", "rb") as f:
-            self.data = pickle.load(f)
-        self.names = self.data["names"]
-        self.ids = self.data["ids"]
-        self.cities = self.data.get("cities", [""] * len(self.names))  # fallback if not present
-        self.model = SentenceTransformer("all-MiniLM-L6-v2", cache_folder="cache/models/sentence_transformers")
-        self.index = faiss.read_index("data/embeddings/company_faiss.index")
+    def __init__(self, tenant: str = "ai-local", vector_dir: str = "var/vector"):
+        self.searcher = VectorSearcher(tenant, "accounts", vector_dir)
 
-    def search(self, query: str, top_k=3):
-        emb = self.model.encode([query], normalize_embeddings=True)
-        D, I = self.index.search(np.array(emb), top_k)
-        results = [
-            {
-                "name": self.names[i],
-                "id": self.ids[i],
-                "city": self.cities[i],
-                "score": float(D[0][j])
-            }
-            for j, i in enumerate(I[0])
-        ]
+    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        hits = self.searcher.search(query, top_k=top_k)
+        results: List[Dict[str, Any]] = []
+        for h in hits:
+            # expected metadata shape from your ingestor/embedder:
+            # { "id": "...", "fields": {...}, "relationships": {...}? , "deleted": false, ... }
+            fields = h.get("fields", {})
+            name  = fields.get("name") or h.get("name") or ""
+            city  = fields.get("billing_address_city") or ""
+            results.append({
+                "id": h.get("id"),
+                "name": name,
+                "city": city,
+                "score": h.get("_score", 0.0),
+                "raw": h,  # keep full payload for downstream use
+            })
         return results
 
-company_lookup_service = CompanyLookupService()
-
-def find_company_by_name(name_or_city):
-    return company_lookup_service.search(name_or_city)
+# convenience function
+def find_company_by_name_or_city(query: str, tenant: str = "ai-local", top_k: int = 5):
+    return CompanyLookupService(tenant).search(query, top_k=top_k)

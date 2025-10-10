@@ -3,6 +3,9 @@ from __future__ import annotations
 import json, os
 from dataclasses import dataclass
 from typing import Dict
+import json, uuid, base64, hashlib, hmac
+from datetime import datetime, timezone
+import requests
 
 @dataclass(frozen=True)
 class ClientConfig:
@@ -66,3 +69,31 @@ class Client:
                 api_version=api_version,
             )
             self._configs[name] = cfg
+
+    def _sign(self, secret: str, ts: str, nonce: str, body: bytes) -> str:
+        base = f"{ts}|{nonce}|".encode("utf-8") + body
+        mac = hmac.new(secret.encode("utf-8"), base, hashlib.sha256).digest()
+        import base64 as b64
+        return b64.b64encode(mac).decode("ascii")
+
+    def get(self, path: str, params: dict | None = None) -> dict:
+        """HMAC-signed GET for export endpoints."""
+        cfg = self._config
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        nonce = str(uuid.uuid4())
+        body = b""  # GET has empty body but we still sign it
+        sig = self._sign(cfg.api_key, ts, nonce, body)
+
+        headers = {
+            "Authorization": f"HMAC keyId={cfg.api_key_id}, signature={sig}",
+            "X-Timestamp": ts,
+            "X-Nonce": nonce,
+            "X-Request-Id": str(uuid.uuid4()),
+            "Accept": "application/json",
+        }
+        base = cfg.api_url.rstrip("/")
+        url = base + (path if path.startswith("/") else "/" + path)
+
+        r = requests.get(url, headers=headers, params=params or {}, timeout=15)
+        r.raise_for_status()
+        return r.json()

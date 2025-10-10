@@ -1,4 +1,6 @@
 """
+NOTE: Deprecated - replaced by from core.ingestion.ingestor import Ingestor and from core.embedding.embedder import Embedder
+
 Load company names & IDs from your MySQL CRM
 
 Create embeddings (e.g., using SentenceTransformers)

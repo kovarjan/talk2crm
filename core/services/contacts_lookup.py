@@ -1,42 +1,33 @@
-from sentence_transformers import SentenceTransformer
-import numpy as np, faiss, pickle
+# core/services/contacts_lookup.py
+from typing import List, Dict, Any
+from core.services.vector_search import VectorSearcher
 
 class ContactsLookupService:
-    def __init__(self):
-        with open("data/embeddings/contacts_index.pkl", "rb") as f:
-            self.data = pickle.load(f)
-        # Use keys from build_contacts_index.py
-        first_names = self.data["first_names"]
-        last_names = self.data["last_names"]
-        account_names = self.data["account_names"]
-        self.names = [
-            f"{first} {last}, {account}" if account else f"{first} {last}"
-            for first, last, account in zip(first_names, last_names, account_names)
-        ]
-        self.ids = self.data["contact_ids"]
-        # No emails/phones in index, fallback to empty
-        self.emails = [""] * len(self.names)
-        self.phones = [""] * len(self.names)
-        self.model = SentenceTransformer("all-MiniLM-L6-v2", cache_folder="cache/models/sentence_transformers")
-        self.index = faiss.read_index("data/embeddings/contacts_faiss.index")
+    def __init__(self, tenant: str = "ai-local", vector_dir: str = "var/vector"):
+        self.searcher = VectorSearcher(tenant, "contacts", vector_dir)
 
-    def search(self, query: str, top_k=3):
-        emb = self.model.encode([query], normalize_embeddings=True)
-        D, I = self.index.search(np.array(emb), top_k)
-        results = [
-            {
-                "name": self.names[i],
-                "id": self.ids[i],
-                "email": self.emails[i],
-                "phone": self.phones[i],
-                "score": float(D[0][j])
-            }
-            for j, i in enumerate(I[0])
-        ]
+    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        hits = self.searcher.search(query, top_k=top_k)
+        results: List[Dict[str, Any]] = []
+        for h in hits:
+            f = h.get("fields", {})
+            first = f.get("first_name") or ""
+            last  = f.get("last_name") or ""
+            display = f"{first} {last}".strip()
+            # if your metadata includes account name (either via enrichment or expand), surface it
+            acct_name = f.get("account_name") or ""
+            if acct_name:
+                display = f"{display}, {acct_name}" if display else acct_name
+            results.append({
+                "id": h.get("id"),
+                "name": display,
+                "email": f.get("email1") or "",
+                "phone": f.get("phone_mobile") or f.get("phone_work") or "",
+                "account_id": f.get("account_id") or h.get("relationships", {}).get("account"),
+                "score": h.get("_score", 0.0),
+                "raw": h,
+            })
         return results
 
-contacts_lookup_service = ContactsLookupService()
-
-def find_contact_by_name_or_email(query):
-    print(f"🤖 [ContactsLookupService] Searching for contact: {query}")
-    return contacts_lookup_service.search(query)
+def find_contact_by_query(query: str, tenant: str = "ai-local", top_k: int = 5):
+    return ContactsLookupService(tenant).search(query, top_k=top_k)

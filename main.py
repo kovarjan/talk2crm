@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from core.pipelines.command_pipeline import run_command_pipeline
 from core.utils.chat import ChatSession
 from fastapi import Header
-from core.interfaces.crm_api import call_crm_api
+from core.adapters.crm_api import (call_crm_api, process_crm_response)
 from core.services.chat_store import (
     make_redis, create_chat, chat_exists, get_history, set_history, append_messages, delete_chat
 )
@@ -190,19 +190,28 @@ async def process_input(payload: ProcessInputPayload):
     # Run pipeline
     response = run_command_pipeline(None, input_text, chat_history)
 
-    # Persist history
-    await set_history(chat_id, chat_history.get_messages(), r)
 
     crm_response = None
 
     # call to coripo API 
-    if response.get("action") == "create":
+    if response.get("action") == "create" or response.get("action") == "update":
         try:
+            print("Calling CRM API with:", response)
             crm_response = call_crm_api(response)
             print("CRM API response:", crm_response)
         except Exception as e:
             print("Error calling CRM API:", str(e))
             crm_response = {"error": str(e)}
+
+        # add to chat history
+        if crm_response:
+            chat_history.add_assistant(f"CRM API response: \n{process_crm_response(crm_response)}")
+
+    # Persist history
+    await set_history(chat_id, chat_history.get_messages(), r)
+
+    print("-----------------RECAP-----------------")
+    chat_history.pretty_print()
 
     # Return lean payload (no bulky history needed for FE unless you want it)
     return {
