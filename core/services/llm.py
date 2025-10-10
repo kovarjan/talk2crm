@@ -1,8 +1,5 @@
-# core/services/llm.py  (UNIFIED)
 # Centralizes all LLM-related logic: chat JSON calls, robust JSON parsing,
 # and ReAct agent execution (used by MeetingsAgent).
-#
-# Drop-in replacement for the previous llm.py and meetings agent LLM parts.
 
 from __future__ import annotations
 
@@ -12,7 +9,6 @@ from functools import lru_cache
 from typing import Any, Dict, Optional
 
 from langchain_ollama import ChatOllama
-# from langchain.agents import initialize_agent, AgentType
 from langchain.agents import create_react_agent, AgentExecutor
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 
@@ -21,7 +17,6 @@ from core.utils.chat import ChatSession
 from core.utils.json_validator import validate_json_command
 from core.services.spellcheck import correct_text
 from core.services.tools import tools
-import pprint
 
 # ------------------------ Robust JSON parsing helpers -------------------------
 
@@ -29,22 +24,27 @@ FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 def _strip_meta(s: str) -> str:
-    """Remove <think> tags, code fences; trim and normalize."""
-    s = THINK_RE.sub("", s)
+    """Remove <think> tags, code fences; trim and normalize trailing commas."""
+    s = THINK_RE.sub("", s or "")
     s = FENCE_RE.sub("", s).strip()
+    # normalize some sloppy JSON tails the model sometimes emits
     s = s.replace(",}", "}").replace(",]", "]")
     return s
 
 def _looks_like_json(s: str) -> bool:
-    s = s.strip()
+    s = (s or "").strip()
     return s.startswith("{") and s.endswith("}")
 
 def _extract_balanced_json(text: str) -> Dict[str, Any]:
-    """Extract first balanced {...}, respecting quotes/escapes."""
+    """
+    Extract the first balanced {...} from the given text (robust to quotes/escapes).
+    Used as a universal fallback when no explicit Final Answer marker is found.
+    """
     text = _strip_meta(text)
     start = text.find("{")
     if start == -1:
         raise ValueError("No '{' found in output.")
+
     i = start
     depth = 0
     in_string = False
@@ -76,66 +76,41 @@ def _extract_balanced_json(text: str) -> Dict[str, Any]:
     s = "".join(buf).replace(",}", "}").replace(",]", "]")
     return json.loads(s)
 
-# def parse_agent_output(output_obj: Any) -> Dict[str, Any]:
-#     """
-#     Accepts whatever LangChain AgentExecutor returned (dict or str) and returns a dict.
-#     Priority:
-#       1) If dict['output'] is pure JSON -> json.loads
-#       2) If string has 'Final Answer:' -> parse JSON after it
-#       3) Else -> extract first balanced JSON block
-#     """
-#     # 1) Dict from AgentExecutor
-#     if isinstance(output_obj, dict) and "output" in output_obj:
-#         s = str(output_obj["output"]).strip()
-#         if _looks_like_json(s):
-#             return json.loads(s)
-#         output_str = s  # fallthrough
-#     else:
-#         output_str = str(output_obj)
-
-#     # 2) Try 'Final Answer:' path
-#     body = THINK_RE.sub("", output_str)
-#     if "Final Answer:" in body:
-#         ans = body.split("Final Answer:", 1)[1]
-#         ans = _strip_meta(ans)
-#         try:
-#             return json.loads(ans)
-#         except Exception:
-#             pass  # fall back to balanced extraction
-
-#     # 3) First balanced JSON
-#     return _extract_balanced_json(output_str)
-
-
-def _find_json_after_marker(text: str, marker: str = "Final Answer:") -> Optional[dict]:
+def _extract_final_json(text: str, marker: str = "Final Answer:") -> Optional[dict]:
     """
-    Return the FIRST balanced JSON object that appears *after* the last occurrence
-    of `marker`. If none found or invalid, return None.
+    Tolerant parser (A):
+    - Take the LAST occurrence of `marker`
+    - Strip think/fences/backticks
+    - If the tail is pure JSON -> json.loads
+    - Else brace-match the FIRST {...} that follows
+    - Return None if nothing can be parsed
     """
     body = THINK_RE.sub("", text or "")
     pos = body.rfind(marker)
     if pos == -1:
         return None
+
     tail = body[pos + len(marker):]
     tail = _strip_meta(tail)
-    try:
-        # quick path if it's pure json
-        if _looks_like_json(tail):
+
+    # quick path
+    if _looks_like_json(tail):
+        try:
             return json.loads(tail)
-    except Exception:
-        pass
-    # Robust path: find first balanced {...} in the tail
+        except Exception:
+            pass
+
+    # robust path
     try:
         return _extract_balanced_json(tail)
     except Exception:
         return None
 
-
 def _normalize_meeting_command(cmd: dict) -> dict:
     """
     Light schema cleanup so the gateway gets consistent payloads.
     - ensure objects exist
-    - map 'company'/'companies' → 'accounts'
+    - map 'company'/'companies' -> 'accounts'
     - dedupe participant_ids and participants
     - trim time HH:MM:SS -> HH:MM
     """
@@ -172,61 +147,68 @@ def _normalize_meeting_command(cmd: dict) -> dict:
     # time: trim seconds if present
     t = meta.get("time")
     if isinstance(t, str) and len(t) >= 5:
-        # accept "HH:MM" or "HH:MM:SS"
         parts = t.split(":")
         if len(parts) >= 2:
             meta["time"] = f"{parts[0]:0>2}:{parts[1]:0>2}"
 
-    # date: accept "YYYY-MM-DD" (don't hard-fail here)
+    # date: very light format check
     d = meta.get("date")
     if isinstance(d, str):
         d = d.strip()
-        if d:
-            # very light sanity: must have 2 dashes
-            if d.count("-") == 2:
-                meta["date"] = d
+        if d and d.count("-") == 2:
+            meta["date"] = d
 
     return cmd
-
 
 def parse_agent_output(output_obj: Any) -> Dict[str, Any]:
     """
     Accepts whatever LangChain AgentExecutor returned (dict or str) and returns a dict.
     Priority:
-      1) If dict['output'] is pure JSON -> json.loads
-      2) If there's 'Final Answer:' -> parse the FIRST balanced JSON after the LAST marker
-      3) Else -> extract first balanced JSON block from the whole text
+      1) If dict['output'] present -> parse 'Final Answer:' tail first, then raw JSON, then balanced JSON
+      2) For strings -> same order
     Finally, apply light schema normalization for meetings.
     """
-    # 1) Direct dict output (AgentExecutor)
+    # Dict (typical AgentExecutor result)
     if isinstance(output_obj, dict) and "output" in output_obj:
         s = str(output_obj["output"]).strip()
-        # Some agents return the whole transcript in `output`; try Final Answer first
-        j = _find_json_after_marker(s)
+
+        # Prefer tolerant Final Answer parser
+        j = _extract_final_json(s)
         if j is not None:
             return _normalize_meeting_command(j)
+
+        # If its pure JSON, accept it
         if _looks_like_json(s):
             try:
                 return _normalize_meeting_command(json.loads(s))
             except Exception:
                 pass
-        output_str = s
-    else:
-        output_str = str(output_obj)
 
-    # 2) Look for Final Answer marker (robust against extra chatter)
-    j = _find_json_after_marker(output_str)
+        # Fallback: first balanced JSON anywhere
+        try:
+            j = _extract_balanced_json(s)
+            return _normalize_meeting_command(j)
+        except Exception:
+            return {"action": "error", "message_to_user": "Omlouvám se, výstup se nepodařilo zpracovat. Zkuste to prosím znovu."}
+
+    # String response
+    s = _strip_meta(str(output_obj))
+
+    j = _extract_final_json(s)
     if j is not None:
         return _normalize_meeting_command(j)
 
-    # 3) Fallback: first balanced JSON anywhere in the text
+    if _looks_like_json(s):
+        try:
+            return _normalize_meeting_command(json.loads(s))
+        except Exception:
+            pass
+
     try:
-        j = _extract_balanced_json(output_str)
+        j = _extract_balanced_json(s)
         return _normalize_meeting_command(j)
     except Exception:
-        # Last resort: tell the caller we couldn't parse JSON
         return {"action": "error", "message_to_user": "Omlouvám se, výstup se nepodařilo zpracovat. Zkuste to prosím znovu."}
-
 
 
 # -------------------------- Model singletons (cached) -------------------------
@@ -293,20 +275,29 @@ def query_llm(
                 chat_history.add_assistant(output_text)
             return {"text": output_text}
 
-        # Try strict JSON first, then balanced extraction
+        # --- tolerant JSON parsing (A) ---
+        # If theres a 'Final Answer:' tail, use that
+        j = _extract_final_json(output_text)
+        if j is not None:
+            if add_history:
+                chat_history.add_llm_response(j)
+            return j
+
+        # If output is pure JSON, accept it
         try:
             if _looks_like_json(output_text):
                 result = json.loads(output_text)
             else:
+                # Fallback: first balanced JSON anywhere in the text
                 result = _extract_balanced_json(output_text)
         except Exception:
-            # Nothing JSON-like found
             return {"error": "Model did not return JSON."}
 
         if add_history:
             chat_history.add_llm_response(result)
 
         return result
+
 
     except Exception as e:
         return {"error": f"Failed to generate JSON command: {str(e)}"}
@@ -366,7 +357,7 @@ def run_react_agent(chat_history: ChatSession) -> Dict[str, Any]:
     try:
         messages = chat_history.to_langchain_messages()
 
-        print(f"🤖 Running ReAct agent with {len(messages)} messages...")
+        print(f">> Running ReAct agent with {len(messages)} messages...")
 
         # last human message becomes the {input}; the rest go into chat_history
         last_user = next((m.content for m in reversed(messages) if m.type == "human"), "")

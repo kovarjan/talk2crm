@@ -3,15 +3,14 @@ from datetime import datetime, timezone
 import requests, uuid
 from core.clients.client import Client
 
-# ---- HMAC
+# HMAC
 def sign(secret: bytes, ts: str, nonce: str, body: bytes) -> str:
     to_sign = f"{ts}|{nonce}|".encode() + body
     return base64.b64encode(hmac.new(secret, to_sign, hashlib.sha256).digest()).decode()
 
-# ---- HTTP send
-# def send(cmd: dict, base_url: str, key_id: str, secret: str, path="/ai/v1/command"):
+# HTTP send
 def send(cmd: dict, client: Client, path="") -> dict:
-    # 1) Validate payload shape early
+    # Validate payload shape early
     if not isinstance(cmd, dict) or "action" not in cmd['command'] or "module" not in cmd['command']:
         raise ValueError("cmd must be a dict with top-level 'action' and 'module' keys")
 
@@ -56,7 +55,7 @@ def send(cmd: dict, client: Client, path="") -> dict:
         snippet = (text or "")[:800]
         raise RuntimeError(f"Expected JSON but got '{ct}' at {url}. Body snippet:\n{snippet}")
 
-# ---- Public function used by your FastAPI code
+# Public function used by your FastAPI code
 def call_crm_api(command: dict) -> dict:
     # TODO: cache the client per (client_name) if you have multiple clients
     # For now we hardcode "ai-local" as the client name

@@ -28,6 +28,7 @@ When you have all necessary information, produce the final output on a new line:
 Final Answer: {{"action":"{action}","module":"meetings","parameters":{{"name":string|null,"related_to":string|null,"related_to_id":string|null,"related_module":"contacts|companies|users"|null}},"metadata":{{"date":"YYYY-MM-DD"|null,"time":"HH:MM"|null,"duration":number|null,"participants":[string]|null,"location":string|null}},"message_to_user":string|null, "updateId":string|null}}
 
 If meeting was already created, then set action to "update", add param updateId with meeting's id and return same structure with updated fields.
+If user wants to delete a meeting, set action to "delete" and provide updateId.
 If user did not specified meeting name create name from context (e.g. "Schůzka s {{related_to}}").
 
 Rules:
