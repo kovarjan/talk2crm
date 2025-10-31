@@ -18,6 +18,8 @@ from core.services.chat_store import (
     make_redis, create_chat, chat_exists, get_history, set_history, append_messages, delete_chat
 )
 
+from core.services.hybrid_search import search_contacts, search_accounts, search_meetings
+
 app = FastAPI()
 
 app.add_middleware(
@@ -278,25 +280,37 @@ def search(payload: ProcessInputPayload):
 
 
     if not payload.tenant or payload.tenant == 'none':
-        return {
-            "success": False,
-            "response": {"action": "question", "message_to_user": "Omlouvám se, ale nemohu pokračovat bez platného tenantu vaší instance.\nKontaktujte administrátora aby vám povolil využívání AI funkcí."},
-        }
+        return {"success": False, "response": {"action": "question", "message_to_user": "Omlouvám se, ale nemohu pokračovat bez platného tenantu vaší instance.\nKontaktujte administrátora aby vám povolil využívání AI funkcí."}}
 
     if not payload.user_id or payload.user_id == 'none':
-        return {
-            "success": False,
-            "response": {"action": "question", "message_to_user": "Omlouvám se, ale nemohu pokračovat bez platného uživatele."},
-        }
+        return {"success": False, "response": {"action": "question", "message_to_user": "Omlouvám se, ale nemohu pokračovat bez platného uživatele."}}
 
-    tenant = payload.tenant or "ai-local"
-    query = payload.input_text or ""
-    results = call_crm_api({
-        "action": "search",
-        "module": "companies",
-        "parameters": {
-            "query": query,
-            "limit": 5
-        }
-    }, tenant=tenant)
-    return JSONResponse(content={"results": results})
+    tenant = payload.tenant.strip()
+    query = (payload.input_text or "").strip()
+    scope = (getattr(payload, "scope", "") or "").lower()  # optional: "contacts"|"accounts"|"meetings"|"all"
+    top_k = getattr(payload, "top_k", 5) or 5
+
+    try:
+        if scope == "contacts":
+            items = search_contacts(query, tenant=tenant, top_k=top_k)
+            return {"success": True, "response": {"items": items}}
+        elif scope == "accounts":
+            items = search_accounts(query, tenant=tenant, top_k=top_k)
+            return {"success": True, "response": {"items": items}}
+        elif scope == "meetings":
+            items = search_meetings(query, tenant=tenant, top_k=top_k)
+            return {"success": True, "response": {"items": items}}
+        else:
+            return {
+                "success": True,
+                "response": {
+                    "contacts": search_contacts(query, tenant=tenant, top_k=top_k, overview_only=True),
+                    "accounts": search_accounts(query, tenant=tenant, top_k=top_k, overview_only=True),
+                    "meetings": search_meetings(query, tenant=tenant, top_k=top_k, overview_only=True),
+                },
+            }
+    except FileNotFoundError as e:
+        return JSONResponse(content={"success": False, "response": {"action": "error", "message_to_user": f"Chybí index pro tento tenant ({tenant}). {e}"}})
+    except Exception as e:
+        return JSONResponse(content={"success": False, "response": {"action": "error", "message_to_user": f"Nepodařilo se provést vyhledávání: {e}"}})
+    

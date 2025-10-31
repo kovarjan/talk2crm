@@ -3,24 +3,22 @@
 import re
 import unicodedata
 
-_whitespace_re = re.compile(r"\s+")
-_keep_chars = set("@._+-")  # emails and tokens
-_digit_re = re.compile(r"\D+")
+_WS = re.compile(r"\s+")
+_KEEP = set("@._+-")           # keep in emails / tokens
+_NON_DIGITS = re.compile(r"\D+")
 
 def strip_accents(s: str) -> str:
     if not isinstance(s, str):
         s = str(s)
     nfkd = unicodedata.normalize("NFKD", s)
-    return "".join(c for c in nfkd if not unicodedata.combining(c))
+    return "".join(ch for ch in nfkd if not unicodedata.combining(ch))
 
 def normalize_cs(s: str) -> str:
     if not s:
         return ""
-    s = s.strip().lower()
-    s = strip_accents(s)
-    s = "".join(ch if ch.isalnum() or ch in _keep_chars or ch.isspace() else " " for ch in s)
-    s = _whitespace_re.sub(" ", s)
-    return s.strip()
+    s = strip_accents(s.strip().lower())
+    s = "".join(ch if ch.isalnum() or ch.isspace() or ch in _KEEP else " " for ch in s)
+    return _WS.sub(" ", s).strip()
 
 def digits_only(s: str) -> str:
-    return "" if s is None else _digit_re.sub("", s)
+    return "" if s is None else _NON_DIGITS.sub("", s)
