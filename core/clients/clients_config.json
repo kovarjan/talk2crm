@@ -9,8 +9,8 @@
             "accounts": { "fields": ["name","industry","account_type","phone_office","email1","billing_address_city","billing_address_country","description"] },
             "contacts": { "fields": ["first_name","last_name","email1","phone_mobile","department","title","description","account_id"] },
             "opportunities": { "fields": ["name","oppnum_c","account_id","sales_stage","amount","date_closed","description"] },
-            "meetings": { "fields": ["name","date_start","status","location","description","parent_type","parent_id"] },
-            "calls": { "fields": ["name","date_start","direction","status","description","parent_type","parent_id"] }
+            "meetings": { "fields": ["name","date_start","date_end","status","location","description","parent_type","parent_id"] },
+            "calls": { "fields": ["name","date_start","date_end","direction","status","description","parent_type","parent_id"] }
         }
     },
     {
@@ -21,7 +21,8 @@
         "api_version": "v1",
         "modules": {
             "accounts": { "fields": ["name","industry","account_type","phone_office","email1","billing_address_city","billing_address_country","description"] },
-            "contacts": { "fields": ["first_name","last_name","email1","phone_mobile","department","title","description","account_id"] }
+            "contacts": { "fields": ["first_name","last_name","full_name","email1","phone_mobile","department","title","description","account_id"] },
+            "meetings": { "fields": ["name","date_start","date_end","status","location","description","parent_type","parent_id","assigned_user_id"] }
         }
     }
 ]

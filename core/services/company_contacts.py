@@ -25,8 +25,12 @@ def list_contacts_for_account(tenant: str, account_id: str, vector_dir: str = "v
                 "email": f.get("email1") or "",
                 "phone": f.get("phone_mobile") or f.get("phone_work") or "",
                 "account_id": account_id,
-                "raw": rec,
+                # "raw": rec,
             })
+
+            if len(out) >= 15:
+                # Only return names and ids if there are more than 15 contacts
+                return [{"id": c["id"], "name": c["name"]} for c in out]
     return out
 
 def list_contacts_for_company_name(query: str, tenant: str, vector_dir: str = "var/vector") -> Dict[str, Any]:

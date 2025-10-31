@@ -42,6 +42,9 @@ class ProcessInputPayload(BaseModel):
     chat_id: Optional[str] = None
     chat_history: Optional[List[Dict[str, Any]]] = None  # legacy support
     replace_last_user: bool = False
+    context: Optional[Dict[str, Any]] = None
+    tenant: Optional[str] = None
+    user_id: Optional[str] = None
 
 class ProcessAudioResponse(BaseModel):
     success: bool
@@ -54,6 +57,7 @@ class ProcessInputResponse(BaseModel):
     response: Dict[str, Any]
     chat_id: Optional[str] = None
     chat_history: Optional[List[Dict[str, Any]]] = None  # for debugging/legacy
+    context: Optional[Dict[str, Any]] = None
 
 # --------------------------- Chat endpoints ---------------------------
 
@@ -90,6 +94,10 @@ async def api_delete_chat(chat_id: str):
 @app.get("/")
 def read_root():
     return {"Hello": "World"}
+
+@app.get("/ping/")
+def ping():
+    return {"status": "ok"}
 
 # ---------------------- Audio processing (opt) -----------------------
 
@@ -128,9 +136,14 @@ async def process_audio(
             # TODO: add composing user prompts from history like in text input
             # input_text = chat_history.compose_following_user_message(input_text)
 
-
+        tenant = "ai-local"  # TODO: make dynamic per user/client
+        extra_context = {
+            "tenant": tenant,
+            "current_user_id": "28",  # TODO: dynamic
+            "timezone": "Europe/Prague",
+        }
         # pipeline expects (voice_path, raw_text, chat_history)
-        response = run_command_pipeline(temp_path, None, chat_history)
+        response = run_command_pipeline(temp_path, None, chat_history, tenant, extra_context)
 
         # save back
         await set_history(chat_id, chat_history.get_messages(), r)
@@ -163,6 +176,9 @@ async def process_input(payload: ProcessInputPayload):
     chat_id = payload.chat_id
     print(">>> chat_id: ", chat_id)
 
+    print(">>> payload: ")
+    print(payload)
+
     if chat_id and await chat_exists(chat_id, r):
         print("LOADING existing chat history in Redis...")
         history_list = await get_history(chat_id, r)
@@ -187,18 +203,46 @@ async def process_input(payload: ProcessInputPayload):
         chat_history.load_history(history_list)
         input_text = chat_history.compose_following_user_message(input_text)
 
+    # Add context to chat history
+    if payload.context:
+        chat_history.inject_context(payload.context)
+
+
+    if not payload.tenant or payload.tenant == 'none':
+        return {
+            "success": False,
+            "response": {"action": "question", "message_to_user": "Omlouvám se, ale nemohu pokračovat bez platného tenantu vaší instance.\nKontaktujte administrátora aby vám povolil využívání AI funkcí."},
+            "chat_id": chat_id,
+            "chat_history": chat_history.get_messages(),
+        }
+
+    if not payload.user_id or payload.user_id == 'none':
+        return {
+            "success": False,
+            "response": {"action": "question", "message_to_user": "Omlouvám se, ale nemohu pokračovat bez platného uživatele."},
+            "chat_id": chat_id,
+            "chat_history": chat_history.get_messages(),
+        }
+
+    # tenant = "ai-local"  # TODO: make dynamic per user/client
+    extra_context = {
+        "tenant": payload.tenant,
+        "current_user_id": payload.user_id,
+        "timezone": "Europe/Prague",
+    }
     # Run pipeline
-    response = run_command_pipeline(None, input_text, chat_history)
+    response = run_command_pipeline(None, input_text, chat_history, payload.tenant, extra_context)
 
 
     crm_response = None
 
     # call to coripo API 
-    if response.get("action") == "create" or response.get("action") == "update":
+    if response.get("action") == "create" or response.get("action") == "update" or response.get("action") == "delete":
         try:
-            print("Calling CRM API with:", response)
-            crm_response = call_crm_api(response)
-            print("CRM API response:", crm_response)
+            print("Skip creating debug disabled params:", response)
+            # print("Calling CRM API with:", response)
+            # crm_response = call_crm_api(response)
+            # print("CRM API response:", crm_response)
         except Exception as e:
             print("Error calling CRM API:", str(e))
             crm_response = {"error": str(e)}
@@ -221,3 +265,38 @@ async def process_input(payload: ProcessInputPayload):
         "chat_history": chat_history.get_messages(),  # Debug only
         "crm_response": crm_response  # Debug only
     }
+
+# ---------------------- Search ----------------------
+
+@app.post("/search/", response_model=ProcessInputResponse)
+def search(payload: ProcessInputPayload):
+    """
+    Simple search endpoint for testing.
+    """
+    print(">>> payload: ")
+    print(payload)
+
+
+    if not payload.tenant or payload.tenant == 'none':
+        return {
+            "success": False,
+            "response": {"action": "question", "message_to_user": "Omlouvám se, ale nemohu pokračovat bez platného tenantu vaší instance.\nKontaktujte administrátora aby vám povolil využívání AI funkcí."},
+        }
+
+    if not payload.user_id or payload.user_id == 'none':
+        return {
+            "success": False,
+            "response": {"action": "question", "message_to_user": "Omlouvám se, ale nemohu pokračovat bez platného uživatele."},
+        }
+
+    tenant = payload.tenant or "ai-local"
+    query = payload.input_text or ""
+    results = call_crm_api({
+        "action": "search",
+        "module": "companies",
+        "parameters": {
+            "query": query,
+            "limit": 5
+        }
+    }, tenant=tenant)
+    return JSONResponse(content={"results": results})

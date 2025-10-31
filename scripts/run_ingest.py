@@ -97,7 +97,7 @@ def main():
         print(f"No 'modules' config for client '{args.client}'", file=sys.stderr)
         return 2
 
-    # Filter modules if requested
+    # Filter modules if requested from cli
     modules = list(modules_cfg.keys())
     if args.modules:
         requested = set(args.modules)
@@ -108,6 +108,7 @@ def main():
 
     # Run ingest (pull from /export endpoints, write snapshots, update watermarks)
     ing = Ingestor(args.config, state_dir=args.state_dir, out_dir=args.lake_dir)
+    print(f"[ingest] Starting ingest for client '{args.client}' modules: {modules}")
     for module in modules:
         fields = modules_cfg[module].get("fields", [])
         include_rel = True  # keep relationships enabled; they help with embeddings
@@ -125,15 +126,17 @@ def main():
 
         batch = []
         count = 0
+        fields = modules_cfg[module].get("fields", [])
+
         for snap in snapshots:
             for rec in stream_items_from_snapshot(snap):
                 batch.append(rec)
                 if len(batch) >= 512:  # tune batch size for your GPU/CPU
-                    emb.upsert_batch(args.client, module, batch)
+                    emb.upsert_batch(args.client, module, batch, fields)
                     count += len(batch)
                     batch.clear()
         if batch:
-            emb.upsert_batch(args.client, module, batch)
+            emb.upsert_batch(args.client, module, batch, fields)
             count += len(batch)
 
         print(f"[embed] {args.client}/{module}: upserted {count} vectors from {len(snapshots)} snapshot(s).")

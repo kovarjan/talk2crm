@@ -6,6 +6,7 @@ End-to-end flow:
   - ModuleDataExtractor (single-shot, no tools) -> {module, action, parameters}
   - Route by module:
       - meetings -> MeetingsAgent (shared ReAct agent under the hood)
+      - contacts -> ContactsAgent (shared ReAct agent under the hood)
       - others -> not implemented (for now)
   - Validate final JSON
   - Return response dict
@@ -24,8 +25,24 @@ from core.utils.json_validator import validate_json_command
 
 from core.agents.module_data_extractor import ModuleDataExtractor
 from core.agents.modules.meetings_agent import MeetingsAgent
-from core.services.llm import query_llm  # kept for generic/fallback chat if needed
+from core.agents.modules.contacts_agent import ContactsAgent
 
+from core.services.llm import query_llm  # kept for generic/fallback chat if needed
+import datetime
+import os
+import logging
+
+# Setup logging
+log_dir = "./logs"
+os.makedirs(log_dir, exist_ok=True)
+log_filename = os.path.join(
+    log_dir, f"{datetime.datetime.now().strftime('%Y-%m-%d')}_tools_calls.log"
+)
+logging.basicConfig(
+    filename=log_filename,
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
 
 def _log_timing(t0: float, label: str) -> None:
     if SHOW_TIMING:
@@ -37,8 +54,9 @@ def run_command_pipeline(
     voice_wav_path: Optional[str] = None,
     raw_text: Optional[str] = None,
     history: ChatSession = ChatSession(),
-    user_locale: str = "cs-CZ",
+    tenant: str = "unknown",
     extra_context: Optional[Dict[str, Any]] = None,
+    user_locale: str = "cs-CZ",
 ) -> Dict[str, Any]:
     """Main entrypoint: returns a dict with the final action JSON (or an error)."""
 
@@ -52,6 +70,8 @@ def run_command_pipeline(
         text = (raw_text or "").strip()
 
     print(f"🎙️  USER: {text}")
+
+    logging.info(f"User input: {text}")
 
     if not text:
         return {"action": "question", "message_to_user": "Neslyšel jsem žádný požadavek. Můžete ho prosím zopakovat?"}
@@ -99,8 +119,19 @@ def run_command_pipeline(
             chat_history=history,
             action=action or "",
             module_context=extra_context or {},
+            tenant=tenant
         )
         _log_timing(t2, "MeetingsAgent")
+    elif module == "contacts":
+        t2 = time.time()
+        response = ContactsAgent(
+            command_text=text,
+            chat_history=history,
+            action=action or "",
+            module_context=extra_context or {},
+            tenant=tenant
+        )
+        _log_timing(t2, "ContactsAgent")
     else:
         # Not implemented yet in this POC
         response = {
@@ -130,4 +161,7 @@ def run_command_pipeline(
         pass
 
     _log_timing(t0, "Total")
+    logging.info(f"Final response: {json.dumps(response, ensure_ascii=False)}")
+    logging.info("----------------------------------------")
+    logging.info(f"Total processing time: {time.time() - t0:.2f} seconds \n")
     return response

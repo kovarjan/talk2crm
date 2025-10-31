@@ -12,7 +12,7 @@ You are an extractor. Return ONLY valid JSON matching this schema:
 
 {{
 "module": "{'|'.join(availableModules)}" | null,
-"action": "create|update|delete|get" | null,
+"action": "create|update|delete|get|list" | null,
 "parameters": {{
     "related_module": "company|contact|user|task|note|call|meeting|invoice" | null,
     "related_name": string | null
@@ -25,6 +25,7 @@ Rules:
 - If uncertain, set fields to null.
 - Do NOT include any extra fields or text outside JSON.
 - Do NOT include "message_to_user".
+- If company is mentioned, set related_module to "company".
 """
 
 def _heuristics(p: str):
@@ -32,6 +33,7 @@ def _heuristics(p: str):
     mh = "meetings" if ("schůzk" in p or "meeting" in p) else None
     if "úkol" in p: mh = mh or "tasks"
     if "poznámk" in p: mh = mh or "notes"
+    if "kontakt" in p: mh = mh or "contacts"
     if any(w in p for w in ["hovor", "telefon", "call"]): mh = mh or "calls"
 
     if any(w in p for w in ["vytvoř", "vytvor", "naplánuj", "založ"]): ah = "create"
@@ -42,7 +44,7 @@ def _heuristics(p: str):
     return mh, ah
 
 def ModuleDataExtractor(prompt: str, chat_history: ChatSession = None) -> dict | None:
-    availableModules = {"meetings", "tasks", "notes", "calls"}
+    availableModules = {"meetings", "tasks", "notes", "calls", "contacts"}
 
     mh, ah = _heuristics(prompt)
     system_prompt = INSTRUCTION + f"\\nHINTS: module={mh or 'unknown'}, action={ah or 'unknown'}\\n"

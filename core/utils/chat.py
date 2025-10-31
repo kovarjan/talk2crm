@@ -63,8 +63,8 @@ class ChatSession:
     def add_assistant(self, content: str):
         self.messages.append({"role": "assistant", "content": content})
 
-    def inject_context(self, label: str, name: str, id: str):
-        self.add_assistant(f"{label} from CRM:\n- Name: {name}\n- ID: {id}")
+    def inject_context(self, context: object):
+        self.add_assistant(f"User is viewing in CRM module: {context.get('module')}, record: {context.get('record')}, record_name: {context.get('record_name')}")
 
     def add_llm_response(self, response: dict, format="ollama"):
         """

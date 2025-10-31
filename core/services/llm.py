@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 from langchain_ollama import ChatOllama
 from langchain.agents import create_react_agent, AgentExecutor
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.tools import Tool
 
 from core.config import LLM_MODEL_NAME, LLM_TEMPERATURE, DEBUG_LLM, DISABLE_REASONING
 from core.utils.chat import ChatSession
@@ -38,7 +39,6 @@ def _looks_like_json(s: str) -> bool:
 def _extract_balanced_json(text: str) -> Dict[str, Any]:
     """
     Extract the first balanced {...} from the given text (robust to quotes/escapes).
-    Used as a universal fallback when no explicit Final Answer marker is found.
     """
     text = _strip_meta(text)
     start = text.find("{")
@@ -70,37 +70,43 @@ def _extract_balanced_json(text: str) -> Dict[str, Any]:
             elif ch == "}":
                 depth -= 1
                 if depth == 0:
+                    i += 1  # include the closing brace
                     break
         i += 1
 
+    # ---- post-loop (only now we should parse/return) ----
+    if depth != 0:
+        raise ValueError("Unbalanced braces in output.")
+
     s = "".join(buf).replace(",}", "}").replace(",]", "]")
-    return json.loads(s)
+    obj = json.loads(s)
+
+    # optional: hoist message_to_user if nested
+    for key in ("parameters", "metadata"):
+        if isinstance(obj.get(key), dict) and "message_to_user" in obj[key]:
+            obj["message_to_user"] = obj[key].pop("message_to_user")
+
+    return obj
 
 def _extract_final_json(text: str, marker: str = "Final Answer:") -> Optional[dict]:
-    """
-    Tolerant parser (A):
-    - Take the LAST occurrence of `marker`
-    - Strip think/fences/backticks
-    - If the tail is pure JSON -> json.loads
-    - Else brace-match the FIRST {...} that follows
-    - Return None if nothing can be parsed
-    """
     body = THINK_RE.sub("", text or "")
     pos = body.rfind(marker)
     if pos == -1:
         return None
 
-    tail = body[pos + len(marker):]
-    tail = _strip_meta(tail)
+    tail = _strip_meta(body[pos + len(marker):])
 
-    # quick path
+    # strip anything before the first '{' (e.g., stray words/newlines)
+    brace = tail.find("{")
+    if brace != -1:
+        tail = tail[brace:]
+
     if _looks_like_json(tail):
         try:
             return json.loads(tail)
         except Exception:
             pass
 
-    # robust path
     try:
         return _extract_balanced_json(tail)
     except Exception:
@@ -121,7 +127,9 @@ def _normalize_meeting_command(cmd: dict) -> dict:
     module  = cmd.get("module")
 
     # Only normalize meetings create
-    if (action, module) != ("create", "meetings"):
+    # Only normalize for certain modules/actions
+    allowed_modules = {"meetings", "contacts", "calls"}
+    if action != "create" or module not in allowed_modules:
         return cmd
 
     params = cmd.setdefault("parameters", {})
@@ -133,6 +141,10 @@ def _normalize_meeting_command(cmd: dict) -> dict:
         m = str(rel_mod).lower().strip()
         if m in ("company", "companies"):
             params["related_module"] = "accounts"
+        elif m in ("contact", "contacts"):
+            params["related_module"] = "contacts"
+        elif m in ("user", "users"):
+            params["related_module"] = "users"
     else:
         # if we have an id but no module, assume accounts (company)
         if params.get("related_to_id"):
@@ -305,14 +317,15 @@ def query_llm(
 
 # ------------------------------- ReAct Agent API ------------------------------
 
-# --- in core/services/llm.py ---
-@lru_cache(maxsize=1)
-def _react_agent():
+@lru_cache(maxsize=16)
+def _react_agent(tenant: str):
     # Generic ReAct wrapper; module-specific schema/instructions come via chat_history
+    # tenant-bound tools list
+    ttools = _tenant_tools(tenant)
+
     prompt = ChatPromptTemplate.from_messages([
         (
             "system",
-            # NOTE: no JSON schema or module-specific rules here.
             "You are a helpful CRM assistant. Use tools when helpful.\n\n"
             "Available tools:\n{tools}\n\n"
             "Tool names you can call: {tool_names}\n"
@@ -326,19 +339,18 @@ def _react_agent():
             "Do not include anything after the JSON."
             "Absolutely no text or commentary between the last Observation and \"Final Answer:\". If you include any other text, the run fails.\n"
         ),
-        MessagesPlaceholder("chat_history"),  # <- your module agent injects its own system prompt here
+        MessagesPlaceholder("chat_history"),
         ("human", "{input}"),
-        # create_react_agent provides the scratchpad as a STRING:
         ("ai", "{agent_scratchpad}"),
     ])
 
-    agent = create_react_agent(llm=get_chat_llm(), tools=tools, prompt=prompt)
+    agent = create_react_agent(llm=get_chat_llm(), tools=ttools, prompt=prompt)
 
     return AgentExecutor(
         agent=agent,
-        tools=tools,
+        tools=ttools,
         verbose=DEBUG_LLM,
-        max_iterations=8,
+        max_iterations=10,
         handle_parsing_errors=(
             "Your previous message was not in the required ReAct format.\n"
             "Either continue with:\n"
@@ -349,22 +361,19 @@ def _react_agent():
             "Do not include anything after the JSON."
             "Absolutely no text or commentary between the last Observation and \"Final Answer:\". If you include any other text, the run fails.\n"
         ),
-        early_stopping_method="generate",
+        # early_stopping_method removed due to incompatibility
         return_intermediate_steps=False,
     )
 
-def run_react_agent(chat_history: ChatSession) -> Dict[str, Any]:
+def run_react_agent(chat_history: ChatSession, tenant: str) -> Dict[str, Any]:
     try:
         messages = chat_history.to_langchain_messages()
+        print(f">> Running ReAct agent with {len(messages)} messages... [tenant={tenant}]")
 
-        print(f">> Running ReAct agent with {len(messages)} messages...")
-
-        # last human message becomes the {input}; the rest go into chat_history
         last_user = next((m.content for m in reversed(messages) if m.type == "human"), "")
-        output = _react_agent().invoke({
-            "chat_history": messages,  # list[BaseMessage]
-            "input": last_user,        # str
-            # no need to pass agent_scratchpad; AgentExecutor fills it as a string
+        output = _react_agent(tenant).invoke({
+            "chat_history": messages,
+            "input": last_user,
         })
     except Exception as e:
         print(f"❗ Agent execution error: {e}")
@@ -390,6 +399,7 @@ def run_module_agent(
     chat_history: Optional[ChatSession],
     system_prompt: str = None,
     module_context: Optional[dict] = None,
+    tenant: str = "unknown",
 ) -> Dict[str, Any]:
     """
     A thin wrapper that prepares the schema/system prompt for meetings and
@@ -402,20 +412,23 @@ def run_module_agent(
     chat_history.add_user(command_text)
 
     # Context block (optional)
+    if module_context is None:
+        module_context = {}
+    module_context.setdefault("tenant", tenant)
+
     context_str = ""
     if module_context:
         context_items = [f"{k}: {v}" for k, v in module_context.items()]
         context_str = "CONTEXT:\n" + "\n".join(context_items) + "\n"
 
-    # add context to beginning of system prompt
     if system_prompt:
         system_prompt = f"""{context_str}
         {system_prompt}"""
 
     chat_history.add_system(system_prompt)
 
-    # Execute shared agent
-    result = run_react_agent(chat_history)
+    # Execute shared agent with tenant
+    result = run_react_agent(chat_history, tenant=tenant)
 
     # Validate against global schema
     validation = validate_json_command(result)
@@ -432,3 +445,35 @@ def run_module_agent(
 
     chat_history.add_llm_response(result)
     return result
+
+# -------------------------- Tenant-aware tools -------------------------------
+
+def _wrap_tool_with_tenant(t: Tool, tenant: str) -> Tool:
+    """Return a new Tool that injects tenant into JSON inputs (if absent/unknown)."""
+    def _call(s: str):
+        # Most of your tools expect JSON string input; be liberal but safe:
+        try:
+            data = json.loads(s) if isinstance(s, str) and s.strip().startswith(("{", "[")) else {}
+        except Exception:
+            data = {}
+
+        # Inject tenant if missing/unknown
+        if not isinstance(data, dict):
+            data = {"input": data}
+        if str(data.get("tenant", "")).strip() in ("", "unknown", "None", "null"):
+            data["tenant"] = tenant
+
+        # Re-serialize back to the original tool contract (string input)
+        payload = json.dumps(data, ensure_ascii=False)
+        return t.func(payload)
+
+    return Tool(
+        name=t.name,
+        description=t.description,
+        func=_call,
+    )
+
+
+def _tenant_tools(tenant: str):
+    """Clone your global tools list, binding each func to provided tenant."""
+    return [ _wrap_tool_with_tenant(t, tenant) for t in tools ]
