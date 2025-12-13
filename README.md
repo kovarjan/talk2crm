@@ -37,4 +37,9 @@ conda activate talk2api
 python main.py
 uvicorn main:app --reload --port 3000 --host 0.0.0.
 # audio recording websites must use https - use nginx proxy same origin
+
+# ingest
+python -m scripts.run_ingest --client ai-local --config core/clients/clients_config.json
+# test
+python -m pytest -s tests/test_find_company_tool_real.py
 ```

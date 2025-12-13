@@ -96,9 +96,9 @@ def run_command_pipeline(
         # Fallback: Ask for clarification via plain chat (no tools, no JSON schema expected)
         print("🧭  Extractor uncertain — asking for clarification.")
         history.add_user(text)
-        clarify = query_llm(history, "Parafrázuj požadavek a zeptej se jednou krátkou otázkou pro upřesnění.", returnJson=False, is_assistant_prompt=True)
-        msg = clarify.get("text") if isinstance(clarify, dict) else None
-        return {"action": "question", "message_to_user": msg or "Můžete prosím upřesnit, co mám udělat?"}
+        # clarify = query_llm(history, "Parafrázuj požadavek a zeptej se jednou krátkou otázkou pro upřesnění.", returnJson=False, is_assistant_prompt=True)
+        # msg = clarify.get("text") if isinstance(clarify, dict) else None
+        return {"action": "question", "message_to_user": "Můžete prosím upřesnit, co mám udělat?"}
 
     module = extraction.get("module")
     action = extraction.get("action")

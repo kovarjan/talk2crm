@@ -80,17 +80,28 @@ def _map_result(module: str, row: Dict[str, Any], score: float) -> Dict[str, Any
         "raw": row,
     }
 
-def hybrid_module_search(module: str, query: str, tenant: str, top_k: int = 5, *, bias: Optional[Dict[str, Any]] = None, fanout: int = 50, overview_only: bool = False) -> List[Dict[str, Any]]:
+def hybrid_module_search(
+    module: str,
+    query: str,
+    tenant: str,
+    top_k: int = 5,
+    *,
+    bias: Optional[Dict[str, Any]] = None,
+    fanout: int = 50,
+    overview_only: bool = False,
+) -> List[Dict[str, Any]]:
     """
     Hybrid search (dense + lexical) over your existing FAISS index:
       - dense: VectorSearcher(search) returns top N with cosine-like score in '_score'
       - lexical: RapidFuzz token_set_ratio over normalized strings
       - extras: email/phone/company bonuses
+
+    Deduplicates results by record id (keeping the highest-scoring hit per id).
     """
-    if not tenant or tenant in ("unknown","none","null"):
+    if not tenant or tenant in ("unknown", "none", "null"):
         raise ValueError("tenant is required")
 
-    if module not in ("contacts","accounts","meetings"):
+    if module not in ("contacts", "accounts", "meetings"):
         raise ValueError("module must be contacts|accounts|meetings")
 
     # Dense candidates
@@ -99,26 +110,41 @@ def hybrid_module_search(module: str, query: str, tenant: str, top_k: int = 5, *
     dense = vs.search(query, top_k=max(top_k, fanout))
 
     qn = normalize_cs(query)
-    rescored = []
+
+    # --- NEW: keep only best result per ID ---
+    best_by_id: Dict[str, Dict[str, Any]] = {}
+
     for rec in dense:
-        base_cos = float(rec.get("_score", 0.0))          # from your VectorSearcher
+        base_cos = float(rec.get("_score", 0.0))  # from your VectorSearcher
         cmp = _cmp_string(module, rec)
         fuzz = token_set_ratio(qn, normalize_cs(cmp)) / 100.0
         b = _bonus(query, rec, module, bias)
         final = _blend(base_cos, fuzz, b)
+
         rec2 = _map_result(module, rec, final)
         rec2["__cosine"] = base_cos
         rec2["__fuzz"] = float(fuzz)
         rec2["__bonus"] = float(b)
-        rescored.append(rec2)
 
+        rid = rec2.get("id")
+        if rid is None:
+            # if something weird happens and id is missing, just skip/append
+            continue
+
+        # Keep only the highest-scoring hit per id
+        prev = best_by_id.get(rid)
+        if prev is None or rec2["score"] > prev["score"]:
+            best_by_id[rid] = rec2
+
+    # Turn dict -> list and sort by final score
+    rescored = list(best_by_id.values())
     rescored.sort(key=lambda r: r["score"], reverse=True)
     results = rescored[:top_k]
 
     if overview_only:
         print("[hybrid_search] overview_only mode: returning id and name only")
         print(results)
-        # Only return id and name for each result
+
         def _get_name(r):
             # Try top-level 'name'
             name = r.get("name")
@@ -140,13 +166,17 @@ def hybrid_module_search(module: str, query: str, tenant: str, top_k: int = 5, *
                 last = fields.get("last_name") or raw.get("last_name", "")
                 return f"{first} {last}".strip()
             return ""
-        return [{
-            "id": r["id"], 
-            "name": _get_name(r),
-            "score": r["score"]
-        } for r in results]
-    return results
 
+        return [
+            {
+                "id": r["id"],
+                "name": _get_name(r),
+                "score": r["score"],
+            }
+            for r in results
+        ]
+
+    return results
 
 # Convenience wrappers per module
 def search_contacts(query: str, tenant: str, top_k: int = 5, bias_account_name: Optional[str] = None, overview_only: bool = False) -> List[Dict[str, Any]]:

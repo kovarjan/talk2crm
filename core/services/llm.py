@@ -346,7 +346,7 @@ def _react_agent(tenant: str):
 
     agent = create_react_agent(llm=get_chat_llm(), tools=ttools, prompt=prompt)
 
-    return AgentExecutor(
+    executor = AgentExecutor(
         agent=agent,
         tools=ttools,
         verbose=DEBUG_LLM,
@@ -364,6 +364,8 @@ def _react_agent(tenant: str):
         # early_stopping_method removed due to incompatibility
         return_intermediate_steps=False,
     )
+
+    return executor
 
 def run_react_agent(chat_history: ChatSession, tenant: str) -> Dict[str, Any]:
     try:

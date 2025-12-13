@@ -186,10 +186,10 @@ tools = [
         name="find_company",
         func=find_company_tool,
         description=(
-            "Najdi firmu v CRM podle názvu (a/nebo města). "
-            "Vstup: prostý text nebo JSON string "
-            'např. {"query":"ACME Brno","tenant":"<TENANT>","top_k":5}. '
-            "Vrací JSON se seznamem kandidátů včetně CRM ID. "
+            "Find a company in CRM by name (and/or city). "
+            "Input: plain text or JSON string "
+            'e.g. {"query":"ACME Brno","tenant":"<TENANT>","top_k":5}. '
+            "Returns JSON with a list of candidates including CRM ID. "
             "returns account id in items[i].id"
         ),
     ),
@@ -197,9 +197,9 @@ tools = [
         name="find_contact",
         func=find_contact_tool,
         description=(
-            "Najdi kontakt v CRM podle jména nebo e-mailu. "
-            'Vstup: {"query":"Jan Pikna Invex","tenant":"<TENANT>","top_k":5}. '
-            "Vrací JSON se seznamem kandidátů včetně CRM ID. "
+            "Find a contact in CRM by name or email. "
+            'Input: {"query":"Jan Pikna Invex","tenant":"<TENANT>","top_k":5}. '
+            "Returns JSON with a list of candidates including CRM ID. "
             "returns contact id in items[i].id"
         ),
     ),
@@ -207,9 +207,9 @@ tools = [
         name="list_contacts_by_company",
         func=list_contacts_by_company_tool,
         description=(
-            "Vrať všechny kontakty dané firmy. "
-            'Vstup: název firmy nebo {"account_id":"<GUID>","tenant":"<TENANT>"}. '
-            "Výstup: JSON {company, contacts[]}."
+            "Return all contacts for a given company. "
+            'Input: company name or {"account_id":"<GUID>","tenant":"<TENANT>"}. '
+            "Output: JSON {company, contacts[]}."
         ),
     ),
     Tool(
@@ -217,18 +217,33 @@ tools = [
         func=find_meetings_tool,
         description=(
             "Fuzzy search meetings by text. Use only if user asks about their planned meetings."
-            'Vstup: {"query": string, "top_k"?: int, "date_from"?: "YYYY-MM-DD HH:MM", "date_to"?: "...", "tenant":"<TENANT>"}. '
-            "Výstup: {meetings[]}."
+            'Input: {"query": string, "top_k"?: int, "date_from"?: "YYYY-MM-DD HH:MM", "date_to"?: "...", "tenant":"<TENANT>"}. '
+            "Output: {meetings[]}."
         ),
     ),
     Tool(
         name="get_user_agenda",
         func=get_user_agenda_tool,
         description=(
-            "Seznam schůzek pro daný den. "
-            'Vstup: {"day":"YYYY-MM-DD","user_id"?: string, "tenant":"<TENANT>"}. '
-            "Výstup: {agenda[]}."
+            "List of meetings for a given day. "
+            'Input: {"day":"YYYY-MM-DD","user_id"?: string, "tenant":"<TENANT>"}. '
+            "Output: {agenda[]}."
         ),
     ),
-    # Tool("check_user_conflict", func=check_user_conflict_tool, description="..."),
+    # Just an alias to find_company_tool because model sometimes confuses account vs company being the different things.
+    Tool(
+        name="get_account",
+        func=find_company_tool,
+        description=(
+            "Get company/account details by its ID. "
+            'Input: JSON string {"query":"<COMPANY NAME>","tenant":"<TENANT>","top_k":5}. '
+            "Returns JSON with list of matching companies including CRM ID."
+        ),
+        # @tool("get_account")
+        # def get_account(id: str) -> dict:
+        #     \"\"\"Get company/account details by its ID.\"\"\"
+        #     return your_backend_get_company_by_id(id)
+
+        # Tool("check_user_conflict", func=check_user_conflict_tool, description="..."),
+    ),
 ]
