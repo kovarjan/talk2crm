@@ -5,6 +5,7 @@
 - [ ] Implement user and test authentication
 - [ ] Integrate TTS into the main API flow
 - [ ] Implement Data Auto-Ingest scheduling and monitoring
+- [ ] Persistent chat history FE (fetch chat history endpoint)
 
 ### optionals
 - [ ] Expand language support beyond Czech and English

@@ -187,6 +187,7 @@ temp.wav
 
 var/
 logs/
+*TS.md
 *.faiss
 *.pkl
 *.ndjson.gz

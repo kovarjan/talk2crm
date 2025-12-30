@@ -1,26 +1,73 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 import tempfile
 import shutil
 from typing import Optional, List, Dict, Any
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+import anyio
+
+from fastapi import BackgroundTasks, FastAPI, File, UploadFile, HTTPException
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from core.pipelines.command_pipeline import run_command_pipeline
+from core.services.llm import query_llm
 from core.utils.chat import ChatSession
 from fastapi import Header
 from core.adapters.crm_api import (call_crm_api, process_crm_response)
 from core.services.chat_store import (
-    make_redis, create_chat, chat_exists, get_history, set_history, append_messages, delete_chat
+    make_redis,
+    create_chat,
+    chat_exists,
+    get_history,
+    get_chat_meta,
+    get_chat_name,
+    set_history,
+    set_chat_meta,
+    append_messages,
+    delete_chat,
+    get_user_chats,
 )
 
 from core.services.hybrid_search import search_contacts, search_accounts, search_meetings
 
-app = FastAPI()
+app = FastAPI(
+    title="Talk2API",
+    description="API for chat, audio processing, and CRM/search actions.",
+    version="1.0.0",
+    docs_url=None,
+    redoc_url=None,
+)
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    app.openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    return app.openapi_schema
+
+app.openapi = custom_openapi
+
+@app.get("/openapi.json", include_in_schema=False)
+async def openapi_json():
+    return app.openapi()
+
+@app.get("/swagger", include_in_schema=False)
+async def swagger_ui():
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title=f"{app.title} - Swagger UI",
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -38,6 +85,116 @@ class CreateChatResponse(BaseModel):
 class ChatHistoryResponse(BaseModel):
     chat_id: str
     history: List[Dict[str, Any]] = Field(default_factory=list)
+    name: Optional[str] = None
+
+class UserChatsResponse(BaseModel):
+    user_id: str
+    tenant: str
+    chats: List[ChatHistoryResponse] = Field(default_factory=list)
+
+def _build_chat_title_prompt(
+    history: List[Dict[str, Any]],
+    max_messages: int = 5,
+) -> Optional[str]:
+    user_messages = [
+        msg.get("content", "")
+        for msg in history
+        if msg.get("role") == "user" and msg.get("content")
+    ]
+    if not user_messages:
+        return None
+    tail = user_messages[-max_messages:]
+    joined = "\n".join(f"- {msg}" for msg in tail)
+    return (
+        "Create a concise chat title (max 6 words). "
+        "Use the user's language. Output only the title, no quotes.\n\n"
+        f"User messages:\n{joined}"
+    )
+
+def _extract_message_json(content: str) -> Optional[Dict[str, Any]]:
+    if not content:
+        return None
+    fenced = re.match(r"^```(?:json)?\s*(.*?)\s*```$", content, re.DOTALL)
+    if fenced:
+        content = fenced.group(1).strip()
+    try:
+        data = json.loads(content)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+def _filter_chat_history_for_user(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    filtered: List[Dict[str, Any]] = []
+    for msg in history:
+        role = msg.get("role")
+        if role == "user":
+            filtered.append(msg)
+            continue
+        if role != "assistant":
+            continue
+        content = msg.get("content")
+        data = _extract_message_json(content) if isinstance(content, str) else None
+        if data and data.get("message_to_user"):
+            filtered.append({"role": "assistant", "content": data["message_to_user"]})
+    return filtered
+
+def _get_last_user_message(history: List[Dict[str, Any]]) -> str:
+    for msg in reversed(history):
+        if msg.get("role") == "user":
+            return str(msg.get("content") or "").strip()
+    return ""
+
+async def _generate_chat_name(
+    chat_id: str,
+    tenant: Optional[str],
+    user_id: Optional[str],
+    history: List[Dict[str, Any]],
+) -> None:
+    if not tenant or not user_id:
+        return
+    r = make_redis()
+    meta = await get_chat_meta(chat_id, r, tenant, user_id)
+    message_count = len(history)
+    last_user_message = _get_last_user_message(history)
+    if meta:
+        if (
+            meta.get("message_count") == message_count
+            and meta.get("last_user_message") == last_user_message
+        ):
+            return
+    prompt = _build_chat_title_prompt(history)
+    if not prompt:
+        return
+    chat_history = ChatSession(init=False)
+    chat_history.add_system("You create short, specific chat titles.")
+    result = await anyio.to_thread.run_sync(
+        lambda: query_llm(
+            chat_history,
+            prompt,
+            temperature=0.2,
+            add_history=False,
+            returnJson=False,
+            no_thinking=False,
+        )
+    )
+    title = (result.get("text") or "").strip().strip("\"'")
+    if not title:
+        return
+    title = title.splitlines()[0].strip()
+    if len(title) > 80:
+        title = title[:80].rstrip()
+    await set_chat_meta(
+        chat_id,
+        {
+            "name": title,
+            "message_count": message_count,
+            "last_user_message": last_user_message,
+            "updated_at": int(anyio.current_time()),
+        },
+        r,
+        tenant,
+        user_id,
+    )
 
 class ProcessInputPayload(BaseModel):
     input_text: Optional[str] = None
@@ -63,32 +220,70 @@ class ProcessInputResponse(BaseModel):
 
 # --------------------------- Chat endpoints ---------------------------
 
+# Generate a new chat ID
 @app.post("/chats/", response_model=CreateChatResponse)
-async def api_create_chat():
+async def api_create_chat(tenant: Optional[str] = None, user_id: Optional[str] = None):
     r = make_redis()
-    chat_id = await create_chat(r)
+    chat_id = await create_chat(r, tenant=tenant, user_id=user_id)
     return {"chat_id": chat_id}
 
+# Get chat history by chat ID
 @app.get("/chats/{chat_id}", response_model=ChatHistoryResponse)
-async def api_get_chat(chat_id: str):
+async def api_get_chat(chat_id: str, tenant: Optional[str] = None, user_id: Optional[str] = None):
     r = make_redis()
-    if not await chat_exists(chat_id, r):
+    if not await chat_exists(chat_id, r, tenant, user_id):
         raise HTTPException(404, "Chat not found")
-    history = await get_history(chat_id, r)
-    return {"chat_id": chat_id, "history": history}
+    history = await get_history(chat_id, r, tenant, user_id)
+    name = await get_chat_name(chat_id, r, tenant, user_id)
+    return {"chat_id": chat_id, "history": history, "name": name}
 
+@app.get("/chats/user/{user_id}", response_model=UserChatsResponse)
+async def api_get_chats_by_user(
+    user_id: str,
+    tenant: str,
+    limit: Optional[int] = None,
+    debug: bool = False,
+):
+    r = make_redis()
+    chat_ids = await get_user_chats(tenant, user_id, r, limit)
+    chats: List[ChatHistoryResponse] = []
+    for chat_id in chat_ids:
+        history = await get_history(chat_id, r, tenant, user_id)
+        if not debug:
+            history = _filter_chat_history_for_user(history)
+        name = await get_chat_name(chat_id, r, tenant, user_id)
+        chats.append(ChatHistoryResponse(chat_id=chat_id, history=history, name=name))
+    return {"user_id": user_id, "tenant": tenant, "chats": chats}
+
+# Update chat history by chat ID
 @app.put("/chats/{chat_id}", response_model=ChatHistoryResponse)
-async def api_put_chat(chat_id: str, body: ChatHistoryResponse):
+async def api_put_chat(
+    chat_id: str,
+    body: ChatHistoryResponse,
+    tenant: Optional[str] = None,
+    user_id: Optional[str] = None,
+    background_tasks: BackgroundTasks = None,
+):
     r = make_redis()
     if chat_id != body.chat_id:
         raise HTTPException(400, "chat_id mismatch")
-    await set_history(chat_id, body.history, r)
-    return {"chat_id": chat_id, "history": body.history}
+    await set_history(chat_id, body.history, r, tenant, user_id)
+    if background_tasks:
+        background_tasks.add_task(
+            _generate_chat_name,
+            chat_id,
+            tenant,
+            user_id,
+            body.history,
+        )
+    name = await get_chat_name(chat_id, r, tenant, user_id)
+    return {"chat_id": chat_id, "history": body.history, "name": name}
 
+# Delete chat by chat ID
 @app.delete("/chats/{chat_id}")
-async def api_delete_chat(chat_id: str):
+async def api_delete_chat(chat_id: str, tenant: Optional[str] = None, user_id: Optional[str] = None):
     r = make_redis()
-    await delete_chat(chat_id, r)
+    await delete_chat(chat_id, r, tenant, user_id)
     return {"ok": True}
 
 # ------------------------ Root (keep existing) ------------------------
@@ -107,7 +302,8 @@ def ping():
 async def process_audio(
     file: UploadFile = File(...), 
     chat_id: Optional[str] = None, 
-    x_chat_id: Optional[str] = Header(None)
+    x_chat_id: Optional[str] = Header(None),
+    background_tasks: BackgroundTasks = None,
 ):
     # Prefer chat_id from header if provided
     chat_id = x_chat_id or chat_id
@@ -121,13 +317,15 @@ async def process_audio(
 
     try:
         r = make_redis()
+        tenant = "ai-local"  # TODO: make dynamic per user/client
+        user_id = "28"  # TODO: dynamic
         # create or load chat
-        if chat_id and await chat_exists(chat_id, r):
+        if chat_id and await chat_exists(chat_id, r, tenant, user_id):
             print("LOADING existing chat history in Redis...")
-            history_list = await get_history(chat_id, r)
+            history_list = await get_history(chat_id, r, tenant, user_id)
         else:
             print("CREATING new chat...")
-            chat_id = await create_chat(r)
+            chat_id = await create_chat(r, tenant=tenant, user_id=user_id)
             history_list = []
 
         chat_history = ChatSession(True)
@@ -138,17 +336,24 @@ async def process_audio(
             # TODO: add composing user prompts from history like in text input
             # input_text = chat_history.compose_following_user_message(input_text)
 
-        tenant = "ai-local"  # TODO: make dynamic per user/client
         extra_context = {
             "tenant": tenant,
-            "current_user_id": "28",  # TODO: dynamic
+            "current_user_id": user_id,
             "timezone": "Europe/Prague",
         }
         # pipeline expects (voice_path, raw_text, chat_history)
         response = run_command_pipeline(temp_path, None, chat_history, tenant, extra_context)
 
         # save back
-        await set_history(chat_id, chat_history.get_messages(), r)
+        await set_history(chat_id, chat_history.get_messages(), r, tenant, user_id)
+        if background_tasks:
+            background_tasks.add_task(
+                _generate_chat_name,
+                chat_id,
+                tenant,
+                user_id,
+                chat_history.get_messages(),
+            )
 
         return {
             "success": True,
@@ -165,7 +370,7 @@ async def process_audio(
 # ---------------------- Text processing (preferred) ----------------------
 
 @app.post("/process-input/", response_model=ProcessInputResponse)
-async def process_input(payload: ProcessInputPayload):
+async def process_input(payload: ProcessInputPayload, background_tasks: BackgroundTasks = None):
     """
     Preferred usage:
       FE sends: { "chat_id": "...", "input_text": "Naplánuj..." }
@@ -181,18 +386,23 @@ async def process_input(payload: ProcessInputPayload):
     print(">>> payload: ")
     print(payload)
 
-    if chat_id and await chat_exists(chat_id, r):
+    if chat_id and await chat_exists(chat_id, r, payload.tenant, payload.user_id):
         print("LOADING existing chat history in Redis...")
-        history_list = await get_history(chat_id, r)
+        history_list = await get_history(chat_id, r, payload.tenant, payload.user_id)
     elif payload.chat_history:
         # Legacy path: create a chat and seed it
         print("Creating new chat with provided history (legacy path)...")
-        chat_id = await create_chat(r, initial_history=payload.chat_history)
+        chat_id = await create_chat(
+            r,
+            initial_history=payload.chat_history,
+            tenant=payload.tenant,
+            user_id=payload.user_id,
+        )
         history_list = payload.chat_history
     else:
         # Fresh chat
         print("Creating new chat (fresh start)...")
-        chat_id = await create_chat(r)
+        chat_id = await create_chat(r, tenant=payload.tenant, user_id=payload.user_id)
         history_list = []
 
     # Build ChatSession
@@ -254,7 +464,15 @@ async def process_input(payload: ProcessInputPayload):
             chat_history.add_assistant(f"CRM API response: \n{process_crm_response(crm_response)}")
 
     # Persist history
-    await set_history(chat_id, chat_history.get_messages(), r)
+    await set_history(chat_id, chat_history.get_messages(), r, payload.tenant, payload.user_id)
+    if background_tasks:
+        background_tasks.add_task(
+            _generate_chat_name,
+            chat_id,
+            payload.tenant,
+            payload.user_id,
+            chat_history.get_messages(),
+        )
 
     print("-----------------RECAP-----------------")
     chat_history.pretty_print()
