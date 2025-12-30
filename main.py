@@ -5,8 +5,8 @@ import os
 import re
 import tempfile
 import shutil
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
-
 import anyio
 
 from fastapi import BackgroundTasks, FastAPI, File, UploadFile, HTTPException
@@ -27,9 +27,8 @@ from core.services.chat_store import (
     chat_exists,
     get_history,
     get_chat_meta,
-    get_chat_name,
     set_history,
-    set_chat_meta,
+    update_chat_meta,
     append_messages,
     delete_chat,
     get_user_chats,
@@ -86,6 +85,7 @@ class ChatHistoryResponse(BaseModel):
     chat_id: str
     history: List[Dict[str, Any]] = Field(default_factory=list)
     name: Optional[str] = None
+    updated_at: Optional[str] = None
 
 class UserChatsResponse(BaseModel):
     user_id: str
@@ -144,6 +144,17 @@ def _get_last_user_message(history: List[Dict[str, Any]]) -> str:
             return str(msg.get("content") or "").strip()
     return ""
 
+def _parse_updated_at(value: Optional[str]) -> datetime:
+    if not value:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
 async def _generate_chat_name(
     chat_id: str,
     tenant: Optional[str],
@@ -166,7 +177,7 @@ async def _generate_chat_name(
     if not prompt:
         return
     chat_history = ChatSession(init=False)
-    chat_history.add_system("You create short, specific chat titles.")
+    chat_history.add_system("You create short, specific chat titles. In czech language.")
     result = await anyio.to_thread.run_sync(
         lambda: query_llm(
             chat_history,
@@ -183,13 +194,12 @@ async def _generate_chat_name(
     title = title.splitlines()[0].strip()
     if len(title) > 80:
         title = title[:80].rstrip()
-    await set_chat_meta(
+    await update_chat_meta(
         chat_id,
         {
             "name": title,
             "message_count": message_count,
             "last_user_message": last_user_message,
-            "updated_at": int(anyio.current_time()),
         },
         r,
         tenant,
@@ -234,8 +244,16 @@ async def api_get_chat(chat_id: str, tenant: Optional[str] = None, user_id: Opti
     if not await chat_exists(chat_id, r, tenant, user_id):
         raise HTTPException(404, "Chat not found")
     history = await get_history(chat_id, r, tenant, user_id)
-    name = await get_chat_name(chat_id, r, tenant, user_id)
-    return {"chat_id": chat_id, "history": history, "name": name}
+    meta = await get_chat_meta(chat_id, r, tenant, user_id)
+    updated_at = meta.get("updated_at")
+    if updated_at is not None:
+        updated_at = str(updated_at)
+    return {
+        "chat_id": chat_id,
+        "history": history,
+        "name": meta.get("name"),
+        "updated_at": updated_at,
+    }
 
 @app.get("/chats/user/{user_id}", response_model=UserChatsResponse)
 async def api_get_chats_by_user(
@@ -245,14 +263,27 @@ async def api_get_chats_by_user(
     debug: bool = False,
 ):
     r = make_redis()
-    chat_ids = await get_user_chats(tenant, user_id, r, limit)
+    chat_ids = await get_user_chats(tenant, user_id, r)
     chats: List[ChatHistoryResponse] = []
     for chat_id in chat_ids:
         history = await get_history(chat_id, r, tenant, user_id)
         if not debug:
             history = _filter_chat_history_for_user(history)
-        name = await get_chat_name(chat_id, r, tenant, user_id)
-        chats.append(ChatHistoryResponse(chat_id=chat_id, history=history, name=name))
+        meta = await get_chat_meta(chat_id, r, tenant, user_id)
+        updated_at = meta.get("updated_at")
+        if updated_at is not None:
+            updated_at = str(updated_at)
+        chats.append(
+            ChatHistoryResponse(
+                chat_id=chat_id,
+                history=history,
+                name=meta.get("name"),
+                updated_at=updated_at,
+            )
+        )
+    chats.sort(key=lambda chat: _parse_updated_at(chat.updated_at), reverse=True)
+    if limit is not None:
+        chats = chats[: max(limit, 0)]
     return {"user_id": user_id, "tenant": tenant, "chats": chats}
 
 # Update chat history by chat ID
@@ -276,8 +307,16 @@ async def api_put_chat(
             user_id,
             body.history,
         )
-    name = await get_chat_name(chat_id, r, tenant, user_id)
-    return {"chat_id": chat_id, "history": body.history, "name": name}
+    meta = await get_chat_meta(chat_id, r, tenant, user_id)
+    updated_at = meta.get("updated_at")
+    if updated_at is not None:
+        updated_at = str(updated_at)
+    return {
+        "chat_id": chat_id,
+        "history": body.history,
+        "name": meta.get("name"),
+        "updated_at": updated_at,
+    }
 
 # Delete chat by chat ID
 @app.delete("/chats/{chat_id}")

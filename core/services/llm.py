@@ -201,7 +201,7 @@ def parse_agent_output(output_obj: Any) -> Dict[str, Any]:
             j = _extract_balanced_json(s)
             return _normalize_meeting_command(j)
         except Exception:
-            return {"action": "error", "message_to_user": "Omlouvám se, výstup se nepodařilo zpracovat. Zkuste to prosím znovu."}
+            return {"action": "error", "message_to_user": "Omlouvám se, výstup se nepodařilo zpracovat. Zkuste to prosím znovu. (A1)"}
 
     # String response
     s = _strip_meta(str(output_obj))
@@ -220,7 +220,7 @@ def parse_agent_output(output_obj: Any) -> Dict[str, Any]:
         j = _extract_balanced_json(s)
         return _normalize_meeting_command(j)
     except Exception:
-        return {"action": "error", "message_to_user": "Omlouvám se, výstup se nepodařilo zpracovat. Zkuste to prosím znovu."}
+        return {"action": "error", "message_to_user": "Omlouvám se, výstup se nepodařilo zpracovat. Zkuste to prosím znovu. (A2)"}
 
 
 # -------------------------- Model singletons (cached) -------------------------

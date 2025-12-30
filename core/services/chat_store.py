@@ -5,6 +5,7 @@ import os
 import json
 import uuid
 from typing import List, Dict, Any, Optional
+from datetime import datetime, timezone
 
 from redis.asyncio import Redis
 
@@ -85,6 +86,17 @@ async def create_chat(
     await r.set(_key(chat_id, tenant, user_id), json.dumps(history, ensure_ascii=False))
     await r.expire(_key(chat_id, tenant, user_id), CHAT_TTL_SECONDS)
     await _add_to_user_index(chat_id, tenant, user_id, r)
+    if tenant and user_id:
+        await set_chat_meta(
+            chat_id,
+            {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "message_count": len(history),
+            },
+            r,
+            tenant,
+            user_id,
+        )
     return chat_id
 
 async def chat_exists(
@@ -125,6 +137,16 @@ async def set_history(
     await r.set(_key(chat_id, tenant, user_id), json.dumps(history, ensure_ascii=False))
     await r.expire(_key(chat_id, tenant, user_id), CHAT_TTL_SECONDS)
     await _add_to_user_index(chat_id, tenant, user_id, r)
+    if tenant and user_id:
+        await update_chat_meta(
+            chat_id,
+            {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            r,
+            tenant,
+            user_id,
+        )
 
 async def set_chat_meta(
     chat_id: str,
@@ -155,7 +177,22 @@ async def get_chat_meta(
         meta = json.loads(raw)
         return meta if isinstance(meta, dict) else {"name": str(meta)}
     except Exception:
-        return {"name": raw}
+        return {"name": str(raw)}
+
+async def update_chat_meta(
+    chat_id: str,
+    updates: Dict[str, Any],
+    r: Optional[Redis] = None,
+    tenant: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> None:
+    if not updates:
+        return
+    if r is None:
+        r = make_redis()
+    meta = await get_chat_meta(chat_id, r, tenant, user_id)
+    meta.update(updates)
+    await set_chat_meta(chat_id, meta, r, tenant, user_id)
 
 async def set_chat_name(
     chat_id: str,
@@ -167,7 +204,7 @@ async def set_chat_name(
     if not name:
         return
     meta = {"name": name}
-    await set_chat_meta(chat_id, meta, r, tenant, user_id)
+    await update_chat_meta(chat_id, meta, r, tenant, user_id)
 
 async def get_chat_name(
     chat_id: str,
