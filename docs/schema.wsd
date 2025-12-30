@@ -1,0 +1,82 @@
+@startuml
+title talk2api component diagram
+
+package "FastAPI (main.py)" {
+  component "POST /process-input/" as API_INPUT
+  component "POST /process-audio/" as API_AUDIO
+  component "POST /search/" as API_SEARCH
+  component "Chats CRUD" as API_CHATS
+}
+
+package "Pipeline (core/pipelines/command_pipeline.py)" {
+  component "STT (core/services/stt.py)" as STT
+  component "ModuleDataExtractor" as MDE
+  component "Router by module" as ROUTER
+}
+
+package "Agents (core/agents/modules + core/services/llm.py)" {
+  component "MeetingsAgent" as AG_MEET
+  component "ContactsAgent" as AG_CONT
+  component "LangChain Ollama (run_module_agent + parse_agent_output)" as LLM
+  component "Tools (core/services/tools.py)" as TOOLS
+}
+
+package "Search (core/services/hybrid_search.py)" {
+  component "Vector search (FAISS + SentenceTransformers)" as SEARCH_VEC
+  component "Lexical (RapidFuzz)" as SEARCH_FUZZ
+}
+
+package "CRM adapter (core/adapters/crm_api.py)" {
+  component "HMAC signing" as CRM_HMAC
+  component "HTTP requests" as CRM_HTTP
+}
+
+package "Ingestion/Embedding" {
+  component "Ingestor (core/ingestion/ingestor.py)" as INGEST
+  component "Embeddings + FAISS indexes (var/vector)" as INDEX
+  component "Lake snapshots (var/lake)" as LAKE
+}
+
+database "Redis chat store (core/services/chat_store.py)" as REDIS
+component "CRM API Gateway" as CRM
+
+API_INPUT --> REDIS : load/save chat history
+API_AUDIO --> REDIS : load/save chat history
+API_CHATS --> REDIS
+
+API_INPUT --> MDE
+API_AUDIO --> STT
+STT --> MDE
+MDE --> ROUTER
+ROUTER --> AG_MEET
+ROUTER --> AG_CONT
+
+AG_MEET --> LLM
+AG_CONT --> LLM
+LLM --> TOOLS
+TOOLS --> SEARCH_VEC
+TOOLS --> SEARCH_FUZZ
+
+INGEST --> LAKE
+INGEST --> INDEX
+INDEX --> SEARCH_VEC
+
+AG_MEET --> CRM_HMAC
+AG_CONT --> CRM_HMAC
+CRM_HMAC --> CRM_HTTP
+CRM_HTTP --> CRM
+
+API_SEARCH --> SEARCH_VEC
+API_SEARCH --> SEARCH_FUZZ
+
+note right of REDIS
+Stores per-chat message history
+and TTL metadata.
+end note
+
+note bottom of CRM
+Tenant credentials and base URL
+from core/clients/clients_config.json
+end note
+
+@enduml
