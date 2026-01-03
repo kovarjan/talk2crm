@@ -4,7 +4,7 @@ from core.services.llm import query_llm
 from core.utils.chat import ChatSession
 from core.agents.schemas import ModuleExtraction
 
-availableModules = {"meetings", "tasks", "contacts"}
+availableModules = {"meetings", "tasks", "notes", "calls", "contacts"}
 # availableModules = {"meetings", "tasks", "notes", "calls"}
 
 INSTRUCTION = f"""

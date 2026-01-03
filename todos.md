@@ -1,6 +1,6 @@
 # TODOs
 
-- [ ] Add more CRM actions (e.g., tasks, notes)
+- [x] Add more CRM actions (e.g., tasks, notes)
 - [ ] Use output validation tools of JSON Schema
 - [ ] Implement user and test authentication
 - [ ] Integrate TTS into the main API flow

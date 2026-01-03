@@ -27,6 +27,8 @@ from core.agents.module_data_extractor import ModuleDataExtractor
 from core.agents.modules.meetings_agent import MeetingsAgent
 from core.agents.modules.contacts_agent import ContactsAgent
 from core.agents.modules.tasks_agent import TasksAgent
+from core.agents.modules.notes_agent import NotesAgent
+from core.agents.modules.calls_agent import CallsAgent
 
 from core.services.llm import query_llm  # kept for generic/fallback chat if needed
 import datetime
@@ -144,6 +146,26 @@ def run_command_pipeline(
             tenant=tenant,
         )
         _log_timing(t2, "TasksAgent")
+    elif module == "notes":
+        t2 = time.time()
+        response = NotesAgent(
+            command_text=text,
+            chat_history=history,
+            action=action or "",
+            module_context=extra_context or {},
+            tenant=tenant,
+        )
+        _log_timing(t2, "NotesAgent")
+    elif module == "calls":
+        t2 = time.time()
+        response = CallsAgent(
+            command_text=text,
+            chat_history=history,
+            action=action or "",
+            module_context=extra_context or {},
+            tenant=tenant,
+        )
+        _log_timing(t2, "CallsAgent")
     else:
         # Not implemented yet in this POC
         response = {
