@@ -43,3 +43,6 @@ python -m scripts.run_ingest --client ai-local --config core/clients/clients_con
 # test
 python -m pytest -s tests/test_find_company_tool_real.py
 ```
+
+## Documentation
+Swagger UI: http://localhost:3000/swagger

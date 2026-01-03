@@ -4,7 +4,7 @@ from core.services.llm import query_llm
 from core.utils.chat import ChatSession
 from core.agents.schemas import ModuleExtraction
 
-availableModules = {"meetings", "contacts", "tasks"}
+availableModules = {"meetings", "tasks", "contacts"}
 # availableModules = {"meetings", "tasks", "notes", "calls"}
 
 INSTRUCTION = f"""
@@ -44,7 +44,7 @@ def _heuristics(p: str):
     return mh, ah
 
 def ModuleDataExtractor(prompt: str, chat_history: ChatSession = None) -> dict | None:
-    availableModules = {"meetings", "tasks", "notes", "calls", "contacts"}
+    # availableModules = {"meetings", "tasks", "notes", "calls", "contacts"}
 
     mh, ah = _heuristics(prompt)
     system_prompt = INSTRUCTION + f"\\nHINTS: module={mh or 'unknown'}, action={ah or 'unknown'}\\n"

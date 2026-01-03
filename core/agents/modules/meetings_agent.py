@@ -1,6 +1,3 @@
-# core/agents/modules/meetings_agent.py (refactored)
-# Delegates all LLM work to core.services.llm (unified).
-
 from core.utils.chat import ChatSession
 from core.services.llm import run_module_agent
 from core.services.cz_time import resolve_date_slot

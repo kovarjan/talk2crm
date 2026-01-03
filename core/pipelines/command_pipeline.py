@@ -26,6 +26,7 @@ from core.utils.json_validator import validate_json_command
 from core.agents.module_data_extractor import ModuleDataExtractor
 from core.agents.modules.meetings_agent import MeetingsAgent
 from core.agents.modules.contacts_agent import ContactsAgent
+from core.agents.modules.tasks_agent import TasksAgent
 
 from core.services.llm import query_llm  # kept for generic/fallback chat if needed
 import datetime
@@ -132,11 +133,22 @@ def run_command_pipeline(
             tenant=tenant
         )
         _log_timing(t2, "ContactsAgent")
+    # elif module in ["tasks", "notes", "calls"]:
+    elif module == "tasks":
+        t2 = time.time()
+        response = TasksAgent(
+            command_text=text,
+            chat_history=history,
+            action=action or "",
+            module_context=extra_context or {},
+            tenant=tenant,
+        )
+        _log_timing(t2, "TasksAgent")
     else:
         # Not implemented yet in this POC
         response = {
             "action": "error",
-            "message_to_user": f"Modul '{module}' zatím není implementován v této ukázce.",
+            "message_to_user": f"Modul '{module}' zatím není implementován v této verzi.",
         }
 
     # 5) Validate final JSON
