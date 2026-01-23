@@ -9,17 +9,18 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 import anyio
 
-from fastapi import BackgroundTasks, FastAPI, File, UploadFile, HTTPException
+from fastapi import BackgroundTasks, FastAPI, File, UploadFile, HTTPException, Form, Header
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from core.config import CACHE_DIR
 from core.pipelines.command_pipeline import run_command_pipeline
+from core.services.stt import transcribe_audio
 from core.services.llm import query_llm
 from core.utils.chat import ChatSession
-from fastapi import Header
 from core.adapters.crm_api import (call_crm_api, process_crm_response)
 from core.services.chat_store import (
     make_redis,
@@ -214,6 +215,7 @@ class ProcessInputPayload(BaseModel):
     context: Optional[Dict[str, Any]] = None
     tenant: Optional[str] = None
     user_id: Optional[str] = None
+    return_voice: bool = False
 
 class ProcessAudioResponse(BaseModel):
     success: bool
@@ -335,19 +337,36 @@ def read_root():
 def ping():
     return {"status": "ok"}
 
+@app.get("/audio/{file_id}")
+async def get_audio(file_id: str):
+    """
+    Retrieves a cached audio file by its ID.
+    """
+    audio_path = os.path.join(CACHE_DIR, "audio", f"{file_id}.wav")
+    if not os.path.exists(audio_path):
+        raise HTTPException(status_code=404, detail="Audio file not found.")
+    return FileResponse(audio_path, media_type="audio/wav")
+
 # ---------------------- Audio processing (opt) -----------------------
 
-@app.post("/process-audio/", response_model=ProcessAudioResponse)
+@app.post("/process-audio/")
 async def process_audio(
     file: UploadFile = File(...), 
     chat_id: Optional[str] = None, 
     x_chat_id: Optional[str] = Header(None),
+    tenant: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    context: Optional[str] = Form(None),
+    user_locale: Optional[str] = Form("cs-CZ"),
+    return_voice: Optional[bool] = Form(False),
     background_tasks: BackgroundTasks = None,
 ):
     # Prefer chat_id from header if provided
     chat_id = x_chat_id or chat_id
 
+
     print(f"Received audio file: {file.filename}, chat_id: {chat_id}")
+    print(f"Tenant: {tenant}, User ID: {user_id}, Locale: {user_locale}, Return Voice: {return_voice}, Context: {context}")
 
     # persist upload to tmp
     with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as temp:
@@ -356,8 +375,9 @@ async def process_audio(
 
     try:
         r = make_redis()
-        tenant = "ai-local"  # TODO: make dynamic per user/client
-        user_id = "28"  # TODO: dynamic
+        tenant = tenant or "ai-local"  # TODO: make dynamic per user/client
+        user_id = user_id or "28"  # TODO: dynamic
+
         # create or load chat
         if chat_id and await chat_exists(chat_id, r, tenant, user_id):
             print("LOADING existing chat history in Redis...")
@@ -372,8 +392,36 @@ async def process_audio(
         if history_list:
             chat_history.reset()
             chat_history.load_history(history_list)
-            # TODO: add composing user prompts from history like in text input
-            # input_text = chat_history.compose_following_user_message(input_text)
+
+        context_obj = None
+        if context:
+            try:
+                context_obj = json.loads(context)
+            except Exception:
+                print("Invalid context payload for audio request, ignoring.")
+
+        if context_obj:
+            chat_history.inject_context(context_obj)
+
+        input_text = transcribe_audio(temp_path, language=user_locale) or ""
+        if history_list:
+            input_text = chat_history.compose_following_user_message(input_text)
+
+        if not tenant or tenant == "none":
+            return {
+                "success": False,
+                "response": {"action": "question", "message_to_user": "Omlouvám se, ale nemohu pokračovat bez platného tenantu vaší instance.\nKontaktujte administrátora aby vám povolil využívání AI funkcí."},
+                "chat_id": chat_id,
+                "chat_history": chat_history.get_messages(),
+            }
+
+        if not user_id or user_id == "none":
+            return {
+                "success": False,
+                "response": {"action": "question", "message_to_user": "Omlouvám se, ale nemohu pokračovat bez platného uživatele."},
+                "chat_id": chat_id,
+                "chat_history": chat_history.get_messages(),
+            }
 
         extra_context = {
             "tenant": tenant,
@@ -381,7 +429,21 @@ async def process_audio(
             "timezone": "Europe/Prague",
         }
         # pipeline expects (voice_path, raw_text, chat_history)
-        response = run_command_pipeline(temp_path, None, chat_history, tenant, extra_context)
+        response = run_command_pipeline(None, input_text, chat_history, tenant, extra_context, return_voice=return_voice)
+
+        crm_response = None
+        if response.get("action") in ("create", "update", "delete"):
+            try:
+                print("Skip creating debug disabled params:", response)
+                # print("Calling CRM API with:", response)
+                # crm_response = call_crm_api(response)
+                # print("CRM API response:", crm_response)
+            except Exception as e:
+                print("Error calling CRM API:", str(e))
+                crm_response = {"error": str(e)}
+
+            if crm_response:
+                chat_history.add_assistant(f"CRM API response: \n{process_crm_response(crm_response)}")
 
         # save back
         await set_history(chat_id, chat_history.get_messages(), r, tenant, user_id)
@@ -398,7 +460,8 @@ async def process_audio(
             "success": True,
             "response": response,
             "chat_id": chat_id,
-            "chat_history": chat_history.get_messages()  # Debug only
+            "chat_history": chat_history.get_messages(),  # Debug only
+            "crm_response": crm_response,  # Debug only
         }
     finally:
         try:
@@ -482,7 +545,7 @@ async def process_input(payload: ProcessInputPayload, background_tasks: Backgrou
         "timezone": "Europe/Prague",
     }
     # Run pipeline
-    response = run_command_pipeline(None, input_text, chat_history, payload.tenant, extra_context)
+    response = run_command_pipeline(None, input_text, chat_history, payload.tenant, extra_context, return_voice=payload.return_voice)
 
 
     crm_response = None

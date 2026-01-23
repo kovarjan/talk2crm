@@ -20,6 +20,7 @@ from typing import Optional, Dict, Any
 
 from core.config import SHOW_TIMING
 from core.services.stt import transcribe_audio
+from core.services.tts import generate_speech
 from core.utils.chat import ChatSession
 from core.utils.json_validator import validate_json_command
 
@@ -60,6 +61,7 @@ def run_command_pipeline(
     tenant: str = "unknown",
     extra_context: Optional[Dict[str, Any]] = None,
     user_locale: str = "cs-CZ",
+    return_voice: bool = False,
 ) -> Dict[str, Any]:
     """Main entrypoint: returns a dict with the final action JSON (or an error)."""
 
@@ -185,6 +187,18 @@ def run_command_pipeline(
             "message_to_user": "Omlouvám se, formát výsledku není v pořádku. Zkuste to prosím znovu.",
             "details": validation,
         }
+
+    if return_voice and response.get("message_to_user"):
+        t4 = time.time()
+        try:
+            print(f"🔊 Generating TTS audio response... for message: {response['message_to_user']}")
+            audio_id = generate_speech(response["message_to_user"])
+            response["audio_response_id"] = audio_id
+            _log_timing(t4, "TTS")
+        except Exception as e:
+            import traceback
+            print(f"⚠️  TTS failed: {e}")
+            print("⚠️  TTS traceback:\n" + traceback.format_exc())
 
     print(f"🤖 [Final Response] {json.dumps(response, ensure_ascii=False)}")
 

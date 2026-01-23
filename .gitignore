@@ -184,10 +184,15 @@ cache/
 data/recordings/
 data/embeddings/
 temp.wav
+temp/
 
 var/
 logs/
 *TS.md
+*INI.md
 *.faiss
 *.pkl
 *.ndjson.gz
+*.wav
+*.flac
+*.mp3

@@ -1,0 +1,260 @@
+{
+  "info": {
+    "name": "Talk2API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Process Text Input",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"input_text\": \"Vytvoř schůzku s firmou Acmark s.r.o. zítra v devět hodin.\",\n  \"tenant\": \"ai-local\",\n  \"user_id\": \"28\",\n  \"return_voice\": true\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/process-input/",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "process-input",
+            ""
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Process Audio Input",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": "/path/to/your/audio.wav"
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{baseUrl}}/process-audio/",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "process-audio",
+            ""
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Create Chat",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"tenant\": \"ai-local\",\n  \"user_id\": \"28\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/chats/",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "chats",
+            ""
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Search",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"input_text\": \"Acmark\",\n  \"tenant\": \"ai-local\",\n  \"user_id\": \"28\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/search/",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "search",
+            ""
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Get Chat",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/chats/{{chat_id}}?tenant=ai-local&user_id=28",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "chats",
+            "{{chat_id}}"
+          ],
+          "query": [
+            {
+              "key": "tenant",
+              "value": "ai-local"
+            },
+            {
+              "key": "user_id",
+              "value": "28"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Update Chat",
+      "request": {
+        "method": "PUT",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"chat_id\": \"{{chat_id}}\",\n  \"history\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Hello\"\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/chats/{{chat_id}}?tenant=ai-local&user_id=28",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "chats",
+            "{{chat_id}}"
+          ],
+          "query": [
+            {
+              "key": "tenant",
+              "value": "ai-local"
+            },
+            {
+              "key": "user_id",
+              "value": "28"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Get User Chats",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/chats/user/28?tenant=ai-local",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "chats",
+            "user",
+            "28"
+          ],
+          "query": [
+            {
+              "key": "tenant",
+              "value": "ai-local"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Delete Chat",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/chats/{{chat_id}}?tenant=ai-local&user_id=28",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "chats",
+            "{{chat_id}}"
+          ],
+          "query": [
+            {
+              "key": "tenant",
+              "value": "ai-local"
+            },
+            {
+              "key": "user_id",
+              "value": "28"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Get Audio",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/audio/{{test_audio_id}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "audio",
+            "{{test_audio_id}}"
+          ]
+        }
+      },
+      "response": []
+    }
+  ]
+}
