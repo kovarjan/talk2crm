@@ -23,6 +23,8 @@ class Client:
         self._load_config(config_path)
         self.client_name = client_name
         self._config = self.get_client_config(client_name)
+        if client_name not in self._configs:
+            raise ValueError(f"Client '{client_name}' not found in config")
 
     def get_client_config(self, name: str) -> ClientConfig:
         cfg = self._configs.get(name)

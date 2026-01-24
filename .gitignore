@@ -196,3 +196,4 @@ logs/
 *.wav
 *.flac
 *.mp3
+core/clients/clients_config.json
