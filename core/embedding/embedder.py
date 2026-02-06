@@ -1,16 +1,71 @@
 from sentence_transformers import SentenceTransformer
-import faiss, numpy as np, pickle, os, json
+import faiss, numpy as np, pickle, os, json, re, logging
 
 class Embedder:
-    def __init__(self, model_name="all-MiniLM-L6-v2", dim=384, store_dir="var/vector"):
+    def __init__(self, model_name="all-MiniLM-L6-v2", dim=384, store_dir="var/vector", log_embed: bool = False, log_dir: str = "logs"):
         self.model = SentenceTransformer(model_name)
         self.dim, self.store_dir = dim, store_dir
         os.makedirs(store_dir, exist_ok=True)
+        self.logger = None
+        if log_embed:
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, "ingest_embed.log")
+            logger = logging.getLogger("embedder")
+            if not logger.handlers:
+                handler = logging.FileHandler(log_path)
+                formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+                handler.setFormatter(formatter)
+                logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
+            logger.propagate = False
+            self.logger = logger
+        self._legal_suffixes = (
+            "a.s",
+            "a.s.",
+            "s.r.o",
+            "s.r.o.",
+            "spol. s r.o.",
+            "spol s r.o.",
+            "inc",
+            "inc.",
+            "ltd",
+            "ltd.",
+            "llc",
+            "llc.",
+            "gmbh",
+            "s.a.",
+            "s.a",
+            "s.p.a.",
+            "s.p.a",
+            "plc",
+            "plc.",
+            "corp",
+            "corp.",
+            "co",
+            "co.",
+        )
+
+    def simplify_company_name(self, name: str) -> str:
+        if not name:
+            return ""
+        cleaned = name.lower()
+        cleaned = re.sub(r"[\"'`]", "", cleaned)
+        for suffix in self._legal_suffixes:
+            cleaned = re.sub(rf"\b{re.escape(suffix)}\b", " ", cleaned)
+        cleaned = re.sub(r"[^\w\s]", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned.replace(" ", "")
+
+    def normalize_text(self, text: str) -> str:
+        if not text:
+            return ""
+        return re.sub(r"\s+", " ", text).strip()
 
     def build_text_accounts(self, rec, fields):
         f = rec["fields"]
         # Start with the main fields
-        parts = [f.get("name",""), f.get("industry",""), f.get("account_type",""),
+        simple_name = self.simplify_company_name(f.get("name", ""))
+        parts = [f.get("name",""), simple_name, f.get("industry",""), f.get("account_type",""),
              f.get("phone_office",""), f.get("email1",""),
              f.get("billing_address_city",""), f.get("billing_address_country",""),
              f.get("description","")]
@@ -62,7 +117,10 @@ class Embedder:
             elif module == "contacts": text = self.build_text_contacts(r, fields)
             elif module == "meetings": text = self.build_text_meetings(r, fields)
             else: text = self._generic_text(r, fields)
+            text = self.normalize_text(text)
             print("[embed] Embedding text:", text)
+            if self.logger:
+                self.logger.info("tenant=%s module=%s id=%s text=%s", tenant, module, r.get("id"), text)
             texts.append(text); ids.append(r["id"]); meta.append(r)
 
         if not texts: return

@@ -85,6 +85,8 @@ def main():
     ap.add_argument("--state-dir", default="var/state", help="Watermark/state directory")
     ap.add_argument("--modules", nargs="*", help="Limit to specific modules (e.g., accounts contacts)")
     ap.add_argument("--page-size", type=int, default=500)
+    ap.add_argument("--log-embed", action="store_true", help="Log embedded text to logs/ingest_embed.log")
+    ap.add_argument("--log-dir", default="logs", help="Directory for optional ingest logs")
 
     args = ap.parse_args()
 
@@ -117,7 +119,7 @@ def main():
         ing.run_module(args.client, module, fields, include_rel=include_rel)
 
     # Build embeddings for records added in this run (read new snapshot files)
-    emb = Embedder()  # uses your default model/store
+    emb = Embedder(log_embed=args.log_embed, log_dir=args.log_dir)  # uses your default model/store
     for module in modules:
         snapshots = new_snapshot_paths(args.lake_dir, args.client, module, started_at)
         if not snapshots:

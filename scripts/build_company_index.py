@@ -14,6 +14,7 @@ import numpy as np
 import faiss
 import os
 import pickle
+import re
 
 # Configuration
 DB_CONFIG = {
@@ -47,6 +48,44 @@ WHERE deleted = 0 AND name IS NOT NULL
 ORDER BY name ASC;
 """
 
+_LEGAL_SUFFIXES = (
+    "a.s",
+    "a.s.",
+    "s.r.o",
+    "s.r.o.",
+    "spol. s r.o.",
+    "spol s r.o.",
+    "inc",
+    "inc.",
+    "ltd",
+    "ltd.",
+    "llc",
+    "llc.",
+    "gmbh",
+    "s.a.",
+    "s.a",
+    "s.p.a.",
+    "s.p.a",
+    "plc",
+    "plc.",
+    "corp",
+    "corp.",
+    "co",
+    "co.",
+)
+
+def simplify_company_name(name: str) -> str:
+    if not name:
+        return ""
+    cleaned = name.lower()
+    cleaned = re.sub(r"[\"'`]", "", cleaned)
+    for suffix in _LEGAL_SUFFIXES:
+        cleaned = re.sub(rf"\b{re.escape(suffix)}\b", " ", cleaned)
+    # Drop punctuation and collapse whitespace for a compact match key.
+    cleaned = re.sub(r"[^\w\s]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned.replace(" ", "")
+
 def fetch_companies():
     conn = mysql.connector.connect(**DB_CONFIG)
     cursor = conn.cursor()
@@ -71,6 +110,7 @@ def fetch_companies():
     return {
         "ids": [str(x) for x in company_ids],
         "names": list(company_names),
+        "names_simple": [simplify_company_name(x) for x in company_names],
         "industries": list(industries),
         "account_types": list(account_types),
         "annual_revenues": list(annual_revenues),
@@ -94,6 +134,7 @@ def build_index():
     texts = [
         ", ".join([
             str(data["names"][i] or ""),
+            str(data["names_simple"][i] or ""),
             str(data["industries"][i] or ""),
             str(data["account_types"][i] or ""),
             str(data["annual_revenues"][i] or ""),
@@ -105,6 +146,14 @@ def build_index():
         ]).strip(", ")
         for i in range(len(data["names"]))
     ]
+    sample_size = min(20, len(texts))
+    if sample_size:
+        print(f"🧪 Sample index texts (first {sample_size}):")
+        for i in range(sample_size):
+            print(f"  [{i}] id={data['ids'][i]} name={data['names'][i]} simple={data['names_simple'][i]}")
+            print(f"      text={texts[i]}")
+        print("🧪 Sample metadata keys:", list(data.keys()))
+        print(f"🧪 Total texts: {len(texts)}")
 
     print(f"📏 Encoding {len(texts)} texts with {EMBEDDING_DIM}-dimensional embeddings...")
     embeddings = model.encode(texts, normalize_embeddings=True)
