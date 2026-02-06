@@ -1,0 +1,28 @@
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+include = '\.pyi?$'
+
+[tool.ruff]
+line-length = 88
+exclude = [
+  ".git",
+  ".mypy_cache",
+  ".pytest_cache",
+  "__pycache__",
+  "cache",
+  "data",
+  "docs/legacy",
+  "temp",
+  "var",
+]
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+ignore_missing_imports = true
+no_implicit_optional = true
+check_untyped_defs = false

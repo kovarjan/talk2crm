@@ -26,7 +26,7 @@ try:
                               "data/hunspell_dictionaries/cs_CZ.aff")
 except Exception:
     from spylls.hunspell import Dictionary
-    spell = Dictionary.from_files("data/hunspell_dictionaries/cs_CZ.aff")
+    spell = Dictionary.from_files("data/hunspell_dictionaries/cs_CZ")
     USE_SPYLLS = True
 
 

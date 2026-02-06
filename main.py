@@ -47,6 +47,20 @@ app = FastAPI(
 # Create an instance of the authenticator
 api_auth = ApiAuth()
 
+@app.middleware("http")
+async def cache_hmac_body(request, call_next):
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("hmac "):
+        body = await request.body()
+        request.state.raw_body = body
+        request._body = body
+
+        async def receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        request._receive = receive
+    return await call_next(request)
+
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema

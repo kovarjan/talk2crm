@@ -9,9 +9,12 @@ from functools import lru_cache
 from typing import Any, Dict, Optional
 
 from langchain_ollama import ChatOllama
-from langchain.agents import create_react_agent, AgentExecutor
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.tools import Tool
+from langchain_core.tools import Tool
+
+
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_classic.agents import AgentExecutor
+from langchain_classic.agents.react.agent import create_react_agent
 
 from core.config import LLM_MODEL_NAME, LLM_TEMPERATURE, DEBUG_LLM, DISABLE_REASONING
 from core.utils.chat import ChatSession

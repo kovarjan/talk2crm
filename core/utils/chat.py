@@ -1,7 +1,7 @@
 import datetime
 import textwrap
 import json
-from langchain.schema.messages import HumanMessage, AIMessage, SystemMessage
+from langchain.messages import HumanMessage, AIMessage, SystemMessage
 from core.config import CRM_SYSTEM, CRM_INSTANCE
 
 class ChatSession:

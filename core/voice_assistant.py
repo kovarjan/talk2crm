@@ -1,6 +1,6 @@
 import whisper
 # from langchain.chat_models import ChatOpenAI
-from langchain.schema import SystemMessage, HumanMessage
+from langchain_core.schema import SystemMessage, HumanMessage
 from core.services.llm import query_llm
 import datetime
 import json

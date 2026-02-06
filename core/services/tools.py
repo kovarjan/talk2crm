@@ -6,7 +6,7 @@ from typing import Any, Dict
 import logging
 import datetime
 
-from langchain.agents import Tool
+from langchain_classic.agents import Tool
 
 from core.services.company_lookup import find_company_by_name_or_city
 from core.services.contacts_lookup import find_contact_by_query

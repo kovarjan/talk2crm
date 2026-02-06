@@ -152,8 +152,13 @@ class ApiAuth:
         self.nonce_cache[nonce] = time.time() # Store with timestamp for future cleanup
 
         # Verify signature
-        body = await request.body()
-        base_string = f"{timestamp}|{nonce}|{body.decode()}".encode('utf-8')
+        body = getattr(request.state, "raw_body", None)
+        if body is None:
+            try:
+                body = await request.body()
+            except RuntimeError:
+                body = b""
+        base_string = b"|".join([timestamp.encode("utf-8"), nonce.encode("utf-8"), body])
         
         computed_sig = base64.b64encode(hmac.new(secret.encode('utf-8'), base_string, hashlib.sha256).digest()).decode()
 
