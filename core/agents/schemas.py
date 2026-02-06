@@ -1,8 +1,8 @@
 from typing import Optional, Literal
 from pydantic import BaseModel, Field, validator
 
-AllowedModule = Literal["meetings", "tasks", "notes", "calls", "contacts"]
-AllowedAction = Literal["create", "update", "delete", "get"]
+AllowedModule = str
+AllowedAction = Literal["create", "update", "delete", "get", "list", "search"]
 AllowedRelated = Literal["company", "contact", "user", "task", "note", "call", "meeting", "invoice"]
 
 SYN_MODULE = {
@@ -17,6 +17,16 @@ SYN_MODULE = {
     "hovor": "calls",
     "telefon": "calls",
     "kontakt": "contacts",
+    "firma": "accounts",
+    "společnost": "accounts",
+    "company": "accounts",
+    "account": "accounts",
+    "příležitost": "opportunities",
+    "prilezitost": "opportunities",
+    "příležitosti": "opportunities",
+    "prilezitosti": "opportunities",
+    "opportunity": "opportunities",
+    "opportunities": "opportunities",
 }
 
 SYN_ACTION = {
@@ -30,6 +40,12 @@ SYN_ACTION = {
     "získej": "get",
     "ukaž": "get",
     "najdi": "get",
+    "vypiš": "list",
+    "vypsat": "list",
+    "seznam": "list",
+    "poslední": "list",
+    "nejbližší": "list",
+    "nadcházející": "list",
 }
 
 SYN_RELATED = {

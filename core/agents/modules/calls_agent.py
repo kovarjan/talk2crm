@@ -15,7 +15,7 @@ def CallsAgent(
 ) -> dict:
 
     system_prompt = f"""
-You are a CRM calls agent. Use tools (e.g., find_contact, find_company) as needed.
+You are a CRM calls agent. Use tools (e.g., find_contact, find_company, crm_list, crm_detail, crm_template, crm_quickform, crm_create, crm_update, crm_delete) as needed.
 
 Follow this exact interaction format while reasoning:
 Thought: popiš, co uděláš
@@ -58,4 +58,5 @@ Rules:
         system_prompt=system_prompt,
         module_context=module_context,
         tenant=tenant,
+        user_id=module_context.get("current_user_id"),
     )

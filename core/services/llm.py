@@ -321,10 +321,10 @@ def query_llm(
 # ------------------------------- ReAct Agent API ------------------------------
 
 @lru_cache(maxsize=16)
-def _react_agent(tenant: str):
+def _react_agent(tenant: str, user_id: Optional[str] = None):
     # Generic ReAct wrapper; module-specific schema/instructions come via chat_history
     # tenant-bound tools list
-    ttools = _tenant_tools(tenant)
+    ttools = _tenant_tools(tenant, user_id)
 
     prompt = ChatPromptTemplate.from_messages([
         (
@@ -370,13 +370,13 @@ def _react_agent(tenant: str):
 
     return executor
 
-def run_react_agent(chat_history: ChatSession, tenant: str) -> Dict[str, Any]:
+def run_react_agent(chat_history: ChatSession, tenant: str, user_id: Optional[str] = None) -> Dict[str, Any]:
     try:
         messages = chat_history.to_langchain_messages()
         print(f">> Running ReAct agent with {len(messages)} messages... [tenant={tenant}]")
 
         last_user = next((m.content for m in reversed(messages) if m.type == "human"), "")
-        output = _react_agent(tenant).invoke({
+        output = _react_agent(tenant, user_id=user_id).invoke({
             "chat_history": messages,
             "input": last_user,
         })
@@ -405,6 +405,7 @@ def run_module_agent(
     system_prompt: str = None,
     module_context: Optional[dict] = None,
     tenant: str = "unknown",
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     A thin wrapper that prepares the schema/system prompt for meetings and
@@ -433,7 +434,7 @@ def run_module_agent(
     chat_history.add_system(system_prompt)
 
     # Execute shared agent with tenant
-    result = run_react_agent(chat_history, tenant=tenant)
+    result = run_react_agent(chat_history, tenant=tenant, user_id=user_id)
 
     # Validate against global schema
     validation = validate_json_command(result)
@@ -453,8 +454,8 @@ def run_module_agent(
 
 # -------------------------- Tenant-aware tools -------------------------------
 
-def _wrap_tool_with_tenant(t: Tool, tenant: str) -> Tool:
-    """Return a new Tool that injects tenant into JSON inputs (if absent/unknown)."""
+def _wrap_tool_with_tenant(t: Tool, tenant: str, user_id: Optional[str]) -> Tool:
+    """Return a new Tool that injects tenant/user_id into JSON inputs (if absent/unknown)."""
     def _call(s: str):
         # Most of your tools expect JSON string input; be liberal but safe:
         try:
@@ -467,6 +468,8 @@ def _wrap_tool_with_tenant(t: Tool, tenant: str) -> Tool:
             data = {"input": data}
         if str(data.get("tenant", "")).strip() in ("", "unknown", "None", "null"):
             data["tenant"] = tenant
+        if user_id and str(data.get("user_id", "")).strip() in ("", "unknown", "None", "null"):
+            data["user_id"] = user_id
 
         # Re-serialize back to the original tool contract (string input)
         payload = json.dumps(data, ensure_ascii=False)
@@ -479,6 +482,6 @@ def _wrap_tool_with_tenant(t: Tool, tenant: str) -> Tool:
     )
 
 
-def _tenant_tools(tenant: str):
-    """Clone your global tools list, binding each func to provided tenant."""
-    return [ _wrap_tool_with_tenant(t, tenant) for t in tools ]
+def _tenant_tools(tenant: str, user_id: Optional[str]):
+    """Clone your global tools list, binding each func to provided tenant/user."""
+    return [_wrap_tool_with_tenant(t, tenant, user_id) for t in tools]

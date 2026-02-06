@@ -4,15 +4,15 @@ from core.services.llm import query_llm
 from core.utils.chat import ChatSession
 from core.agents.schemas import ModuleExtraction
 
-availableModules = {"meetings", "tasks", "notes", "calls", "contacts"}
+availableModules = {"meetings", "tasks", "notes", "calls", "contacts", "accounts", "opportunities"}
 # availableModules = {"meetings", "tasks", "notes", "calls"}
 
 INSTRUCTION = f"""
 You are an extractor. Return ONLY valid JSON matching this schema:
 
 {{
-"module": "{'|'.join(availableModules)}" | null,
-"action": "create|update|delete|get|list" | null,
+"module": string | null,
+"action": "create|update|delete|get|list|search" | null,
 "parameters": {{
     "related_module": "company|contact|user|task|note|call|meeting|invoice" | null,
     "related_name": string | null
@@ -21,7 +21,7 @@ You are an extractor. Return ONLY valid JSON matching this schema:
 
 Rules:
 - Use ONLY the allowed values above (lowercase).
-- For "module", use one of: {'|'.join(availableModules)} or null.
+- For "module", use the canonical CRM module name (e.g., Meetings, Contacts, Opportunities) or null.
 - If uncertain, set fields to null.
 - Do NOT include any extra fields or text outside JSON.
 - Do NOT include "message_to_user".
@@ -35,11 +35,13 @@ def _heuristics(p: str):
     if "poznámk" in p: mh = mh or "notes"
     if "kontakt" in p: mh = mh or "contacts"
     if any(w in p for w in ["hovor", "telefon", "call"]): mh = mh or "calls"
+    if any(w in p for w in ["příležitost", "prilezitost", "opportunity"]): mh = mh or "opportunities"
 
     if any(w in p for w in ["vytvoř", "vytvor", "naplánuj", "založ"]): ah = "create"
     elif any(w in p for w in ["uprav", "změň", "přesuň"]): ah = "update"
     elif any(w in p for w in ["smaž", "zruš"]): ah = "delete"
-    elif any(w in p for w in ["ukaž", "získej", "najdi", "vypiš"]): ah = "get"
+    elif any(w in p for w in ["detail", "detaily", "získej", "najdi"]): ah = "get"
+    elif any(w in p for w in ["ukaž", "vypiš", "seznam", "posledn", "nejbliž", "nadcházej", "jaké mám", "co mám"]): ah = "list"
     else: ah = None
     return mh, ah
 
@@ -66,6 +68,8 @@ def ModuleDataExtractor(prompt: str, chat_history: ChatSession = None) -> dict |
             parsed = ModuleExtraction(**raw)
         except Exception:
             return None
-        if parsed.module in availableModules and parsed.action:
-            return parsed.dict()
+        data = parsed.dict()
+        if not data.get("action"):
+            data["action"] = "list"
+        return data
     return None

@@ -12,6 +12,12 @@ from core.services.company_lookup import find_company_by_name_or_city
 from core.services.contacts_lookup import find_contact_by_query
 from core.services.company_contacts import list_contacts_for_account, list_contacts_for_company_name
 from core.services.meetings_lookup import search_meetings, get_user_agenda, check_user_conflict
+from core.adapters.crm_direct import (
+    execute_direct_command,
+    get_module_template,
+    get_quickform_template,
+)
+from core.adapters.crm_modules import fetch_modules
 
 # Remove lax defaults for security; keep only for explicit fallbacks if you really want them.
 DEFAULT_TENANT = os.getenv("DEFAULT_TENANT", "ai-local")
@@ -63,6 +69,52 @@ def _parse_payload(input_str: str) -> dict:
     # Normalize top_k
     data["top_k"] = int(data.get("top_k", DEFAULT_TOP_K))
     return data
+
+
+def _parse_crm_payload(input_str: str) -> dict:
+    if not isinstance(input_str, str):
+        raise ValueError("Input must be a string.")
+    s = input_str.strip()
+    if not s:
+        raise ValueError("Missing payload.")
+    data = json.loads(s) if s.startswith("{") else {"query": s}
+    if not isinstance(data, dict):
+        raise ValueError("Payload must be a JSON object.")
+    data["tenant"] = _get_tenant(data)
+    user_id = str(data.get("user_id", "")).strip()
+    if not user_id:
+        raise ValueError("Missing 'user_id'.")
+    data["user_id"] = user_id
+    return data
+
+
+def _prune_crm_response(data: Any) -> Any:
+    """
+    Strip heavy UI/meta payloads from CORIPO REST responses to keep context small.
+    Keep only the minimal record data and pagination when possible.
+    """
+    if not isinstance(data, dict):
+        return data
+
+    # Typical list response shape:
+    # {module, records, row_count, next_offset, previous_offset, current_offset, ...}
+    if "records" in data and isinstance(data.get("records"), list):
+        keep = {
+            "module": data.get("module"),
+            "records": data.get("records"),
+            "row_count": data.get("row_count"),
+            "next_offset": data.get("next_offset"),
+            "previous_offset": data.get("previous_offset"),
+            "current_offset": data.get("current_offset"),
+        }
+        return {k: v for k, v in keep.items() if v is not None}
+
+    # For detail responses, avoid dumping defs/columns/queries if present
+    noisy_keys = {
+        "columns", "rows", "def", "query", "menu", "saved_search", "saved_search_id",
+        "fieldFunction", "alterName", "timeline", "order", "prefix",
+    }
+    return {k: v for k, v in data.items() if k not in noisy_keys}
 
 
 # ------------------------------ Tool functions --------------------------------
@@ -160,6 +212,218 @@ def get_user_agenda_tool(input_str: str) -> str:
     logging.info(f"get_user_agenda_tool output: {out}")
     return json.dumps(out, ensure_ascii=False)
 
+
+def crm_list_tool(input_str: str) -> str:
+    """
+    Input: {"module":"Contacts","filter":{...},"order":{...},"limit":100,"offset":0,"tenant":"...","user_id":"..."}
+    """
+    try:
+        logging.info(f"crm_list_tool called with input: {input_str}")
+        args = _parse_crm_payload(input_str)
+        module = (args.get("module") or "").strip()
+        if not module:
+            raise ValueError("Missing 'module'.")
+        # Support both ListDataRequest (filter/order) and legacy {where, orderBy}
+        if args.get("orderBy") is not None or args.get("where") is not None:
+            payload = {
+                "limit": args.get("limit", 100),
+                "offset": args.get("offset", 0),
+                "orderBy": args.get("orderBy", ""),
+                "where": args.get("where", ""),
+            }
+        else:
+            payload = {
+                "limit": args.get("limit", 100),
+                "offset": args.get("offset", 0),
+            }
+            if args.get("order") is not None:
+                payload["order"] = args.get("order")
+            if args.get("filter") is not None:
+                payload["filter"] = args.get("filter")
+            # If filter provided as string, map to legacy where
+            if isinstance(args.get("filter"), str):
+                payload.pop("filter", None)
+                payload["where"] = args["filter"]
+        resp = execute_direct_command(
+            {"action": "list", "module": module, "parameters": payload},
+            tenant=args["tenant"],
+            user_id=args["user_id"],
+        )
+        out = {"success": True, "tenant": args["tenant"], "data": _prune_crm_response(resp)}
+    except Exception as e:
+        out = {"success": False, "error": str(e)}
+        logging.error(f"crm_list_tool failed: {e}")
+    return json.dumps(out, ensure_ascii=False)
+
+
+def crm_detail_tool(input_str: str) -> str:
+    """
+    Input: {"module":"Contacts","record":"<id>","tenant":"...","user_id":"..."}
+    """
+    try:
+        logging.info(f"crm_detail_tool called with input: {input_str}")
+        args = _parse_crm_payload(input_str)
+        module = (args.get("module") or "").strip()
+        record = (args.get("record") or args.get("id") or "").strip()
+        if not module:
+            raise ValueError("Missing 'module'.")
+        if not record:
+            raise ValueError("Missing 'record' (id).")
+        resp = execute_direct_command(
+            {"action": "detail", "module": module, "updateId": record},
+            tenant=args["tenant"],
+            user_id=args["user_id"],
+        )
+        out = {"success": True, "tenant": args["tenant"], "data": _prune_crm_response(resp)}
+    except Exception as e:
+        out = {"success": False, "error": str(e)}
+        logging.error(f"crm_detail_tool failed: {e}")
+    return json.dumps(out, ensure_ascii=False)
+
+
+def crm_template_tool(input_str: str) -> str:
+    """
+    Input: {"module":"Contacts","tenant":"...","user_id":"..."}
+    """
+    try:
+        logging.info(f"crm_template_tool called with input: {input_str}")
+        args = _parse_crm_payload(input_str)
+        module = (args.get("module") or "").strip()
+        if not module:
+            raise ValueError("Missing 'module'.")
+        resp = get_module_template(
+            module,
+            tenant=args["tenant"],
+            user_id=args["user_id"],
+        )
+        out = {"success": True, "tenant": args["tenant"], "data": _prune_crm_response(resp)}
+    except Exception as e:
+        out = {"success": False, "error": str(e)}
+        logging.error(f"crm_template_tool failed: {e}")
+    return json.dumps(out, ensure_ascii=False)
+
+
+def crm_quickform_tool(input_str: str) -> str:
+    """
+    Input: {"module":"Contacts","tenant":"...","user_id":"..."}
+    """
+    try:
+        logging.info(f"crm_quickform_tool called with input: {input_str}")
+        args = _parse_crm_payload(input_str)
+        module = (args.get("module") or "").strip()
+        if not module:
+            raise ValueError("Missing 'module'.")
+        resp = get_quickform_template(
+            module,
+            tenant=args["tenant"],
+            user_id=args["user_id"],
+        )
+        out = {"success": True, "tenant": args["tenant"], "data": _prune_crm_response(resp)}
+    except Exception as e:
+        out = {"success": False, "error": str(e)}
+        logging.error(f"crm_quickform_tool failed: {e}")
+    return json.dumps(out, ensure_ascii=False)
+
+
+def crm_create_tool(input_str: str) -> str:
+    """
+    Input: {"module":"Contacts","fields":{...},"tenant":"...","user_id":"..."}
+    """
+    try:
+        logging.info(f"crm_create_tool called with input: {input_str}")
+        args = _parse_crm_payload(input_str)
+        module = (args.get("module") or "").strip()
+        fields = args.get("fields") or args.get("parameters") or {}
+        if not module:
+            raise ValueError("Missing 'module'.")
+        if not isinstance(fields, dict):
+            raise ValueError("Missing or invalid 'fields'.")
+        resp = execute_direct_command(
+            {"action": "create", "module": module, "parameters": fields},
+            tenant=args["tenant"],
+            user_id=args["user_id"],
+        )
+        out = {"success": True, "tenant": args["tenant"], "data": _prune_crm_response(resp)}
+    except Exception as e:
+        out = {"success": False, "error": str(e)}
+        logging.error(f"crm_create_tool failed: {e}")
+    return json.dumps(out, ensure_ascii=False)
+
+
+def crm_update_tool(input_str: str) -> str:
+    """
+    Input: {"module":"Contacts","record":"<id>","fields":{...},"tenant":"...","user_id":"..."}
+    """
+    try:
+        logging.info(f"crm_update_tool called with input: {input_str}")
+        args = _parse_crm_payload(input_str)
+        module = (args.get("module") or "").strip()
+        record = (args.get("record") or args.get("id") or "").strip()
+        fields = args.get("fields") or args.get("parameters") or {}
+        if not module:
+            raise ValueError("Missing 'module'.")
+        if not record:
+            raise ValueError("Missing 'record' (id).")
+        if not isinstance(fields, dict):
+            raise ValueError("Missing or invalid 'fields'.")
+        resp = execute_direct_command(
+            {"action": "update", "module": module, "updateId": record, "parameters": fields},
+            tenant=args["tenant"],
+            user_id=args["user_id"],
+        )
+        out = {"success": True, "tenant": args["tenant"], "data": _prune_crm_response(resp)}
+    except Exception as e:
+        out = {"success": False, "error": str(e)}
+        logging.error(f"crm_update_tool failed: {e}")
+    return json.dumps(out, ensure_ascii=False)
+
+
+def crm_delete_tool(input_str: str) -> str:
+    """
+    Input: {"module":"Contacts","record":"<id>","tenant":"...","user_id":"..."}
+    """
+    try:
+        logging.info(f"crm_delete_tool called with input: {input_str}")
+        args = _parse_crm_payload(input_str)
+        module = (args.get("module") or "").strip()
+        record = (args.get("record") or args.get("id") or "").strip()
+        if not module:
+            raise ValueError("Missing 'module'.")
+        if not record:
+            raise ValueError("Missing 'record' (id).")
+        resp = execute_direct_command(
+            {"action": "delete", "module": module, "updateId": record},
+            tenant=args["tenant"],
+            user_id=args["user_id"],
+        )
+        out = {"success": True, "tenant": args["tenant"], "data": resp}
+    except Exception as e:
+        out = {"success": False, "error": str(e)}
+        logging.error(f"crm_delete_tool failed: {e}")
+    return json.dumps(out, ensure_ascii=False)
+
+
+def crm_modules_tool(input_str: str) -> str:
+    """
+    Input: {"tenant":"...","user_id":"...","user_name":"...","device":"desktop"}
+    """
+    try:
+        logging.info(f"crm_modules_tool called with input: {input_str}")
+        args = _parse_crm_payload(input_str)
+        user_name = (args.get("user_name") or "").strip() or None
+        device = (args.get("device") or "desktop").strip()
+        resp = fetch_modules(
+            tenant=args["tenant"],
+            user_id=args["user_id"],
+            user_name=user_name,
+            device=device,
+        )
+        out = {"success": True, "tenant": args["tenant"], "data": _prune_crm_response(resp)}
+    except Exception as e:
+        out = {"success": False, "error": str(e)}
+        logging.error(f"crm_modules_tool failed: {e}")
+    return json.dumps(out, ensure_ascii=False)
+
 # (Optional) Re-enable if needed; keep the same tenant handling.
 # def check_user_conflict_tool(input_str: str) -> str:
 #     try:
@@ -228,6 +492,71 @@ tools = [
             "List of meetings for a given day. "
             'Input: {"day":"YYYY-MM-DD","user_id"?: string, "tenant":"<TENANT>"}. '
             "Output: {agenda[]}."
+        ),
+    ),
+    Tool(
+        name="crm_list",
+        func=crm_list_tool,
+        description=(
+            "Query CRM REST list endpoint for any module. "
+            'Input JSON: {"module":"Contacts","filter":{...},"order":{...},"limit":100,"offset":0,"tenant":"<TENANT>","user_id":"<USER_ID>"}. '
+            "Filter uses operator/operands schema from swagger (eq/neq/cont/etc)."
+        ),
+    ),
+    Tool(
+        name="crm_detail",
+        func=crm_detail_tool,
+        description=(
+            "Fetch a single CRM record by id. "
+            'Input JSON: {"module":"Contacts","record":"<ID>","tenant":"<TENANT>","user_id":"<USER_ID>"}.'
+        ),
+    ),
+    Tool(
+        name="crm_template",
+        func=crm_template_tool,
+        description=(
+            "Fetch empty record template for a module (detail/{module}). "
+            'Input JSON: {"module":"Contacts","tenant":"<TENANT>","user_id":"<USER_ID>"}.'
+        ),
+    ),
+    Tool(
+        name="crm_quickform",
+        func=crm_quickform_tool,
+        description=(
+            "Fetch quickform template for a module. "
+            'Input JSON: {"module":"Contacts","tenant":"<TENANT>","user_id":"<USER_ID>"}.'
+        ),
+    ),
+    Tool(
+        name="crm_create",
+        func=crm_create_tool,
+        description=(
+            "Create a CRM record in any module. "
+            'Input JSON: {"module":"Contacts","fields":{...},"tenant":"<TENANT>","user_id":"<USER_ID>"}.'
+        ),
+    ),
+    Tool(
+        name="crm_update",
+        func=crm_update_tool,
+        description=(
+            "Update a CRM record by id. "
+            'Input JSON: {"module":"Contacts","record":"<ID>","fields":{...},"tenant":"<TENANT>","user_id":"<USER_ID>"}.'
+        ),
+    ),
+    Tool(
+        name="crm_delete",
+        func=crm_delete_tool,
+        description=(
+            "Delete a CRM record by id. "
+            'Input JSON: {"module":"Contacts","record":"<ID>","tenant":"<TENANT>","user_id":"<USER_ID>"}.'
+        ),
+    ),
+    Tool(
+        name="crm_modules",
+        func=crm_modules_tool,
+        description=(
+            "Fetch available CRM modules for the given user. "
+            'Input JSON: {"tenant":"<TENANT>","user_id":"<USER_ID>","user_name":"<USER_NAME>","device":"desktop"}.'
         ),
     ),
     # Just an alias to find_company_tool because model sometimes confuses account vs company being the different things.

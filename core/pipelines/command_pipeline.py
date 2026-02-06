@@ -30,6 +30,7 @@ from core.agents.modules.contacts_agent import ContactsAgent
 from core.agents.modules.tasks_agent import TasksAgent
 from core.agents.modules.notes_agent import NotesAgent
 from core.agents.modules.calls_agent import CallsAgent
+from core.agents.modules.query_agent import QueryAgent
 
 from core.services.llm import query_llm  # kept for generic/fallback chat if needed
 import datetime
@@ -117,7 +118,18 @@ def run_command_pipeline(
     print(f"🧭  Extracted → module={module}, action={action}, parameters={params}")
 
     # 4) Route by module
-    if module == "meetings":
+    if action in ("list", "get", "search"):
+        t2 = time.time()
+        response = QueryAgent(
+            command_text=text,
+            chat_history=history,
+            action=action or "list",
+            module=module or "",
+            module_context=extra_context or {},
+            tenant=tenant,
+        )
+        _log_timing(t2, "QueryAgent")
+    elif module == "meetings":
         t2 = time.time()
         response = MeetingsAgent(
             command_text=text,

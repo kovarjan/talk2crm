@@ -89,6 +89,13 @@ Create `.env` from `.env.example`. Key settings:
 - `DISABLE_REASONING`: disable reasoning (`true/false`)
 - `CRM_SYSTEM`: CRM system key
 - `CRM_INSTANCE`: CRM instance name
+- `CRM_EXECUTION_MODE`: off|gateway|direct (controls CRM writes/reads)
+
+Multi-tenant client config:
+- `core/clients/clients_config.json`: list of clients/tenants
+- Required fields per client: `name`, `api_url`, `api_key_id`, `api_key`, `api_version`
+- Direct REST fields per client: `rest_url`, `rest_hmac_key_id`, `rest_hmac_secret`
+- Optional REST headers per client: `rest_user_id_header`, `rest_user_name_header`, `rest_tenant_header`
 - `REDIS_URL`: Redis connection string
 - `CHAT_KEY_PREFIX`, `CHAT_USER_INDEX_PREFIX`, `CHAT_META_PREFIX`: Redis key prefixes
 - `CHAT_TTL_SECONDS`: chat history TTL in seconds

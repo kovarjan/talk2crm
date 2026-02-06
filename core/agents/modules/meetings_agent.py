@@ -11,7 +11,7 @@ def MeetingsAgent(
 ) -> dict:
     
     system_prompt = f"""
-You are a CRM meetings agent. Use tools (e.g., find_company_by_name, get_user_agenda) as needed.
+You are a CRM meetings agent. Use tools (e.g., find_company_by_name, get_user_agenda, crm_list, crm_detail, crm_template, crm_quickform, crm_create, crm_update, crm_delete) as needed.
 Default meeting duration is 60 minutes. 
 
 Follow this exact interaction format while reasoning:
@@ -52,7 +52,8 @@ Rules:
         chat_history=chat_history,
         system_prompt=system_prompt,
         module_context=module_context,
-        tenant=tenant
+        tenant=tenant,
+        user_id=module_context.get("current_user_id"),
     )
 
 

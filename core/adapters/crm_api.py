@@ -2,6 +2,8 @@ import base64, hashlib, hmac, json
 from datetime import datetime, timezone
 import requests, uuid
 from core.clients.client import Client
+from core.config import CRM_EXECUTION_MODE
+from core.adapters.crm_direct import execute_direct_command, CrmDirectError
 
 # HMAC
 def sign(secret: bytes, ts: str, nonce: str, body: bytes) -> str:
@@ -11,8 +13,13 @@ def sign(secret: bytes, ts: str, nonce: str, body: bytes) -> str:
 # HTTP send
 def send(cmd: dict, client: Client, path="") -> dict:
     # Validate payload shape early
-    if not isinstance(cmd, dict) or "action" not in cmd['command'] or "module" not in cmd['command']:
-        raise ValueError("cmd must be a dict with top-level 'action' and 'module' keys")
+    if (
+        not isinstance(cmd, dict)
+        or "command" not in cmd
+        or "action" not in cmd["command"]
+        or "module" not in cmd["command"]
+    ):
+        raise ValueError("cmd must include command.action and command.module")
 
     base_url = client.get_base_url()
     key_id = client.get_api_key_id()
@@ -56,7 +63,7 @@ def send(cmd: dict, client: Client, path="") -> dict:
         raise RuntimeError(f"Expected JSON but got '{ct}' at {url}. Body snippet:\n{snippet}")
 
 # Public function used by your FastAPI code
-def call_crm_api(command: dict) -> dict:
+def call_crm_api(command: dict, user_id: str | None = None, username: str | None = None) -> dict:
     # TODO: cache the client per (client_name) if you have multiple clients
     # For now we hardcode "ai-local" as the client name
     client = Client(client_name="ai-local")
@@ -66,10 +73,13 @@ def call_crm_api(command: dict) -> dict:
     enriched = {
         "command": dict(command)
     }
-    enriched.setdefault("user", {
-        "id": "28",  # Sugar Users.id GUID
-        "username": "jkovar"
-    })
+    enriched.setdefault(
+        "user",
+        {
+            "id": user_id or "28",  # Sugar Users.id GUID
+            "username": username or (user_id or "jkovar"),
+        },
+    )
 
     # Choose the correct path based on your route name:
     path = "command"   # or "/ai/v1/command" if your method is singular
@@ -85,3 +95,23 @@ def process_crm_response(response: dict) -> str:
         id = result.get("id", "unknown")
         return f"CREATED: meeting\nname: {name}\nid: {id}"
     return f"CRM API response: {response}"
+
+
+def execute_crm_command(command: dict, tenant: str | None = None, user_id: str | None = None) -> dict | None:
+    """
+    Execute a CRM command based on CRM_EXECUTION_MODE:
+      - off: returns None
+      - gateway: uses HMAC gateway (/ai/v1/command)
+      - direct: calls CRM REST endpoints directly
+    """
+    mode = (CRM_EXECUTION_MODE or "off").lower().strip()
+    if mode in ("off", "false", "0", "disabled"):
+        return None
+    if mode == "gateway":
+        return call_crm_api(command, user_id=user_id)
+    if mode == "direct":
+        try:
+            return execute_direct_command(command, user_id=user_id, tenant=tenant)
+        except CrmDirectError as e:
+            return {"error": str(e)}
+    return {"error": f"Unknown CRM_EXECUTION_MODE: {CRM_EXECUTION_MODE}"}

@@ -17,3 +17,4 @@ CRM_INSTANCE = os.getenv("CRM_INSTANCE", "Acmark")  # Default instance name
 DEBUG_LLM = os.getenv("DEBUG_LLM", "False").lower() in ("true", "1", "yes")
 DISABLE_REASONING = os.getenv("DISABLE_REASONING", "False").lower() in ("true", "1", "yes")
 CACHE_DIR = os.getenv("CACHE_DIR", "cache")
+CRM_EXECUTION_MODE = os.getenv("CRM_EXECUTION_MODE", "off")  # off|gateway|direct

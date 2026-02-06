@@ -20,7 +20,7 @@ from core.pipelines.command_pipeline import run_command_pipeline
 from core.services.stt import transcribe_audio
 from core.services.llm import query_llm
 from core.utils.chat import ChatSession
-from core.adapters.crm_api import (call_crm_api, process_crm_response)
+from core.adapters.crm_api import (execute_crm_command, process_crm_response)
 from core.services.chat_store import (
     make_redis,
     create_chat,
@@ -417,15 +417,19 @@ async def process_audio(
         response = run_command_pipeline(None, input_text, chat_history, tenant, extra_context, return_voice=return_voice)
 
         crm_response = None
-        if response.get("action") in ("create", "update", "delete"):
+        if response.get("action") in ("create", "update", "delete", "get", "read", "detail", "list", "search") and not response.get("already_fetched") and response.get("crm_data") is None:
             try:
-                print("Skip creating debug disabled params:", response)
+                crm_response = await anyio.to_thread.run_sync(
+                    lambda: execute_crm_command(response, tenant=tenant, user_id=user_id)
+                )
             except Exception as e:
                 print("Error calling CRM API:", str(e))
                 crm_response = {"error": str(e)}
 
             if crm_response:
-                chat_history.add_assistant(f"CRM API response: \n{process_crm_response(crm_response)}")
+                chat_history.add_assistant(
+                    f"CRM API response: \n{process_crm_response(crm_response)}"
+                )
 
         await set_history(chat_id, chat_history.get_messages(), r, tenant, user_id)
         if background_tasks:
@@ -482,15 +486,19 @@ async def process_input(
     )
 
     crm_response = None
-    if response.get("action") in ("create", "update", "delete"):
+    if response.get("action") in ("create", "update", "delete", "get", "read", "detail", "list", "search") and not response.get("already_fetched") and response.get("crm_data") is None:
         try:
-            print("Skip creating debug disabled params:", response)
+            crm_response = await anyio.to_thread.run_sync(
+                lambda: execute_crm_command(response, tenant=tenant, user_id=user_id)
+            )
         except Exception as e:
             print("Error calling CRM API:", str(e))
             crm_response = {"error": str(e)}
 
         if crm_response:
-            chat_history.add_assistant(f"CRM API response: \n{process_crm_response(crm_response)}")
+            chat_history.add_assistant(
+                f"CRM API response: \n{process_crm_response(crm_response)}"
+            )
 
     await set_history(chat_id, chat_history.get_messages(), r, tenant, user_id)
     if background_tasks:
