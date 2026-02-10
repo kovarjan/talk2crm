@@ -9,6 +9,10 @@ from functools import lru_cache
 from typing import Any, Dict, Optional
 
 from langchain_ollama import ChatOllama
+try:
+    from langchain_openai import ChatOpenAI
+except Exception:  # optional dependency
+    ChatOpenAI = None
 from langchain_core.tools import Tool
 
 
@@ -16,7 +20,16 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_classic.agents import AgentExecutor
 from langchain_classic.agents.react.agent import create_react_agent
 
-from core.config import LLM_MODEL_NAME, LLM_TEMPERATURE, DEBUG_LLM, DISABLE_REASONING
+from core.config import (
+    LLM_MODEL_NAME,
+    LLM_TEMPERATURE,
+    DEBUG_LLM,
+    DISABLE_REASONING,
+    LLM_PROVIDER,
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
+    OPENAI_ORG,
+)
 from core.utils.chat import ChatSession
 from core.utils.json_validator import validate_json_command
 from core.services.spellcheck import correct_text
@@ -229,8 +242,27 @@ def parse_agent_output(output_obj: Any) -> Dict[str, Any]:
 # -------------------------- Model singletons (cached) -------------------------
 
 @lru_cache(maxsize=1)
-def get_chat_llm(temperature: float = LLM_TEMPERATURE) -> ChatOllama:
+def get_chat_llm(temperature: float = LLM_TEMPERATURE):
     # Single chat model used for both simple JSON and ReAct
+    provider = (LLM_PROVIDER or "ollama").lower()
+
+    if provider == "openai":
+        if ChatOpenAI is None:
+            raise RuntimeError(
+                "OpenAI provider selected but langchain-openai is not installed."
+            )
+        if not OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY is required for OpenAI provider.")
+        return ChatOpenAI(
+            model=LLM_MODEL_NAME,
+            temperature=temperature,
+            api_key=OPENAI_API_KEY,
+            base_url=OPENAI_BASE_URL,
+            organization=OPENAI_ORG,
+            disabled_params={"stop": True},
+        )
+
+    # default: ollama
     return ChatOllama(model=LLM_MODEL_NAME, temperature=temperature)
 
 
