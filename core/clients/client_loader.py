@@ -12,9 +12,19 @@ class RestClientConfig:
     rest_url: str
     rest_hmac_key_id: str
     rest_hmac_secret: str
+    crm_direct_backend: str = "coripo"
     rest_user_id_header: str = "X-User-Id"
     rest_user_name_header: str = "X-User-Name"
     rest_tenant_header: str = "X-Tenant"
+    sugar_rest_url: str = ""
+    sugar_auth_mode: str = "login"
+    sugar_username: str = ""
+    sugar_password: str = ""
+    sugar_password_is_md5: bool = False
+    sugar_application_name: str = "talk2api"
+    sugar_session_id: str = ""
+    sugar_session_resolver_url: str = ""
+    sugar_session_resolver_method: str = "POST"
 
 
 def _load_clients(path: str) -> Dict[str, dict]:
@@ -45,12 +55,32 @@ def get_rest_client_config(client_name: str, config_path: str = "core/clients/cl
     if not all([rest_url, rest_key, rest_secret]):
         raise ValueError(f"Missing rest_url/rest_hmac_key_id/rest_hmac_secret for client '{client_name}'")
 
+    sugar_rest_url = item.get("sugar_rest_url") or item.get("legacy_rest_url") or ""
+    sugar_auth_mode = item.get("sugar_auth_mode", "login")
+    sugar_username = item.get("sugar_username", "")
+    sugar_password = item.get("sugar_password", "")
+    sugar_password_is_md5 = bool(item.get("sugar_password_is_md5", False))
+    sugar_application_name = item.get("sugar_application_name", "talk2api")
+    sugar_session_id = item.get("sugar_session_id", "")
+    sugar_session_resolver_url = item.get("sugar_session_resolver_url", "")
+    sugar_session_resolver_method = item.get("sugar_session_resolver_method", "POST")
+
     return RestClientConfig(
         name=item["name"],
         rest_url=rest_url,
         rest_hmac_key_id=rest_key,
         rest_hmac_secret=rest_secret,
+        crm_direct_backend=item.get("crm_direct_backend", "coripo"),
         rest_user_id_header=item.get("rest_user_id_header", "X-User-Id"),
         rest_user_name_header=item.get("rest_user_name_header", "X-User-Name"),
         rest_tenant_header=item.get("rest_tenant_header", "X-Tenant"),
+        sugar_rest_url=sugar_rest_url,
+        sugar_auth_mode=sugar_auth_mode,
+        sugar_username=sugar_username,
+        sugar_password=sugar_password,
+        sugar_password_is_md5=sugar_password_is_md5,
+        sugar_application_name=sugar_application_name,
+        sugar_session_id=sugar_session_id,
+        sugar_session_resolver_url=sugar_session_resolver_url,
+        sugar_session_resolver_method=sugar_session_resolver_method,
     )

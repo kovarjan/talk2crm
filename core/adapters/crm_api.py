@@ -3,7 +3,10 @@ from datetime import datetime, timezone
 import requests, uuid
 from core.clients.client import Client
 from core.config import CRM_EXECUTION_MODE
-from core.adapters.crm_direct import execute_direct_command, CrmDirectError
+from core.adapters.crm_direct import CrmDirectError
+from core.services.crm_service import CRMService, CrmRequestContext
+
+_crm_service = CRMService()
 
 # HMAC
 def sign(secret: bytes, ts: str, nonce: str, body: bytes) -> str:
@@ -111,7 +114,10 @@ def execute_crm_command(command: dict, tenant: str | None = None, user_id: str |
         return call_crm_api(command, user_id=user_id)
     if mode == "direct":
         try:
-            return execute_direct_command(command, user_id=user_id, tenant=tenant)
+            if not tenant or not user_id:
+                return {"error": "Direct CRM mode requires tenant and user_id"}
+            ctx = CrmRequestContext(tenant=tenant, user_id=user_id)
+            return _crm_service.execute_command(ctx, command)
         except CrmDirectError as e:
             return {"error": str(e)}
     return {"error": f"Unknown CRM_EXECUTION_MODE: {CRM_EXECUTION_MODE}"}

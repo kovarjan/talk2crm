@@ -58,6 +58,8 @@ python -m pytest -s tests/test_find_company_tool_real.py
 
 Swagger UI: http://localhost:3000/swagger
 
+Architecture notes: `docs/architecture.md`
+
 ## Common commands
 
 ```bash
@@ -90,12 +92,20 @@ Create `.env` from `.env.example`. Key settings:
 - `CRM_SYSTEM`: CRM system key
 - `CRM_INSTANCE`: CRM instance name
 - `CRM_EXECUTION_MODE`: off|gateway|direct (controls CRM writes/reads)
+- `CRM_DIRECT_BACKEND`: coripo|sugar_v4_1 (only for direct mode)
 
 Multi-tenant client config:
 - `core/clients/clients_config.json`: list of clients/tenants
 - Required fields per client: `name`, `api_url`, `api_key_id`, `api_key`, `api_version`
 - Direct REST fields per client: `rest_url`, `rest_hmac_key_id`, `rest_hmac_secret`
 - Optional REST headers per client: `rest_user_id_header`, `rest_user_name_header`, `rest_tenant_header`
+- Optional direct backend selector per client: `crm_direct_backend` (`coripo` or `sugar_v4_1`)
+- Optional Sugar v4.1 fields per client:
+  - `sugar_rest_url` (e.g. `https://localhost:2000/service/v4_1/rest.php`)
+  - `sugar_auth_mode` (`login` | `session` | `resolver`)
+  - `sugar_username`, `sugar_password`, `sugar_password_is_md5`, `sugar_application_name`
+  - `sugar_session_id` (for `session` mode)
+  - `sugar_session_resolver_url`, `sugar_session_resolver_method` (for `resolver` mode; future user-scoped sid/session exchange)
 - `REDIS_URL`: Redis connection string
 - `CHAT_KEY_PREFIX`, `CHAT_USER_INDEX_PREFIX`, `CHAT_META_PREFIX`: Redis key prefixes
 - `CHAT_TTL_SECONDS`: chat history TTL in seconds

@@ -12,12 +12,7 @@ from core.services.company_lookup import find_company_by_name_or_city
 from core.services.contacts_lookup import find_contact_by_query
 from core.services.company_contacts import list_contacts_for_account, list_contacts_for_company_name
 from core.services.meetings_lookup import search_meetings, get_user_agenda, check_user_conflict
-from core.adapters.crm_direct import (
-    execute_direct_command,
-    get_module_template,
-    get_quickform_template,
-)
-from core.adapters.crm_modules import fetch_modules
+from core.services.crm_service import CRMService, CrmRequestContext
 
 # Remove lax defaults for security; keep only for explicit fallbacks if you really want them.
 DEFAULT_TENANT = os.getenv("DEFAULT_TENANT", "ai-local")
@@ -28,6 +23,7 @@ log_dir = "./logs"
 os.makedirs(log_dir, exist_ok=True)
 log_filename = os.path.join(log_dir, f"{datetime.datetime.now().strftime('%Y-%m-%d')}_tools_calls.log")
 logging.basicConfig(filename=log_filename, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+_crm_service = CRMService()
 
 
 # ------------------------- Strict payload parsing --------------------------
@@ -88,6 +84,15 @@ def _parse_crm_payload(input_str: str) -> dict:
     return data
 
 
+def _crm_context_from_args(args: Dict[str, Any]) -> CrmRequestContext:
+    user_name = (args.get("user_name") or "").strip() or None
+    return CrmRequestContext(
+        tenant=args["tenant"],
+        user_id=args["user_id"],
+        user_name=user_name,
+    )
+
+
 def _prune_crm_response(data: Any) -> Any:
     """
     Strip heavy UI/meta payloads from CORIPO REST responses to keep context small.
@@ -103,11 +108,23 @@ def _prune_crm_response(data: Any) -> Any:
             "module": data.get("module"),
             "records": data.get("records"),
             "row_count": data.get("row_count"),
+            "result_count": data.get("result_count"),
             "next_offset": data.get("next_offset"),
             "previous_offset": data.get("previous_offset"),
             "current_offset": data.get("current_offset"),
         }
         return {k: v for k, v in keep.items() if v is not None}
+
+    # Sugar v4.1 get_available_modules
+    if "modules" in data and isinstance(data.get("modules"), list):
+        return {"modules": data.get("modules")}
+
+    # Sugar v4.1 get_module_fields
+    if "module_fields" in data and isinstance(data.get("module_fields"), dict):
+        return {
+            "module_name": data.get("module_name"),
+            "module_fields": data.get("module_fields"),
+        }
 
     # For detail responses, avoid dumping defs/columns/queries if present
     noisy_keys = {
@@ -244,11 +261,8 @@ def crm_list_tool(input_str: str) -> str:
             if isinstance(args.get("filter"), str):
                 payload.pop("filter", None)
                 payload["where"] = args["filter"]
-        resp = execute_direct_command(
-            {"action": "list", "module": module, "parameters": payload},
-            tenant=args["tenant"],
-            user_id=args["user_id"],
-        )
+        ctx = _crm_context_from_args(args)
+        resp = _crm_service.list_records(ctx, module=module, parameters=payload)
         out = {"success": True, "tenant": args["tenant"], "data": _prune_crm_response(resp)}
     except Exception as e:
         out = {"success": False, "error": str(e)}
@@ -269,11 +283,8 @@ def crm_detail_tool(input_str: str) -> str:
             raise ValueError("Missing 'module'.")
         if not record:
             raise ValueError("Missing 'record' (id).")
-        resp = execute_direct_command(
-            {"action": "detail", "module": module, "updateId": record},
-            tenant=args["tenant"],
-            user_id=args["user_id"],
-        )
+        ctx = _crm_context_from_args(args)
+        resp = _crm_service.get_record(ctx, module=module, record_id=record)
         out = {"success": True, "tenant": args["tenant"], "data": _prune_crm_response(resp)}
     except Exception as e:
         out = {"success": False, "error": str(e)}
@@ -291,11 +302,8 @@ def crm_template_tool(input_str: str) -> str:
         module = (args.get("module") or "").strip()
         if not module:
             raise ValueError("Missing 'module'.")
-        resp = get_module_template(
-            module,
-            tenant=args["tenant"],
-            user_id=args["user_id"],
-        )
+        ctx = _crm_context_from_args(args)
+        resp = _crm_service.get_template(ctx, module=module)
         out = {"success": True, "tenant": args["tenant"], "data": _prune_crm_response(resp)}
     except Exception as e:
         out = {"success": False, "error": str(e)}
@@ -313,11 +321,8 @@ def crm_quickform_tool(input_str: str) -> str:
         module = (args.get("module") or "").strip()
         if not module:
             raise ValueError("Missing 'module'.")
-        resp = get_quickform_template(
-            module,
-            tenant=args["tenant"],
-            user_id=args["user_id"],
-        )
+        ctx = _crm_context_from_args(args)
+        resp = _crm_service.get_quickform(ctx, module=module)
         out = {"success": True, "tenant": args["tenant"], "data": _prune_crm_response(resp)}
     except Exception as e:
         out = {"success": False, "error": str(e)}
@@ -338,11 +343,8 @@ def crm_create_tool(input_str: str) -> str:
             raise ValueError("Missing 'module'.")
         if not isinstance(fields, dict):
             raise ValueError("Missing or invalid 'fields'.")
-        resp = execute_direct_command(
-            {"action": "create", "module": module, "parameters": fields},
-            tenant=args["tenant"],
-            user_id=args["user_id"],
-        )
+        ctx = _crm_context_from_args(args)
+        resp = _crm_service.create_record(ctx, module=module, fields=fields)
         out = {"success": True, "tenant": args["tenant"], "data": _prune_crm_response(resp)}
     except Exception as e:
         out = {"success": False, "error": str(e)}
@@ -366,11 +368,8 @@ def crm_update_tool(input_str: str) -> str:
             raise ValueError("Missing 'record' (id).")
         if not isinstance(fields, dict):
             raise ValueError("Missing or invalid 'fields'.")
-        resp = execute_direct_command(
-            {"action": "update", "module": module, "updateId": record, "parameters": fields},
-            tenant=args["tenant"],
-            user_id=args["user_id"],
-        )
+        ctx = _crm_context_from_args(args)
+        resp = _crm_service.update_record(ctx, module=module, record_id=record, fields=fields)
         out = {"success": True, "tenant": args["tenant"], "data": _prune_crm_response(resp)}
     except Exception as e:
         out = {"success": False, "error": str(e)}
@@ -391,11 +390,8 @@ def crm_delete_tool(input_str: str) -> str:
             raise ValueError("Missing 'module'.")
         if not record:
             raise ValueError("Missing 'record' (id).")
-        resp = execute_direct_command(
-            {"action": "delete", "module": module, "updateId": record},
-            tenant=args["tenant"],
-            user_id=args["user_id"],
-        )
+        ctx = _crm_context_from_args(args)
+        resp = _crm_service.delete_record(ctx, module=module, record_id=record)
         out = {"success": True, "tenant": args["tenant"], "data": resp}
     except Exception as e:
         out = {"success": False, "error": str(e)}
@@ -410,14 +406,9 @@ def crm_modules_tool(input_str: str) -> str:
     try:
         logging.info(f"crm_modules_tool called with input: {input_str}")
         args = _parse_crm_payload(input_str)
-        user_name = (args.get("user_name") or "").strip() or None
+        ctx = _crm_context_from_args(args)
         device = (args.get("device") or "desktop").strip()
-        resp = fetch_modules(
-            tenant=args["tenant"],
-            user_id=args["user_id"],
-            user_name=user_name,
-            device=device,
-        )
+        resp = _crm_service.get_modules(ctx, device=device)
         out = {"success": True, "tenant": args["tenant"], "data": _prune_crm_response(resp)}
     except Exception as e:
         out = {"success": False, "error": str(e)}

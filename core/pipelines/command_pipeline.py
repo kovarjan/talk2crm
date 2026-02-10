@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 
 from core.config import SHOW_TIMING
 from core.services.stt import transcribe_audio
@@ -48,6 +48,16 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s"
 )
+
+
+def _module_agent_router() -> Dict[str, Callable[..., Dict[str, Any]]]:
+    return {
+        "meetings": MeetingsAgent,
+        "contacts": ContactsAgent,
+        "tasks": TasksAgent,
+        "notes": NotesAgent,
+        "calls": CallsAgent,
+    }
 
 def _log_timing(t0: float, label: str) -> None:
     if SHOW_TIMING:
@@ -129,63 +139,24 @@ def run_command_pipeline(
             tenant=tenant,
         )
         _log_timing(t2, "QueryAgent")
-    elif module == "meetings":
-        t2 = time.time()
-        response = MeetingsAgent(
-            command_text=text,
-            chat_history=history,
-            action=action or "",
-            module_context=extra_context or {},
-            tenant=tenant
-        )
-        _log_timing(t2, "MeetingsAgent")
-    elif module == "contacts":
-        t2 = time.time()
-        response = ContactsAgent(
-            command_text=text,
-            chat_history=history,
-            action=action or "",
-            module_context=extra_context or {},
-            tenant=tenant
-        )
-        _log_timing(t2, "ContactsAgent")
-    # elif module in ["tasks", "notes", "calls"]:
-    elif module == "tasks":
-        t2 = time.time()
-        response = TasksAgent(
-            command_text=text,
-            chat_history=history,
-            action=action or "",
-            module_context=extra_context or {},
-            tenant=tenant,
-        )
-        _log_timing(t2, "TasksAgent")
-    elif module == "notes":
-        t2 = time.time()
-        response = NotesAgent(
-            command_text=text,
-            chat_history=history,
-            action=action or "",
-            module_context=extra_context or {},
-            tenant=tenant,
-        )
-        _log_timing(t2, "NotesAgent")
-    elif module == "calls":
-        t2 = time.time()
-        response = CallsAgent(
-            command_text=text,
-            chat_history=history,
-            action=action or "",
-            module_context=extra_context or {},
-            tenant=tenant,
-        )
-        _log_timing(t2, "CallsAgent")
     else:
-        # Not implemented yet in this POC
-        response = {
-            "action": "error",
-            "message_to_user": f"Modul '{module}' zatím není implementován v této verzi.",
-        }
+        handlers = _module_agent_router()
+        handler = handlers.get(module or "")
+        if not handler:
+            response = {
+                "action": "error",
+                "message_to_user": f"Modul '{module}' zatím není implementován v této verzi.",
+            }
+        else:
+            t2 = time.time()
+            response = handler(
+                command_text=text,
+                chat_history=history,
+                action=action or "",
+                module_context=extra_context or {},
+                tenant=tenant,
+            )
+            _log_timing(t2, f"{handler.__name__}")
 
     # 5) Validate final JSON
     t3 = time.time()
