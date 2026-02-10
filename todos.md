@@ -19,6 +19,20 @@
 - [ ] OpenAi backend option implementation
 
 
+
+
+Sugar rest api
+site/service/v4_1/soap.php
+site/service/v4_1/rest.php
+
+site/tests/SugarWebServices/CrudWebservicesTest.php
+
+https://chatgpt.com/c/69899c47-4a1c-8327-a44a-3b4ab5959783
+
+SugarCRM 6.5 api v4_1
+
+
+
 #### TODO:  This CRM voice assistant isinteracting with SugarCRM based system, id like to expand its functionality so user can ask about client, company, contact etc.. and the llm would give him available informatin with all accesible relations etc.. how this feature should be build and integrated. Idealy getting data from CRM using SugarBean so ACLs are enforced.
 
 https://gemini.google.com/app/03f9ea01f15cad38
