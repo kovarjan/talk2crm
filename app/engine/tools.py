@@ -25,6 +25,29 @@ def _normalize_text(value: str) -> str:
 def _infer_module_from_intent(input_text: str, requested_module: str) -> str:
     normalized = _normalize_text(input_text)
     module_norm = (requested_module or "").strip().lower()
+    module_aliases = {
+        "meeting": "Meetings",
+        "meetings": "Meetings",
+        "schuzka": "Meetings",
+        "schuzky": "Meetings",
+        "call": "Calls",
+        "calls": "Calls",
+        "hovor": "Calls",
+        "task": "Tasks",
+        "tasks": "Tasks",
+        "ukol": "Tasks",
+        "note": "Notes",
+        "notes": "Notes",
+        "poznamka": "Notes",
+        "poznamky": "Notes",
+    }
+
+    # Respect explicit module provided by the agent/user and only infer when module is missing/unknown.
+    explicit_module = module_aliases.get(module_norm)
+    if explicit_module:
+        return explicit_module
+    if module_norm:
+        return requested_module
 
     call_tokens = ("hovor", "telefonat", "zavolej", "volat", "call")
     task_tokens = ("ukol", "task", "todo", "pripomen", "follow up")
@@ -40,13 +63,11 @@ def _infer_module_from_intent(input_text: str, requested_module: str) -> str:
         return "Tasks"
     if has_call:
         return "Calls"
-    if has_note:
-        return "Notes"
     if has_meeting:
         return "Meetings"
+    if has_note:
+        return "Notes"
 
-    if module_norm:
-        return requested_module
     return "Meetings"
 
 

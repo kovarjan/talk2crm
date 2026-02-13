@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from qdrant_client import QdrantClient, models
@@ -40,9 +42,9 @@ class TenantRAGService:
         settings = get_settings()
         self.settings = settings
         self.client = self._build_client_with_fallback()
-        self.collection = settings.qdrant_collection
+        self.collection_prefix = settings.qdrant_collection
+        self._ensured_collections: set[str] = set()
         self.embedder = HashEmbedder(settings.rag_embedding_size)
-        self._ensure_collection()
 
     def _build_client_with_fallback(self) -> QdrantClient:
         try:
@@ -65,42 +67,53 @@ class TenantRAGService:
             )
             return QdrantClient(path=self.settings.qdrant_local_path)
 
-    def _ensure_collection(self) -> None:
+    def _ensure_collection(self, collection_name: str) -> None:
+        if collection_name in self._ensured_collections:
+            return
         existing = {item.name for item in self.client.get_collections().collections}
-        if self.collection in existing:
+        if collection_name in existing:
+            self._ensured_collections.add(collection_name)
             return
         self.client.create_collection(
-            collection_name=self.collection,
+            collection_name=collection_name,
             vectors_config=models.VectorParams(
                 size=self.settings.rag_embedding_size,
                 distance=models.Distance.COSINE,
             ),
         )
-        logger.info("Created Qdrant collection name=%s", self.collection)
+        self._ensured_collections.add(collection_name)
+        logger.info("Created Qdrant collection name=%s", collection_name)
+
+    @staticmethod
+    def _sanitize_collection_segment(value: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value or "").strip())
+        cleaned = cleaned.strip("_")
+        return cleaned or "tenant"
+
+    def _tenant_collection(self, tenant_id: str) -> str:
+        prefix = self._sanitize_collection_segment(self.collection_prefix)
+        tenant = self._sanitize_collection_segment(tenant_id)
+        candidate = f"{prefix}__{tenant}"
+        if len(candidate) > 190:
+            suffix = hashlib.sha1(tenant.encode("utf-8")).hexdigest()[:10]
+            candidate = f"{prefix}__{tenant[:150]}__{suffix}"
+        self._ensure_collection(candidate)
+        return candidate
 
     def search(self, *, tenant_id: str, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        collection = self._tenant_collection(tenant_id)
         query_vector = self.embedder.embed(query)
-        filter_ = models.Filter(
-            must=[
-                models.FieldCondition(
-                    key="tenant_id",
-                    match=models.MatchValue(value=tenant_id),
-                )
-            ]
-        )
         if hasattr(self.client, "search"):
             points = self.client.search(
-                collection_name=self.collection,
+                collection_name=collection,
                 query_vector=query_vector,
-                query_filter=filter_,
                 limit=limit,
                 with_payload=True,
             )
         else:
             query_response = self.client.query_points(
-                collection_name=self.collection,
+                collection_name=collection,
                 query=query_vector,
-                query_filter=filter_,
                 limit=limit,
                 with_payload=True,
             )
@@ -114,17 +127,10 @@ class TenantRAGService:
         ]
 
     def count(self, *, tenant_id: str, module: str | None = None) -> int:
-        must: list[models.FieldCondition] = [
-            models.FieldCondition(
-                key="tenant_id",
-                match=models.MatchValue(value=tenant_id),
-            )
-        ]
+        collection = self._tenant_collection(tenant_id)
         if not module:
-            filter_ = models.Filter(must=must)
             result = self.client.count(
-                collection_name=self.collection,
-                count_filter=filter_,
+                collection_name=collection,
                 exact=True,
             )
             return int(result.count)
@@ -132,13 +138,12 @@ class TenantRAGService:
         # Module-specific count is done client-side for compatibility across
         # local/remote Qdrant variants where payload filtering semantics differ.
         normalized = str(module).strip().lower()
-        filter_ = models.Filter(must=must)
         total = 0
         offset = None
         while True:
             points, offset = self.client.scroll(
-                collection_name=self.collection,
-                scroll_filter=filter_,
+                collection_name=collection,
+                scroll_filter=None,
                 with_payload=True,
                 with_vectors=False,
                 limit=512,
@@ -156,42 +161,190 @@ class TenantRAGService:
         return total
 
     def ingest_records(self, *, tenant_id: str, module: str, records: list[dict[str, Any]]) -> int:
+        collection = self._tenant_collection(tenant_id)
+        prepared: list[dict[str, Any]] = []
+        for raw_record in records:
+            record = dict(raw_record)
+            record.pop("_record_hash", None)
+            record_id = str(record.get("id") or uuid.uuid4())
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{tenant_id}:{module}:{record_id}"))
+            text = json.dumps(record, ensure_ascii=False, sort_keys=True)
+            prepared.append(
+                {
+                    "record": record,
+                    "record_id": record_id,
+                    "point_id": point_id,
+                    "text": text,
+                    "modified_at": self._record_modified_at(record),
+                    "record_hash": self._record_hash(raw_record),
+                }
+            )
+
+        existing_hashes = self._load_existing_hashes(
+            point_ids=[item["point_id"] for item in prepared],
+            collection_name=collection,
+        )
+
         points: list[models.PointStruct] = []
         batch_size = max(1, int(self.settings.rag_upsert_batch_size))
         inserted = 0
-        for record in records:
-            record_id = str(record.get("id") or uuid.uuid4())
-            text = json.dumps(record, ensure_ascii=False, sort_keys=True)
-            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{tenant_id}:{module}:{record_id}"))
+        skipped_unchanged = 0
+
+        for item in prepared:
+            if existing_hashes.get(item["point_id"]) == item["record_hash"]:
+                skipped_unchanged += 1
+                continue
             points.append(
                 models.PointStruct(
-                    id=point_id,
-                    vector=self.embedder.embed(text),
+                    id=item["point_id"],
+                    vector=self.embedder.embed(item["text"]),
                     payload={
                         "tenant_id": tenant_id,
                         "module": module,
-                        "record_id": record_id,
-                        "text": text,
-                        "record": record,
+                        "record_id": item["record_id"],
+                        "record_hash": item["record_hash"],
+                        "modified_at": (
+                            item["modified_at"].isoformat()
+                            if item["modified_at"] is not None
+                            else None
+                        ),
+                        "text": item["text"],
+                        "record": item["record"],
                     },
                 )
             )
             if len(points) >= batch_size:
-                self.client.upsert(collection_name=self.collection, points=points)
+                self.client.upsert(collection_name=collection, points=points)
                 inserted += len(points)
                 points = []
 
         if points:
-            self.client.upsert(collection_name=self.collection, points=points)
+            self.client.upsert(collection_name=collection, points=points)
             inserted += len(points)
 
         logger.info(
-            "Ingested records into qdrant tenant=%s module=%s count=%s",
+            "Ingested records into qdrant tenant=%s module=%s count=%s skipped_unchanged=%s",
             tenant_id,
             module,
             inserted,
+            skipped_unchanged,
         )
         return inserted
+
+    @staticmethod
+    def _record_hash(record: dict[str, Any]) -> str:
+        provided = record.get("_record_hash")
+        if provided:
+            return str(provided)
+        clone = dict(record)
+        clone.pop("_record_hash", None)
+        payload = json.dumps(
+            clone,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _load_existing_hashes(self, point_ids: list[str], collection_name: str) -> dict[str, str]:
+        if not point_ids:
+            return {}
+        existing: dict[str, str] = {}
+        batch_size = max(1, int(self.settings.rag_upsert_batch_size))
+        for index in range(0, len(point_ids), batch_size):
+            chunk = point_ids[index : index + batch_size]
+            try:
+                points = self.client.retrieve(
+                    collection_name=collection_name,
+                    ids=chunk,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception:
+                logger.exception("Failed to load existing point hashes for incremental skip")
+                return existing
+
+            for point in points or []:
+                point_id = str(getattr(point, "id", "") or "")
+                payload = getattr(point, "payload", None) or {}
+                record_hash = str(payload.get("record_hash") or "")
+                if point_id and record_hash:
+                    existing[point_id] = record_hash
+        return existing
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+
+        # Normalize common Sugar/Coripo formats to timezone-aware UTC.
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                parsed = datetime.strptime(raw, fmt)
+                return parsed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    @classmethod
+    def _record_modified_at(cls, record: dict[str, Any]) -> datetime | None:
+        for key in ("date_modified", "modified_at", "date_entered", "created_at"):
+            parsed = cls._parse_datetime(record.get(key))
+            if parsed is not None:
+                return parsed
+        return None
+
+    @classmethod
+    def _payload_modified_at(cls, payload: dict[str, Any]) -> datetime | None:
+        parsed = cls._parse_datetime(payload.get("modified_at"))
+        if parsed is not None:
+            return parsed
+        record = payload.get("record")
+        if isinstance(record, dict):
+            return cls._record_modified_at(record)
+        return None
+
+    def _latest_module_modified_at(self, *, tenant_id: str, module: str) -> datetime | None:
+        collection = self._tenant_collection(tenant_id)
+        normalized = str(module).strip().lower()
+        offset = None
+        latest: datetime | None = None
+
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=collection,
+                scroll_filter=None,
+                with_payload=True,
+                with_vectors=False,
+                limit=512,
+                offset=offset,
+            )
+            if not points:
+                break
+
+            for point in points:
+                payload = point.payload or {}
+                payload_module = str(payload.get("module") or "").strip().lower()
+                if payload_module != normalized:
+                    continue
+                modified_at = self._payload_modified_at(payload)
+                if modified_at is None:
+                    continue
+                if latest is None or modified_at > latest:
+                    latest = modified_at
+
+            if offset is None:
+                break
+
+        return latest
 
     @staticmethod
     def _extract_records(payload: Any) -> list[dict[str, Any]]:
@@ -225,11 +378,22 @@ class TenantRAGService:
         module: str,
         limit: int | None = None,
         page_size: int = 500,
+        incremental: bool = True,
     ) -> int:
         remaining = None if limit is None else max(0, int(limit))
         page_size = max(1, min(int(page_size), 500))
         offset = 0
         total = 0
+        watermark = self._latest_module_modified_at(tenant_id=tenant_id, module=module) if incremental else None
+        logger.info(
+            "Starting CRM ingest tenant=%s module=%s incremental=%s watermark=%s limit=%s page_size=%s",
+            tenant_id,
+            module,
+            incremental,
+            watermark.isoformat() if watermark is not None else None,
+            limit,
+            page_size,
+        )
 
         while True:
             if remaining == 0:
@@ -242,16 +406,44 @@ class TenantRAGService:
                     "query": "",
                     "offset": offset,
                     "max_results": current_size,
+                    "include_hash": True,
+                    "hash_algorithm": "sha256",
                 },
             )
             records = self._extract_records(payload)
             if not records:
                 break
 
-            inserted = self.ingest_records(tenant_id=tenant_id, module=module, records=records)
+            reached_existing = False
+            selected_records: list[dict[str, Any]] = []
+            if watermark is None:
+                selected_records = records
+            else:
+                for record in records:
+                    modified_at = self._record_modified_at(record)
+                    if modified_at is None:
+                        selected_records.append(record)
+                        continue
+                    # Keep same-timestamp records to avoid missing updates due to
+                    # coarse second-level timestamps.
+                    if modified_at >= watermark:
+                        selected_records.append(record)
+                        continue
+                    reached_existing = True
+
+            inserted = 0
+            if selected_records:
+                inserted = self.ingest_records(
+                    tenant_id=tenant_id,
+                    module=module,
+                    records=selected_records,
+                )
             total += inserted
             if remaining is not None:
                 remaining -= inserted
+
+            if watermark is not None and reached_existing:
+                break
 
             # Stop when backend returned a partial page.
             if len(records) < current_size:
@@ -268,14 +460,16 @@ class TenantRAGService:
         module: str,
         limit: int | None = None,
         page_size: int = 500,
+        incremental: bool = True,
     ) -> int:
-        if limit is not None or page_size != 500:
+        if incremental or limit is not None or page_size != 500:
             return await self.ingest_from_crm_paginated(
                 tenant_id=tenant_id,
                 crm_client=crm_client,
                 module=module,
                 limit=limit,
                 page_size=page_size,
+                incremental=incremental,
             )
         data = await crm_client.fetch_ai_ingest_dump(module)
         records = self._extract_records(data)

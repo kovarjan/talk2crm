@@ -43,6 +43,15 @@ Optional HMAC headers (machine-to-machine use):
   - body uses `input_text` as query and optional `scope` (`contacts|accounts|meetings`)
   - returns scoped or aggregate hybrid search results
 
+### RAG ingest
+- `POST /rag/ingest/`
+  - body supports:
+    - `modules` list (module names)
+    - `synchronous` (bool)
+    - `record_limit` (optional int)
+    - `page_size` (optional int)
+    - `incremental` (bool, default `true`) -> ingest only records newer than latest already ingested record per tenant+module
+
 ### Audio cache
 - `GET /audio/{file_id}` returns cached `.wav` from `CACHE_DIR/audio`
 
