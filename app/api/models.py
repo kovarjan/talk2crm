@@ -32,6 +32,7 @@ class RagIngestRequest(BaseModel):
     synchronous: bool = False
     record_limit: int | None = None
     page_size: int | None = None
+    incremental: bool = True
 
 
 class ChatMessageItem(BaseModel):

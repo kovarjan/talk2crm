@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import tempfile
@@ -21,6 +22,7 @@ from fastapi import (
 from fastapi.responses import FileResponse
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import OperationalError
 
 from app.api.dependencies import TenantContext, get_tenant_context
 from app.api.models import (
@@ -46,6 +48,7 @@ from app.services.crm_client import SugarClient
 from app.services.tenant_manager import TenantManager
 from database.models import Chat, ChatMessage
 from database.session import get_db
+from langchain_openai import ChatOpenAI
 
 
 logger = get_logger(__name__)
@@ -53,6 +56,8 @@ router = APIRouter()
 settings = get_settings()
 _rag_service_instance: TenantRAGService | None = None
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_CHAT_TITLE_MAX_CHARS = 80
+_CHAT_TITLE_MAX_WORDS = 6
 
 
 def get_rag_service() -> TenantRAGService | None:
@@ -115,15 +120,42 @@ async def _get_chat_or_404(
     return chat
 
 
-async def _create_chat(db: AsyncSession, *, tenant_id: str, user_id: str) -> Chat:
+async def _create_chat(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    user_id: str,
+    persist: bool = True,
+) -> Chat:
     chat = Chat(
         id=uuid.uuid4().hex,
         tenant_id=tenant_id,
         user_id=user_id,
     )
     db.add(chat)
-    await db.commit()
-    await db.refresh(chat)
+    if not persist:
+        return chat
+
+    attempts = 5
+    for attempt in range(attempts):
+        try:
+            await db.commit()
+            await db.refresh(chat)
+            return chat
+        except OperationalError as exc:
+            await db.rollback()
+            is_locked = "database is locked" in str(exc).lower()
+            if not is_locked or attempt == attempts - 1:
+                raise
+            # Exponential backoff for transient sqlite writer contention.
+            await asyncio.sleep(0.05 * (2**attempt))
+            chat = Chat(
+                id=uuid.uuid4().hex,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
+            db.add(chat)
+
     return chat
 
 
@@ -270,6 +302,256 @@ def _normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, An
     return normalized
 
 
+def _extract_pending_action_from_agent_result(agent_result: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(agent_result, dict):
+        return None
+
+    direct_pending = agent_result.get("pending_action")
+    if isinstance(direct_pending, dict):
+        return direct_pending
+
+    steps = agent_result.get("intermediate_steps")
+    if not isinstance(steps, list):
+        return None
+
+    for step in reversed(steps):
+        if not isinstance(step, dict):
+            continue
+        observation = step.get("observation")
+        if isinstance(observation, dict):
+            obs = observation
+        elif isinstance(observation, str):
+            obs = _try_parse_json(observation) or {}
+        else:
+            obs = {}
+        if not isinstance(obs, dict):
+            continue
+        status = str(obs.get("status") or "").strip().lower()
+        pending = obs.get("pending_action")
+        if status == "confirmation_required" and isinstance(pending, dict):
+            return pending
+    return None
+
+
+def _first_nonempty_from_map(data: dict[str, Any], keys: list[str]) -> str | None:
+    for key in keys:
+        value = data.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _merge_context_with_pending_action(
+    context: dict[str, Any] | None,
+    pending_action: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = dict(context or {})
+    if not isinstance(pending_action, dict):
+        return merged
+
+    if "pending_action" not in merged:
+        merged["pending_action"] = pending_action
+
+    pending_module = str(
+        pending_action.get("module") or pending_action.get("effective_module") or ""
+    ).strip()
+    if pending_module and not str(merged.get("module") or "").strip():
+        merged["module"] = pending_module
+
+    data = pending_action.get("data")
+    data_obj = data if isinstance(data, dict) else {}
+    fields_raw = data_obj.get("fields")
+    fields = fields_raw if isinstance(fields_raw, dict) else {}
+
+    parent_type = str(fields.get("parent_type") or data_obj.get("parent_type") or "").strip()
+    parent_id = str(fields.get("parent_id") or data_obj.get("parent_id") or "").strip()
+    if parent_id and not str(merged.get("record") or "").strip():
+        merged["record"] = parent_id
+    if parent_type and not str(merged.get("record_module") or "").strip():
+        merged["record_module"] = parent_type
+
+    entities_raw = merged.get("entities")
+    entities = dict(entities_raw) if isinstance(entities_raw, dict) else {}
+
+    contact_name = _first_nonempty_from_map(
+        fields,
+        ["contact_name", "related_contact_name", "invite_contact_name", "participant_name"],
+    ) or _first_nonempty_from_map(
+        data_obj,
+        ["contact_name", "related_contact_name", "invite_contact_name", "participant_name"],
+    )
+    account_name = _first_nonempty_from_map(
+        fields,
+        ["account_name", "related_account_name", "company", "company_name"],
+    ) or _first_nonempty_from_map(
+        data_obj,
+        ["account_name", "related_account_name", "company", "company_name"],
+    )
+
+    if contact_name and not str(entities.get("contact_name") or "").strip():
+        entities["contact_name"] = contact_name
+    if account_name and not str(entities.get("account_name") or "").strip():
+        entities["account_name"] = account_name
+
+    parent_type_norm = parent_type.lower()
+    if parent_id and "contact" in parent_type_norm and not str(entities.get("contact_id") or "").strip():
+        entities["contact_id"] = parent_id
+    if parent_id and "account" in parent_type_norm and not str(entities.get("account_id") or "").strip():
+        entities["account_id"] = parent_id
+
+    if entities:
+        merged["entities"] = entities
+
+    return merged
+
+
+async def _load_latest_pending_action(
+    db: AsyncSession,
+    *,
+    chat_id: str,
+    tenant_id: str,
+    user_id: str,
+) -> dict[str, Any] | None:
+    stmt = (
+        select(ChatMessage)
+        .where(
+            ChatMessage.chat_id == chat_id,
+            ChatMessage.tenant_id == tenant_id,
+            ChatMessage.user_id == user_id,
+            ChatMessage.role == "assistant",
+        )
+        .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    message = result.scalar_one_or_none()
+    if message is None or not isinstance(message.metadata_json, dict):
+        return None
+
+    agent_result = message.metadata_json.get("agent_result")
+    if not isinstance(agent_result, dict):
+        return None
+    return _extract_pending_action_from_agent_result(agent_result)
+
+
+def _history_for_title_prompt(history: list[ChatMessageItem]) -> str:
+    lines: list[str] = []
+    # Keep prompt small and focused on the beginning of conversation topic.
+    for item in history[:8]:
+        role = (item.role or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = _to_user_message(item.content or "")
+        if not content:
+            continue
+        compact = re.sub(r"\s+", " ", content).strip()
+        if len(compact) > 220:
+            compact = compact[:220].rstrip() + "..."
+        prefix = "U" if role == "user" else "A"
+        lines.append(f"{prefix}: {compact}")
+    return "\n".join(lines)
+
+
+def _sanitize_chat_name(value: str | None) -> str:
+    text = _to_user_message(value or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.strip("`\"'“”„")
+    if not text:
+        return ""
+    # Keep only the first line if model adds extra explanation.
+    text = text.splitlines()[0].strip()
+    words = text.split()
+    if len(words) > _CHAT_TITLE_MAX_WORDS:
+        text = " ".join(words[:_CHAT_TITLE_MAX_WORDS])
+    if len(text) > _CHAT_TITLE_MAX_CHARS:
+        text = text[:_CHAT_TITLE_MAX_CHARS].rstrip(" ,.;:-")
+    return text
+
+
+def _fallback_chat_name(history: list[ChatMessageItem]) -> str:
+    for item in history:
+        if (item.role or "").strip().lower() != "user":
+            continue
+        text = re.sub(r"\s+", " ", (item.content or "")).strip()
+        if not text:
+            continue
+        words = text.split()
+        short = " ".join(words[:_CHAT_TITLE_MAX_WORDS])
+        return _sanitize_chat_name(short) or "Novy chat"
+    return "Novy chat"
+
+
+async def _generate_chat_name_with_llm(
+    *,
+    history: list[ChatMessageItem],
+    tenant_id: str,
+    user_id: str,
+) -> str:
+    transcript = _history_for_title_prompt(history)
+    if not transcript:
+        return _fallback_chat_name(history)
+
+    settings = get_settings()
+    llm = ChatOpenAI(
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
+        temperature=0,
+    )
+    prompt = (
+        "Jsi asistent, ktery vytvari kratke nazvy konverzaci v cestine.\n"
+        "Pravidla:\n"
+        "- vrat pouze nazev (zadne vysvetleni)\n"
+        "- 2 az 6 slov\n"
+        "- max 80 znaku\n"
+        "- bez uvozovek a bez tecky na konci\n\n"
+        f"Konverzace:\n{transcript}\n\nNazev:"
+    )
+    try:
+        response = await llm.ainvoke(prompt)
+        raw = response.content if hasattr(response, "content") else str(response)
+        if isinstance(raw, list):
+            raw = " ".join(str(part) for part in raw)
+        cleaned = _sanitize_chat_name(str(raw))
+        if cleaned:
+            return cleaned
+    except Exception:
+        logger.exception(
+            "Chat title generation failed tenant=%s user=%s",
+            tenant_id,
+            user_id,
+        )
+
+    return _fallback_chat_name(history)
+
+
+async def _ensure_chat_name(
+    *,
+    chat: Chat,
+    history: list[ChatMessageItem],
+    tenant_id: str,
+    user_id: str,
+) -> str:
+    existing = (chat.name or "").strip()
+    if existing:
+        return existing
+
+    generated = await _generate_chat_name_with_llm(
+        history=history,
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
+    generated = _sanitize_chat_name(generated)
+    if not generated:
+        generated = _fallback_chat_name(history)
+    chat.name = generated[:255]
+    chat.updated_at = datetime.now(timezone.utc)
+    return chat.name
+
+
 async def _process_input_core(
     *,
     db: AsyncSession,
@@ -297,7 +579,16 @@ async def _process_input_core(
             user_id=user_id,
         )
     else:
-        chat = await _create_chat(db, tenant_id=tenant_id, user_id=user_id)
+        chat = await _create_chat(db, tenant_id=tenant_id, user_id=user_id, persist=False)
+
+    latest_pending_action = await _load_latest_pending_action(
+        db,
+        chat_id=chat.id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
+    effective_context = _merge_context_with_pending_action(payload.context, latest_pending_action)
+    request_context = effective_context or None
 
     await _append_message(
         db,
@@ -308,7 +599,7 @@ async def _process_input_core(
         content=payload.input_text,
     )
 
-    action_confirmation = bool((payload.context or {}).get("confirm_action", False))
+    action_confirmation = bool(effective_context.get("confirm_action", False))
 
     quick_result = await try_handle_quick_action(
         input_text=payload.input_text,
@@ -323,7 +614,7 @@ async def _process_input_core(
             tenant_id=tenant_id,
             user_id=user_id,
             input_text=payload.input_text,
-            request_context=payload.context,
+            request_context=request_context,
             crm_client=crm_client,
             rag_service=rag_service,
             action_confirmation=action_confirmation,
@@ -333,7 +624,7 @@ async def _process_input_core(
                 tenant_id=tenant_id,
                 user_id=user_id,
                 input_text=payload.input_text,
-                context=payload.context,
+                context=request_context,
                 tools=tools,
             )
             agent_result = _normalize_agent_result_for_ui(agent_result)
@@ -375,14 +666,19 @@ async def _process_input_core(
         metadata={"agent_result": agent_result, "raw_output": assistant_raw_text},
     )
 
-    await db.commit()
-
     history = await _load_messages(
         db,
         chat_id=chat.id,
         tenant_id=tenant_id,
         user_id=user_id,
     )
+    await _ensure_chat_name(
+        chat=chat,
+        history=history,
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
+    await db.commit()
 
     file_id, audio_url = await _maybe_generate_voice(
         text=assistant_text,
@@ -394,6 +690,7 @@ async def _process_input_core(
         "action_result": agent_result,
         "message_to_user": assistant_text,
         "chat_id": chat.id,
+        "chat_name": chat.name,
         "chat_history": [item.model_dump(mode="json") for item in history],
         "audio_file_id": file_id,
         "audio_response_id": file_id,
@@ -412,6 +709,7 @@ async def _trigger_ingest(
     user_id: str | None = None,
     record_limit: int | None = None,
     page_size: int | None = None,
+    incremental: bool = True,
 ) -> None:
     rag_service = get_rag_service()
     if rag_service is None:
@@ -430,6 +728,7 @@ async def _trigger_ingest(
             module=module,
             limit=record_limit,
             page_size=page_size or 500,
+            incremental=incremental,
         )
         logger.info(
             "RAG ingest complete tenant=%s module=%s records=%s",
@@ -510,10 +809,11 @@ async def get_chat(
         tenant_id=ctx["tenant_id"],
         user_id=ctx["user_id"],
     )
+    response_name = (chat.name or "").strip() or _fallback_chat_name(history)
     return ChatHistoryResponse(
         chat_id=chat.id,
         history=history,
-        name=chat.name,
+        name=response_name,
         updated_at=chat.updated_at,
     )
 
@@ -546,11 +846,12 @@ async def get_user_chats(
             tenant_id=ctx["tenant_id"],
             user_id=ctx["user_id"],
         )
+        response_name = (chat.name or "").strip() or _fallback_chat_name(history)
         items.append(
             ChatHistoryResponse(
                 chat_id=chat.id,
                 history=history,
-                name=chat.name,
+                name=response_name,
                 updated_at=chat.updated_at,
             )
         )
@@ -803,6 +1104,7 @@ async def rag_ingest(
                     module=module,
                     limit=record_limit,
                     page_size=page_size,
+                    incremental=payload.incremental,
                 )
                 results[module] = count
             except Exception:
@@ -820,6 +1122,7 @@ async def rag_ingest(
                 "modules": results,
                 "record_limit": record_limit,
                 "page_size": page_size,
+                "incremental": payload.incremental,
             },
         )
 
@@ -834,6 +1137,7 @@ async def rag_ingest(
             user_id=ctx["user_id"],
             record_limit=payload.record_limit,
             page_size=page_size,
+            incremental=payload.incremental,
         )
     return BaseResponse(
         success=True,
@@ -843,6 +1147,7 @@ async def rag_ingest(
             "scheduled_modules": modules,
             "record_limit": payload.record_limit,
             "page_size": page_size,
+            "incremental": payload.incremental,
         },
     )
 

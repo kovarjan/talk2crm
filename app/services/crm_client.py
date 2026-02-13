@@ -409,6 +409,11 @@ class SugarClient:
                 "operands": [{"field": "deleted", "type": "eq", "value": "0"}],
             }
 
+        if "include_hash" in data:
+            payload["include_hash"] = bool(data.get("include_hash"))
+        if data.get("hash_algorithm"):
+            payload["hash_algorithm"] = str(data.get("hash_algorithm"))
+
         return payload
 
     def _sanitize_coripo_fields(self, data: dict[str, Any]) -> dict[str, Any]:

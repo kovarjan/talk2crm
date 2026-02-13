@@ -158,7 +158,8 @@ Optional machine-to-machine HMAC headers:
 
 - `app/engine/rag.py` uses deterministic hash embeddings as a lightweight default for local development.
 - In production, replace the embedder with a real embedding model and keep the same tenant filter contract.
-- Qdrant retrieval enforces tenant isolation via payload filter on `tenant_id`.
+- Qdrant uses one collection per tenant (`<QDRANT_COLLECTION>__<tenant_id-sanitized>`), which provides hard tenant isolation at storage level.
+- If upgrading from older shared-collection mode, re-ingest tenant data (or migrate vectors) so historical vectors are visible in tenant-specific collections.
 
 
 
@@ -171,6 +172,7 @@ curl -X POST 'http://127.0.0.1:8011/rag/ingest/' \
   -H 'X-User-Id: 28' \
   --data '{
     "modules": ["Contacts"],
+    "incremental": true,
     "synchronous": true,
     "record_limit": 2000,
     "page_size": 200
