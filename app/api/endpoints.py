@@ -444,13 +444,25 @@ async def _trigger_ingest(
 def _normalize_ingest_modules(modules: list[str] | None) -> list[str]:
     if not modules:
         return ["Contacts", "Accounts", "Meetings"]
+    canonical_map = {
+        "contacts": "Contacts",
+        "accounts": "Accounts",
+        "meetings": "Meetings",
+        "calls": "Calls",
+        "tasks": "Tasks",
+        "notes": "Notes",
+        "opportunities": "Opportunities",
+        "leads": "Leads",
+        "users": "Users",
+        "cases": "Cases",
+    }
     normalized: list[str] = []
     seen: set[str] = set()
     for module in modules:
         value = (module or "").strip()
         if not value:
             continue
-        canonical = value[0].upper() + value[1:] if value.lower() != "acm_orders" else value
+        canonical = canonical_map.get(value.lower(), value)
         if canonical.lower() in seen:
             continue
         seen.add(canonical.lower())
@@ -846,7 +858,19 @@ async def rag_status(
     normalized_module = None
     if module:
         trimmed = module.strip()
-        normalized_module = trimmed[0].upper() + trimmed[1:] if trimmed else None
+        canonical_map = {
+            "contacts": "Contacts",
+            "accounts": "Accounts",
+            "meetings": "Meetings",
+            "calls": "Calls",
+            "tasks": "Tasks",
+            "notes": "Notes",
+            "opportunities": "Opportunities",
+            "leads": "Leads",
+            "users": "Users",
+            "cases": "Cases",
+        }
+        normalized_module = canonical_map.get(trimmed.lower(), trimmed) if trimmed else None
     count = rag_service.count(tenant_id=ctx["tenant_id"], module=normalized_module)
     return BaseResponse(
         success=True,
