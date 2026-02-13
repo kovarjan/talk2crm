@@ -64,7 +64,92 @@ class ModuleAdjustmentEngine:
         module_norm = (module or "").strip().lower()
         if module_norm in {"meeting", "meetings"}:
             return await self._adjust_meetings(action=action, data=data)
+        if module_norm in {"call", "calls", "task", "tasks", "note", "notes"}:
+            return await self._adjust_activity_parent(module=module_norm, action=action, data=data)
         return AdjustmentResult(data=copy.deepcopy(data), notes=[])
+
+    async def _adjust_activity_parent(
+        self,
+        *,
+        module: str,
+        action: str,
+        data: dict[str, Any],
+    ) -> AdjustmentResult:
+        normalized_action = (action or "").strip().lower()
+        if normalized_action not in {"create", "update", "patch"}:
+            return AdjustmentResult(data=copy.deepcopy(data), notes=[])
+
+        adjusted = copy.deepcopy(data)
+        notes: list[str] = []
+        if self.crm_client.mode != "coripo_public":
+            return AdjustmentResult(data=adjusted, notes=notes)
+
+        fields = self._collect_coripo_fields(adjusted)
+        self._drop_helper_fields(fields)
+
+        contact_id = self._first_nonempty(fields, ["contact_id", "related_contact_id", "invite_contact_id"])
+        account_id = self._first_nonempty(fields, ["account_id", "related_account_id", "company_id"])
+        if contact_id and not self._is_valid_crm_id(contact_id):
+            contact_id = None
+        if account_id and not self._is_valid_crm_id(account_id):
+            account_id = None
+
+        contact_name = self._first_nonempty(
+            fields,
+            ["contact_name", "related_contact_name", "invite_contact_name", "participant_name"],
+        )
+        account_name = self._first_nonempty(
+            fields,
+            ["account_name", "related_account_name", "company", "company_name"],
+        )
+        text_contact_hint, text_account_hint = self._extract_text_hints(self.input_text)
+        contact_name = contact_name or text_contact_hint
+        account_name = account_name or text_account_hint
+
+        if not contact_id and contact_name:
+            contact_candidate = await self._resolve_record_by_name(scope="contacts", name=contact_name)
+            if contact_candidate:
+                resolved = str(contact_candidate.get("id") or "").strip()
+                if self._is_valid_crm_id(resolved):
+                    contact_id = resolved
+        if not account_id and account_name:
+            account_candidate = await self._resolve_record_by_name(scope="accounts", name=account_name)
+            if account_candidate:
+                resolved = str(account_candidate.get("id") or "").strip()
+                if self._is_valid_crm_id(resolved):
+                    account_id = resolved
+
+        # Always prefer person relation for "Týká se" when available.
+        if contact_id:
+            fields["parent_type"] = "Contacts"
+            fields["parent_id"] = contact_id
+        elif account_id:
+            fields["parent_type"] = "Accounts"
+            fields["parent_id"] = account_id
+
+        topic = self._derive_topic(fields, self.input_text)
+        dt_value = self._derive_meeting_datetime(fields, self.input_text)
+        if module in {"call", "calls"}:
+            if topic and not str(fields.get("name") or "").strip():
+                fields["name"] = f"Hovor - {topic}"
+            if dt_value and not str(fields.get("date_start") or "").strip():
+                fields["date_start"] = dt_value
+            if "duration_minutes" not in fields and "duration_hours" not in fields:
+                fields["duration_hours"] = 0
+                fields["duration_minutes"] = 30
+        elif module in {"task", "tasks"}:
+            if topic and not str(fields.get("name") or "").strip():
+                fields["name"] = f"Úkol - {topic}"
+            if dt_value and not str(fields.get("date_due") or "").strip():
+                fields["date_due"] = dt_value
+        elif module in {"note", "notes"}:
+            if topic and not str(fields.get("name") or "").strip():
+                fields["name"] = f"Poznámka - {topic}"
+            if topic and not str(fields.get("description") or "").strip():
+                fields["description"] = topic
+
+        adjusted["fields"] = fields
+        return AdjustmentResult(data=adjusted, notes=notes)
 
     async def _adjust_meetings(self, *, action: str, data: dict[str, Any]) -> AdjustmentResult:
         normalized_action = (action or "").strip().lower()
@@ -196,12 +281,13 @@ class ModuleAdjustmentEngine:
             notes.append(f"Ignoring non-CRM account id '{account_id}'")
             account_id = None
 
-        if account_id:
-            fields["parent_type"] = "Accounts"
-            fields["parent_id"] = account_id
-        elif contact_id:
+        # Always prefer person relation for "Týká se" when available.
+        if contact_id:
             fields["parent_type"] = "Contacts"
             fields["parent_id"] = contact_id
+        elif account_id:
+            fields["parent_type"] = "Accounts"
+            fields["parent_id"] = account_id
 
         topic = self._derive_topic(fields, self.input_text)
         contact_display_name = contact_name or self._record_label(contact_candidate or {})
@@ -415,6 +501,14 @@ class ModuleAdjustmentEngine:
         if time_match:
             hour = max(0, min(23, int(time_match.group("hour"))))
             minute = max(0, min(59, int(time_match.group("minute"))))
+        else:
+            normalized_input = cls._normalize_text(input_text or "")
+            if "po poledni" in normalized_input:
+                hour = 13
+                minute = 0
+            elif "hned rano" in normalized_input or "rano" in normalized_input:
+                hour = 8
+                minute = 0
 
         if weekday is None:
             if parsed_current:

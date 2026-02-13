@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from typing import Any
 
 import httpx
@@ -10,6 +12,42 @@ from app.core.config import get_settings
 from app.engine.adjustments import ModuleAdjustmentEngine
 from app.engine.rag import TenantRAGService
 from app.services.crm_client import SugarClient
+
+
+def _normalize_text(value: str) -> str:
+    lowered = (value or "").strip().lower()
+    unaccented = "".join(
+        c for c in unicodedata.normalize("NFD", lowered) if unicodedata.category(c) != "Mn"
+    )
+    return re.sub(r"[^a-z0-9]+", " ", unaccented).strip()
+
+
+def _infer_module_from_intent(input_text: str, requested_module: str) -> str:
+    normalized = _normalize_text(input_text)
+    module_norm = (requested_module or "").strip().lower()
+
+    call_tokens = ("hovor", "telefonat", "zavolej", "volat", "call")
+    task_tokens = ("ukol", "task", "todo", "pripomen", "follow up")
+    note_tokens = ("poznamk", "zapis", "zapisek", "note")
+    meeting_tokens = ("schuzk", "meeting")
+
+    has_call = any(token in normalized for token in call_tokens)
+    has_task = any(token in normalized for token in task_tokens)
+    has_note = any(token in normalized for token in note_tokens)
+    has_meeting = any(token in normalized for token in meeting_tokens)
+
+    if has_task:
+        return "Tasks"
+    if has_call:
+        return "Calls"
+    if has_note:
+        return "Notes"
+    if has_meeting:
+        return "Meetings"
+
+    if module_norm:
+        return requested_module
+    return "Meetings"
 
 
 def build_tools(
@@ -51,8 +89,12 @@ def build_tools(
 
         normalized_action = (action or "").strip().lower()
         mutating_actions = {"create", "update", "patch", "delete"}
+        effective_module = module
+        if normalized_action in {"create", "update", "patch"}:
+            effective_module = _infer_module_from_intent(input_text=input_text, requested_module=module)
+
         adjustment = await adjustment_engine.apply(
-            module=module,
+            module=effective_module,
             action=normalized_action,
             data=data,
         )
@@ -68,6 +110,7 @@ def build_tools(
                     ),
                     "pending_action": {
                         "module": module,
+                        "effective_module": effective_module,
                         "action": normalized_action,
                         "data": data,
                     },
@@ -79,7 +122,7 @@ def build_tools(
         data.setdefault("requested_by_user_id", user_id)
         try:
             result = await crm_client.execute_module_action(
-                module=module,
+                module=effective_module,
                 action=action,
                 data=data,
             )
@@ -88,7 +131,7 @@ def build_tools(
                     ingested = await rag_service.ingest_from_crm(
                         tenant_id=tenant_id,
                         crm_client=crm_client,
-                        module=module,
+                        module=effective_module,
                     )
                     if isinstance(result, dict):
                         result["_rag_ingested"] = ingested
@@ -116,6 +159,7 @@ def build_tools(
                     "response_body": body_preview,
                     "failed_action": {
                         "module": module,
+                        "effective_module": effective_module,
                         "action": normalized_action,
                         "data": data,
                     },
@@ -129,6 +173,7 @@ def build_tools(
                     "message": str(exc),
                     "failed_action": {
                         "module": module,
+                        "effective_module": effective_module,
                         "action": normalized_action,
                         "data": data,
                     },

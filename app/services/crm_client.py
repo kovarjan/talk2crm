@@ -168,9 +168,9 @@ class SugarClient:
         lowered = normalized.lower()
         if lowered in mapping:
             return mapping[lowered]
-        if not normalized:
-            return normalized
-        return normalized[0].upper() + normalized[1:]
+        # Preserve custom module casing (e.g. acm_invoices) to avoid
+        # breaking Coripo bean/module resolution for non-core modules.
+        return normalized
 
     def _escape_like(self, value: str) -> str:
         return value.replace("\\", "\\\\").replace("'", "\\'")
@@ -402,7 +402,7 @@ class SugarClient:
             "columns": {},
         }
 
-        query = str(data.get("query") or "").strip()
+        query = str(data.get("q") or data.get("query") or "").strip()
         if not query:
             payload["filter"] = {
                 "operator": "and",
@@ -441,6 +441,34 @@ class SugarClient:
             for key, value in source.items()
             if key not in reserved and value is not None
         }
+
+    @staticmethod
+    def _coripo_module_candidates(module_name: str) -> list[str]:
+        value = str(module_name or "").strip().strip("/")
+        if not value:
+            return []
+
+        candidates: list[str] = [value]
+        if "_" in value:
+            parts = [part for part in value.split("_")]
+            title_parts = [part[:1].upper() + part[1:] if part else part for part in parts]
+            candidates.append("_".join(title_parts))
+
+            if parts and parts[0] and parts[0].isalpha() and len(parts[0]) <= 4:
+                prefixed = [parts[0].upper(), *title_parts[1:]]
+                candidates.append("_".join(prefixed))
+
+        candidates.append(value[:1].upper() + value[1:])
+        candidates.append(value.upper())
+
+        unique: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            if item in seen:
+                continue
+            seen.add(item)
+            unique.append(item)
+        return unique
 
     # -----------------------------
     # Sugar v4.1 helpers
@@ -664,13 +692,26 @@ class SugarClient:
                 )
 
             if normalized in {"list", "search"}:
-                payload = self._build_coripo_list_payload(module_name, data)
-                return await self._coripo_request(
-                    "POST",
-                    f"list/{module_name}",
-                    json_body=payload,
-                    ensure_sid=True,
-                )
+                last_exc: Exception | None = None
+                for candidate in self._coripo_module_candidates(module_name):
+                    payload = self._build_coripo_list_payload(candidate, data)
+                    try:
+                        return await self._coripo_request(
+                            "POST",
+                            f"list/{candidate}",
+                            json_body=payload,
+                            ensure_sid=True,
+                        )
+                    except httpx.HTTPStatusError as exc:
+                        last_exc = exc
+                        # Coripo returns 500 for unknown/non-bean modules.
+                        # Try casing variants before failing hard.
+                        if exc.response.status_code < 500:
+                            raise
+                        continue
+                if last_exc is not None:
+                    raise last_exc
+                raise ValueError(f"Unable to resolve Coripo module for list/search: {module_name}")
 
         if self.is_v4_1:
             module_name = self._canonical_module(module)
