@@ -24,6 +24,9 @@ async def get_tenant_context(
     authorization: str | None = Header(default=None, alias="Authorization"),
     x_timestamp: str | None = Header(default=None, alias="X-Timestamp"),
     x_nonce: str | None = Header(default=None, alias="X-Nonce"),
+    x_original_uri: str | None = Header(default=None, alias="X-Original-URI"),
+    x_rewrite_url: str | None = Header(default=None, alias="X-Rewrite-URL"),
+    x_forwarded_uri: str | None = Header(default=None, alias="X-Forwarded-Uri"),
     db: AsyncSession = Depends(get_db),
 ) -> TenantContext:
     auth_value = authorization or ""
@@ -32,6 +35,7 @@ async def get_tenant_context(
         ok = verify_hmac_request(
             method=request.method,
             path=request.url.path,
+            original_path=x_original_uri or x_rewrite_url or x_forwarded_uri,
             body=body,
             authorization=authorization,
             timestamp=x_timestamp,

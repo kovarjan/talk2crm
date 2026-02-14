@@ -64,6 +64,7 @@ def verify_hmac_request(
     *,
     method: str,
     path: str,
+    original_path: str | None,
     body: bytes,
     authorization: str | None,
     timestamp: str | None,
@@ -89,19 +90,35 @@ def verify_hmac_request(
     if not key:
         return False
 
-    signing_input = "\n".join(
-        [
-            method.upper(),
-            path,
-            timestamp,
-            nonce,
-            body.decode("utf-8", errors="replace"),
-        ]
-    )
-    expected = hmac.new(
-        key.encode("utf-8"),
-        signing_input.encode("utf-8"),
-        hashlib.sha256,
-    ).digest()
-    expected_b64 = base64.b64encode(expected).decode("utf-8")
-    return hmac.compare_digest(expected_b64, parsed.signature_b64)
+    body_text = body.decode("utf-8", errors="replace")
+    candidate_paths: list[str] = []
+    for candidate in [path, original_path]:
+        value = (candidate or "").strip()
+        if value and value not in candidate_paths:
+            candidate_paths.append(value)
+
+    # Common reverse-proxy rewrite case: external /v1/* -> internal /*
+    if path and not path.startswith("/v1/"):
+        prefixed = f"/v1{path}"
+        if prefixed not in candidate_paths:
+            candidate_paths.append(prefixed)
+
+    for candidate_path in candidate_paths:
+        signing_input = "\n".join(
+            [
+                method.upper(),
+                candidate_path,
+                timestamp,
+                nonce,
+                body_text,
+            ]
+        )
+        expected = hmac.new(
+            key.encode("utf-8"),
+            signing_input.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        expected_b64 = base64.b64encode(expected).decode("utf-8")
+        if hmac.compare_digest(expected_b64, parsed.signature_b64):
+            return True
+    return False
