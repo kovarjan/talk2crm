@@ -139,6 +139,7 @@ docker compose -f docker-compose.dev.yml up --build -d
 - API Swagger: `http://localhost:8011/swagger`
 - Adminer: `http://localhost:8085`
 - Qdrant dashboard: `http://localhost:6333/dashboard`
+- Dozzle (log viewer): `http://localhost:8090`
 
 4. Seed tenant (inside API container):
 
