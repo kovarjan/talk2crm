@@ -112,6 +112,7 @@ ENV/
 env/
 env.bak/
 venv.bak/
+*INI.md
 
 # Spyder project settings
 .spyderproject
@@ -140,6 +141,7 @@ cython_debug/
 .qdrant_storage/
 .qdrant_storage_local/
 sugar_voice_bridge.db
+sugar_voice_bridge.db*
 
 cache/*
 /*.mp3

@@ -144,17 +144,9 @@ async def _create_chat(
             return chat
         except OperationalError as exc:
             await db.rollback()
-            is_locked = "database is locked" in str(exc).lower()
-            if not is_locked or attempt == attempts - 1:
+            if attempt == attempts - 1:
                 raise
-            # Exponential backoff for transient sqlite writer contention.
             await asyncio.sleep(0.05 * (2**attempt))
-            chat = Chat(
-                id=uuid.uuid4().hex,
-                tenant_id=tenant_id,
-                user_id=user_id,
-            )
-            db.add(chat)
 
     return chat
 
@@ -516,13 +508,13 @@ async def _generate_chat_name_with_llm(
         temperature=0,
     )
     prompt = (
-        "Jsi asistent, ktery vytvari kratke nazvy konverzaci v cestine.\n"
+        "Jsi asistent, který vytváří krátké názvy konverzací v češtině.\n"
         "Pravidla:\n"
-        "- vrat pouze nazev (zadne vysvetleni)\n"
-        "- 2 az 6 slov\n"
-        "- max 80 znaku\n"
-        "- bez uvozovek a bez tecky na konci\n\n"
-        f"Konverzace:\n{transcript}\n\nNazev:"
+        "- vrať pouze název (žádné vysvětlení)\n"
+        "- 2 až 6 slov\n"
+        "- max 80 znaků\n"
+        "- bez uvozovek a bez tečky na konci\n\n"
+        f"Konverzace:\n{transcript}\n\název:"
     )
     try:
         response = await llm.ainvoke(prompt)
