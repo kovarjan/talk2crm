@@ -106,7 +106,6 @@ celerybeat.pid
 
 # Environments
 .env
-.env.*
 .venv
 venv/
 ENV/
@@ -141,3 +140,6 @@ cython_debug/
 .qdrant_storage/
 .qdrant_storage_local/
 sugar_voice_bridge.db
+
+cache/*
+/*.mp3
