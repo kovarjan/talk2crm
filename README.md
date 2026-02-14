@@ -166,6 +166,30 @@ Default dev DB credentials:
 - user: `postgres`
 - password: `postgres`
 
+## Docker Production Stack
+
+Runs API + PostgreSQL + Qdrant with production-oriented defaults (no hot reload, persistent named volumes, container healthchecks).
+
+1. Create production env file:
+
+```bash
+cp .env.production.example .env
+```
+
+2. Set strong secrets in `.env` (`POSTGRES_PASSWORD`, `TENANT_SECRET_KEY`, `HMAC_KEYS_JSON`, CORS origins).
+
+3. Start production stack:
+
+```bash
+docker compose -f docker-compose.prod.yml up --build -d
+```
+
+4. Stop production stack:
+
+```bash
+docker compose -f docker-compose.prod.yml down
+```
+
 ## API Compatibility
 
 Implemented endpoints:

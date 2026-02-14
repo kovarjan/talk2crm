@@ -10,9 +10,9 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/${POSTGRES_DB}
       QDRANT_URL: http://qdrant:6333
-      ENVIRONMENT: dev
-      DEBUG: "true"
-      WATCHFILES_FORCE_POLLING: "true"
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
+      DEBUG: ${DEBUG:-true}
+      WATCHFILES_FORCE_POLLING: ${WATCHFILES_FORCE_POLLING:-true}
     ports:
       - "8011:8011"
     volumes:
