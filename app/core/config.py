@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     whisper_model_size: str = "base"
     whisper_device: str = "auto"
     whisper_compute_type: str = "int8"
+    whisper_allow_cpu_fallback: bool = True
 
     tts_provider: str = "edge-tts"
     tts_voice: str = "en-US-AriaNeural"

@@ -13,6 +13,9 @@ services:
       QDRANT_URL: http://qdrant:6333
       ENVIRONMENT: ${ENVIRONMENT:-production}
       DEBUG: ${DEBUG:-false}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+    gpus: ${DOCKER_GPUS:-all}
     ports:
       - "8011:8011"
     depends_on:
