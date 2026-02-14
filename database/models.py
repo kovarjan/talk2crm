@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime
+import uuid
 
 from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
     ForeignKey,
-    Integer,
     String,
     Text,
     UniqueConstraint,
+    Uuid,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -73,7 +74,9 @@ class Chat(Base):
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[str] = mapped_column(
+        Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
     chat_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True
     )

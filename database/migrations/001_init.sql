@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS chats (
 CREATE INDEX IF NOT EXISTS idx_chats_user ON chats(user_id);
 
 CREATE TABLE IF NOT EXISTS chat_messages (
-    id BIGSERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY,
     chat_id VARCHAR(64) NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
     tenant_id VARCHAR(100) NOT NULL,
     user_id VARCHAR(255) NOT NULL,
