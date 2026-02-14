@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: talk2api2-api
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8011 --reload
+    command: opentelemetry-instrument uvicorn app.main:app --host 0.0.0.0 --port 8011 --reload
     env_file:
       - .env
     environment:
@@ -13,6 +13,14 @@ services:
       ENVIRONMENT: dev
       DEBUG: "true"
       WATCHFILES_FORCE_POLLING: "true"
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-talk2api2-api}
+      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.namespace=talk2api2,deployment.environment=dev}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_LOGS_EXPORTER: otlp
+      OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
+      OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-none}
+      OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED: "true"
     ports:
       - "8011:8011"
     volumes:
@@ -25,6 +33,24 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_started
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.130.1
+    container_name: talk2api2-otel-collector
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    environment:
+      SIGNOZ_OTLP_ENDPOINT: ${SIGNOZ_OTLP_ENDPOINT:-host.docker.internal:4317}
+      SIGNOZ_OTLP_INSECURE: ${SIGNOZ_OTLP_INSECURE:-true}
+      SIGNOZ_INGESTION_KEY: ${SIGNOZ_INGESTION_KEY:-}
+    volumes:
+      - ./deploy/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "13133:13133"
     restart: unless-stopped
 
   postgres:

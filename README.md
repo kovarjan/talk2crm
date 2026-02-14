@@ -10,6 +10,7 @@ Multi-tenant FastAPI gateway for voice/text-to-action workflows against SugarCRM
 - faster-whisper for STT
 - edge-tts for TTS
 - SQLAlchemy + PostgreSQL/SQLite for tenant/chat state
+- OpenTelemetry Collector -> SigNoz for centralized logging
 
 ## Project Structure
 
@@ -120,7 +121,7 @@ Coripo FE (`rest_coripo`) bridge wiring for local development:
 
 ## Docker Dev Stack
 
-Runs full local stack with hot-reload API + PostgreSQL + Adminer + Qdrant.
+Runs full local stack with hot-reload API + PostgreSQL + Adminer + Qdrant + OpenTelemetry Collector.
 
 1. Configure env:
 
@@ -134,11 +135,32 @@ cp .env.example .env
 docker compose -f docker-compose.dev.yml up --build -d
 ```
 
+Run app + database + SigNoz together:
+
+```bash
+docker compose -f docker-compose.dev.yml -f docker-compose.signoz.yml up -d
+```
+
+When `docker-compose.signoz.yml` is included, the project OTEL collector is auto-routed to the in-stack SigNoz collector (`signoz-otel-collector:4317`).
+
+SigNoz destination is configured via `.env`:
+
+- `SIGNOZ_OTLP_ENDPOINT`: OTLP gRPC endpoint (`host:port`)
+- `SIGNOZ_OTLP_INSECURE`: `true` for local/self-hosted without TLS, `false` for TLS
+- `SIGNOZ_INGESTION_KEY`: required for SigNoz Cloud, usually empty for self-hosted
+
+Examples:
+
+- self-hosted SigNoz on host machine: `SIGNOZ_OTLP_ENDPOINT=host.docker.internal:4317`
+- SigNoz Cloud: `SIGNOZ_OTLP_ENDPOINT=ingest.<region>.signoz.cloud:443`, `SIGNOZ_OTLP_INSECURE=false`
+
 3. Open services:
 
 - API Swagger: `http://localhost:8011/swagger`
 - Adminer: `http://localhost:8085`
 - Qdrant dashboard: `http://localhost:6333/dashboard`
+- SigNoz UI: `http://localhost:8080`
+- OTEL Collector health endpoint: `http://localhost:13133`
 
 4. Seed tenant (inside API container):
 
@@ -155,6 +177,12 @@ docker compose -f docker-compose.dev.yml exec api \
 
 ```bash
 docker compose -f docker-compose.dev.yml down
+```
+
+With SigNoz overlay:
+
+```bash
+docker compose -f docker-compose.dev.yml -f docker-compose.signoz.yml down
 ```
 
 Default dev DB credentials:
@@ -197,6 +225,7 @@ Optional machine-to-machine HMAC headers:
 ## Debugging & Transparency
 
 - Structured JSON logs with request id (`X-Request-Id`) and request latency.
+- Logs are exported via OpenTelemetry to SigNoz through the `otel-collector` service.
 - Tenant id and user id are kept explicit throughout route -> service -> tool -> agent flow.
 - Chat history persists user/assistant turns with metadata for replay/debug.
 - Tool outputs are captured into assistant message metadata.
