@@ -190,6 +190,24 @@ docker compose -f docker-compose.prod.yml up --build -d
 docker compose -f docker-compose.prod.yml down
 ```
 
+Whisper GPU notes:
+
+- In production env set:
+`WHISPER_DEVICE=cuda`, `WHISPER_COMPUTE_TYPE=auto`, `WHISPER_ALLOW_CPU_FALLBACK=true`
+- Compose enables GPU for API via:
+`DOCKER_GPUS=all`, `NVIDIA_VISIBLE_DEVICES=all`, `NVIDIA_DRIVER_CAPABILITIES=compute,utility`
+- Verify GPU visibility inside container:
+
+```bash
+docker compose -f docker-compose.prod.yml exec api nvidia-smi
+```
+
+- Verify Whisper runtime from logs (should show `device=cuda`):
+
+```bash
+docker compose -f docker-compose.prod.yml logs api | grep -i \"Whisper initialized\"
+```
+
 ## API Compatibility
 
 Implemented endpoints:

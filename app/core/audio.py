@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import wave
 from pathlib import Path
 
@@ -22,6 +23,46 @@ logger = get_logger(__name__)
 _whisper_model = None
 
 
+def _maybe_add_cuda_lib_paths() -> None:
+    # When using pip-provided NVIDIA libs, expose them to runtime linker.
+    paths: list[str] = []
+    try:
+        import nvidia.cublas.lib as cublas_lib  # type: ignore
+        paths.append(str(Path(cublas_lib.__file__).resolve().parent))
+    except Exception:
+        pass
+    try:
+        import nvidia.cudnn.lib as cudnn_lib  # type: ignore
+        paths.append(str(Path(cudnn_lib.__file__).resolve().parent))
+    except Exception:
+        pass
+    if not paths:
+        return
+    current = os.environ.get("LD_LIBRARY_PATH", "")
+    additions = [p for p in paths if p and p not in current]
+    if additions:
+        os.environ["LD_LIBRARY_PATH"] = ":".join(additions + ([current] if current else []))
+
+
+def _resolve_whisper_runtime(device: str, compute_type: str) -> tuple[str, str]:
+    selected_device = (device or "auto").strip().lower()
+    selected_compute = (compute_type or "auto").strip().lower()
+
+    if selected_device == "auto":
+        cuda_devices = 0
+        try:
+            import ctranslate2  # type: ignore
+            cuda_devices = int(ctranslate2.get_cuda_device_count())
+        except Exception:
+            cuda_devices = 0
+        selected_device = "cuda" if cuda_devices > 0 else "cpu"
+
+    if selected_compute == "auto":
+        selected_compute = "float16" if selected_device == "cuda" else "int8"
+
+    return selected_device, selected_compute
+
+
 def _get_whisper_model():
     global _whisper_model
     if _whisper_model is not None:
@@ -33,11 +74,40 @@ def _get_whisper_model():
             "faster_whisper is not installed. Add it to requirements and reinstall."
         )
 
-    _whisper_model = WhisperModel(
-        settings.whisper_model_size,
-        device=settings.whisper_device,
-        compute_type=settings.whisper_compute_type,
+    _maybe_add_cuda_lib_paths()
+    device, compute_type = _resolve_whisper_runtime(
+        settings.whisper_device, settings.whisper_compute_type
     )
+
+    try:
+        _whisper_model = WhisperModel(
+            settings.whisper_model_size,
+            device=device,
+            compute_type=compute_type,
+        )
+        logger.info(
+            "Whisper initialized model=%s device=%s compute_type=%s",
+            settings.whisper_model_size,
+            device,
+            compute_type,
+        )
+    except Exception:
+        if device == "cuda" and settings.whisper_allow_cpu_fallback:
+            logger.exception(
+                "Whisper CUDA init failed, falling back to CPU model=%s",
+                settings.whisper_model_size,
+            )
+            _whisper_model = WhisperModel(
+                settings.whisper_model_size,
+                device="cpu",
+                compute_type="int8",
+            )
+            logger.info(
+                "Whisper initialized model=%s device=cpu compute_type=int8 (fallback)",
+                settings.whisper_model_size,
+            )
+        else:
+            raise
     return _whisper_model
 
 
