@@ -57,7 +57,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-3. Start API:
+3. Start API (local, without Docker):
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
@@ -117,6 +117,53 @@ Coripo FE (`rest_coripo`) bridge wiring for local development:
 5. Open API docs:
 
 - `GET /swagger`
+
+## Docker Dev Stack
+
+Runs full local stack with hot-reload API + PostgreSQL + Adminer + Qdrant.
+
+1. Configure env:
+
+```bash
+cp .env.example .env
+```
+
+2. Start stack:
+
+```bash
+docker compose -f docker-compose.dev.yml up --build -d
+```
+
+3. Open services:
+
+- API Swagger: `http://localhost:8011/swagger`
+- Adminer: `http://localhost:8085`
+- Qdrant dashboard: `http://localhost:6333/dashboard`
+
+4. Seed tenant (inside API container):
+
+```bash
+docker compose -f docker-compose.dev.yml exec api \
+  python scripts/create_tenant.py \
+  --tenant-id ai-local \
+  --name "Local Coripo" \
+  --crm-base-url "http://host.docker.internal:2000/public" \
+  --crm-token "YOUR_HMAC_SECRET"
+```
+
+5. Stop stack:
+
+```bash
+docker compose -f docker-compose.dev.yml down
+```
+
+Default dev DB credentials:
+
+- host: `localhost`
+- port: `5432`
+- db: `sugar_voice_bridge`
+- user: `postgres`
+- password: `postgres`
 
 ## API Compatibility
 

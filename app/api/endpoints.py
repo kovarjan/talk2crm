@@ -195,12 +195,26 @@ async def _maybe_generate_voice(
     output_path = settings.cache_audio_dir / f"{file_id}.wav"
 
     background_tasks.add_task(
-        synthesize_to_file,
+        _synthesize_to_final_path,
         text,
         str(output_path),
         settings.tts_voice,
     )
     return file_id, f"/audio/{file_id}"
+
+
+async def _synthesize_to_final_path(
+    text: str,
+    final_output_path: str,
+    voice: str | None = None,
+) -> None:
+    final_path = Path(final_output_path)
+    temp_path = final_path.with_name(f"{final_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        await synthesize_to_file(text=text, output_path=str(temp_path), voice=voice)
+        temp_path.replace(final_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def _to_user_message(text: str) -> str:
@@ -295,7 +309,7 @@ def _normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, An
     clean = _to_user_message(output_text)
     if _looks_like_noise(clean):
         clean = (
-            "Nerozuměl jsem spolehlivě požadavku. "
+            "Nerozuměla jsem spolehlivě požadavku. "
             "Upřesněte prosím akci, modul a čas (např. schůzka v úterý 9:30)."
         )
     normalized["message_to_user"] = clean
@@ -978,12 +992,32 @@ async def process_audio(
 
     parsed_context: dict[str, Any] | None = None
     if context:
-        try:
-            parsed_context = json.loads(context)
-            if not isinstance(parsed_context, dict):
-                raise ValueError("context must be a JSON object")
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid context JSON: {exc}") from exc
+        normalized_context = context.strip()
+        # Some frontends append raw objects into FormData and send "[object Object]".
+        # Treat these placeholders as "no context" instead of failing the whole request.
+        if normalized_context.lower() in {"null", "undefined", "[object object]"}:
+            logger.warning(
+                "Ignoring non-JSON context placeholder for /process-audio tenant=%s user=%s value=%s",
+                ctx["tenant_id"],
+                ctx["user_id"],
+                normalized_context,
+            )
+        else:
+            try:
+                parsed_context = json.loads(normalized_context)
+                if parsed_context is None:
+                    parsed_context = None
+                elif not isinstance(parsed_context, dict):
+                    raise ValueError("context must be a JSON object")
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Invalid context JSON: expected a JSON object string "
+                        "(for example JSON.stringify(context)). "
+                        f"Parser error: {exc}"
+                    ),
+                ) from exc
 
     suffix = Path(file.filename or "upload.webm").suffix or ".webm"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp:

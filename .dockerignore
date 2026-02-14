@@ -1,0 +1,16 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.cache
+.DS_Store
+*.db
+cache/
+.qdrant_storage/
+.qdrant_storage_local/
+hello.mp3

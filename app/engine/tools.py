@@ -126,8 +126,9 @@ def build_tools(
                 {
                     "status": "confirmation_required",
                     "message": (
-                        "Akce mění CRM data a vyžaduje explicitní potvrzení uživatele. "
-                        "Pro provedení zopakujte požadavek s context.confirm_action=true."
+                        "Akce mění CRM data a vyžaduje potvrzení uživatele. "
+                        # "Akce mění CRM data a vyžaduje explicitní potvrzení uživatele. "
+                        # "Pro provedení zopakujte požadavek s context.confirm_action=true."
                     ),
                     "pending_action": {
                         "module": module,
