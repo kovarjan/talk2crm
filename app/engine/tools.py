@@ -98,7 +98,8 @@ def build_tools(
                 {
                     "status": "crm-disabled",
                     "message": "CRM mode is off, action skipped",
-                }
+                },
+                ensure_ascii=False,
             )
 
         try:
@@ -106,7 +107,7 @@ def build_tools(
             if not isinstance(data, dict):
                 raise ValueError("data_json must decode to an object")
         except Exception as exc:
-            return json.dumps({"error": f"Invalid data_json: {exc}"})
+            return json.dumps({"error": f"Invalid data_json: {exc}"}, ensure_ascii=False)
 
         normalized_action = (action or "").strip().lower()
         mutating_actions = {"create", "update", "patch", "delete"}
@@ -138,7 +139,7 @@ def build_tools(
                     },
                     "adjustments": adjustment.notes,
                 },
-                ensure_ascii=True,
+                ensure_ascii=False,
             )
 
         data.setdefault("requested_by_user_id", user_id)
@@ -162,7 +163,7 @@ def build_tools(
                         result["_rag_ingest_error"] = "failed"
             if adjustment.notes and isinstance(result, dict):
                 result["_adjustments"] = adjustment.notes
-            return json.dumps(result, ensure_ascii=True)
+            return json.dumps(result, ensure_ascii=False)
         except httpx.HTTPStatusError as exc:
             body_preview = ""
             try:
@@ -186,7 +187,7 @@ def build_tools(
                         "data": data,
                     },
                 },
-                ensure_ascii=True,
+                ensure_ascii=False,
             )
         except Exception as exc:
             return json.dumps(
@@ -200,7 +201,7 @@ def build_tools(
                         "data": data,
                     },
                 },
-                ensure_ascii=True,
+                ensure_ascii=False,
             )
 
     @tool("rag_search_tool")
@@ -209,15 +210,15 @@ def build_tools(
         if rag_service is None:
             return json.dumps(
                 {"warning": "RAG unavailable", "results": []},
-                ensure_ascii=True,
+                ensure_ascii=False,
             )
         results = rag_service.search(tenant_id=tenant_id, query=query, limit=limit)
-        return json.dumps(results, ensure_ascii=True)
+        return json.dumps(results, ensure_ascii=False)
 
     @tool("crm_search_tool")
     async def crm_search_tool(query: str, scope: str = "all") -> str:
         """Run SugarCRM global search for contacts/accounts/meetings/all."""
         result = await crm_client.generic_search(query=query, scope=scope)
-        return json.dumps(result, ensure_ascii=True)
+        return json.dumps(result, ensure_ascii=False)
 
     return [crm_action_tool, rag_search_tool, crm_search_tool]

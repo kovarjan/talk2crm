@@ -7,6 +7,17 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
 from app.core.config import get_settings
+from app.core.logging import (
+    LLM_STEP_AGENT_ACTION,
+    LLM_STEP_FINAL_RESPONSE,
+    LLM_STEP_TOOL_RESULT,
+    LLM_STEP_USER_INPUT,
+    get_logger,
+    log_llm_step,
+)
+
+
+logger = get_logger(__name__)
 
 
 def get_agent_executor(tenant_id: str, tools: list) -> AgentExecutor:
@@ -45,7 +56,9 @@ def get_agent_executor(tenant_id: str, tools: list) -> AgentExecutor:
     return AgentExecutor(
         agent=agent,
         tools=tools,
-        verbose=settings.debug,
+        # LangChain verbose prints dense plaintext tool invocation lines.
+        # We keep this off and emit structured step logs ourselves.
+        verbose=False,
         handle_parsing_errors=True,
         max_iterations=6,
         return_intermediate_steps=True,
@@ -60,6 +73,17 @@ async def run_agent(
     context: dict[str, Any] | None,
     tools: list,
 ) -> dict[str, Any]:
+    log_llm_step(
+        logger,
+        LLM_STEP_USER_INPUT,
+        {"input_text": input_text, "context": context or {}, "tool_count": len(tools)},
+    )
+    log_llm_step(
+        logger,
+        LLM_STEP_AGENT_ACTION,
+        {"event": "agent_execution_started"},
+    )
+
     executor = get_agent_executor(tenant_id=tenant_id, tools=tools)
     result = await executor.ainvoke(
         {
@@ -89,8 +113,30 @@ async def run_agent(
                     "log": str(log_text) if log_text is not None else None,
                 }
             )
+            log_llm_step(
+                logger,
+                LLM_STEP_AGENT_ACTION,
+                {
+                    "tool": str(tool_name) if tool_name is not None else None,
+                    "tool_input": tool_input,
+                },
+            )
+            log_llm_step(
+                logger,
+                LLM_STEP_TOOL_RESULT,
+                {
+                    "tool": str(tool_name) if tool_name is not None else None,
+                    "observation": observation,
+                },
+            )
         result["intermediate_steps"] = serialized_steps
     else:
         result["intermediate_steps"] = []
+
+    log_llm_step(
+        logger,
+        LLM_STEP_FINAL_RESPONSE,
+        result.get("output") if isinstance(result, dict) else result,
+    )
 
     return result

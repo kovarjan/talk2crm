@@ -453,7 +453,7 @@ class ModuleAdjustmentEngine:
             return current_name
         if " - " in current_name:
             return current_name.split(" - ", 1)[1].strip()
-        return "Implementace systému"
+        return ""
 
     @staticmethod
     def _weekday_from_text(text: str) -> int | None:

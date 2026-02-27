@@ -67,7 +67,7 @@ cp .env.example .env
 3. Start API (local, without Docker):
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload --no-access-log
 ```
 
 Qdrant (required for `/rag/*` endpoints):
@@ -258,6 +258,7 @@ Optional machine-to-machine HMAC headers:
 ## Debugging & Transparency
 
 - Colorized human-readable CLI logs by default (`LOG_FORMAT=pretty`).
+- Force ANSI colors in container logs (`LOG_FORCE_COLOR=true`) so `docker logs -f` stays readable.
 - Per-request LLM trace includes:
   - request payload
   - effective context passed to the agent
