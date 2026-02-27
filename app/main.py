@@ -17,6 +17,7 @@ settings = get_settings()
 setup_logging(
     settings.debug,
     log_format=settings.log_format,
+    log_force_color=settings.log_force_color,
     log_file_enabled=settings.log_file_enabled,
     log_file_path=settings.log_file_path,
     log_file_format=settings.log_file_format,

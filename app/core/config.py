@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     debug: bool = False
     environment: str = "dev"
     log_format: str = "pretty"
+    log_force_color: bool = True
     log_file_enabled: bool = False
     log_file_path: str = "./logs/talk2api2.log"
     log_file_format: str = "json"
