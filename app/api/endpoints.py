@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import unicodedata
 
 from fastapi import (
     APIRouter,
@@ -57,6 +58,15 @@ router = APIRouter()
 settings = get_settings()
 _rag_service_instance: TenantRAGService | None = None
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_MD_FENCE_RE = re.compile(r"```(?:\w+)?\s*([\s\S]*?)```", re.IGNORECASE)
+_MD_BOLD_RE = re.compile(r"\*\*(.*?)\*\*")
+_MD_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)")
+_MD_INLINE_CODE_RE = re.compile(r"`([^`]*)`")
+_LEADING_SYMBOL_RE = re.compile(r"^[\s\-\u2022>*]+")
+_EMOJI_RE = re.compile(
+    r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF]+",
+    flags=re.UNICODE,
+)
 _CHAT_TITLE_MAX_CHARS = 80
 _CHAT_TITLE_MAX_WORDS = 6
 
@@ -211,7 +221,16 @@ async def _synthesize_to_final_path(
 
 
 def _to_user_message(text: str) -> str:
-    cleaned = _THINK_TAG_RE.sub("", text or "").strip()
+    cleaned = _THINK_TAG_RE.sub("", text or "")
+    cleaned = _MD_FENCE_RE.sub(r"\1", cleaned)
+    cleaned = _MD_BOLD_RE.sub(r"\1", cleaned)
+    cleaned = _MD_ITALIC_RE.sub(r"\1", cleaned)
+    cleaned = _MD_INLINE_CODE_RE.sub(r"\1", cleaned)
+    cleaned = _EMOJI_RE.sub("", cleaned)
+    cleaned = "\n".join(_LEADING_SYMBOL_RE.sub("", line) for line in cleaned.splitlines())
+    cleaned = re.sub(r"\s+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = cleaned.strip()
     return cleaned or (text or "")
 
 
@@ -293,10 +312,40 @@ def _normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, An
                 normalized["output"] = message
             return normalized
 
+    for step in reversed(steps if isinstance(steps, list) else []):
+        if not isinstance(step, dict):
+            continue
+        tool_name = str(step.get("tool") or "").strip()
+        if tool_name != "crm_data_tool":
+            continue
+
+        observation = step.get("observation")
+        if isinstance(observation, dict):
+            obs = observation
+        elif isinstance(observation, str):
+            obs = _try_parse_json(observation) or {}
+        else:
+            obs = {}
+        if not obs:
+            continue
+
+        cards = obs.get("cards")
+        if isinstance(cards, list):
+            normalized["cards"] = cards
+        tool_message = _to_user_message(str(obs.get("message_to_user") or "").strip())
+        if tool_message:
+            normalized["message_to_user"] = tool_message
+        tool_status = str(obs.get("status") or "").strip()
+        if tool_status:
+            normalized["status"] = tool_status
+        if not str(normalized.get("output") or "").strip():
+            normalized["output"] = json.dumps(obs, ensure_ascii=False)
+        return normalized
+
     output_text = str(normalized.get("output") or "")
     parsed_output = _try_parse_json(output_text)
     if isinstance(parsed_output, dict) and parsed_output.get("message_to_user"):
-        normalized["message_to_user"] = str(parsed_output["message_to_user"])
+        normalized["message_to_user"] = _to_user_message(str(parsed_output["message_to_user"]))
         return normalized
 
     clean = _to_user_message(output_text)
@@ -413,6 +462,58 @@ def _merge_context_with_pending_action(
         merged["entities"] = entities
 
     return merged
+
+
+def _is_read_only_data_query(input_text: str) -> bool:
+    lowered = (input_text or "").strip().lower()
+    normalized = "".join(
+        char for char in unicodedata.normalize("NFD", lowered) if unicodedata.category(char) != "Mn"
+    )
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return False
+
+    mutation_tokens = (
+        "vytvor",
+        "zaloz",
+        "naplanuj",
+        "pridej",
+        "uprav",
+        "zmen",
+        "smaz",
+        "odstran",
+        "delete",
+        "update",
+        "create",
+        "patch",
+    )
+    if any(token in normalized for token in mutation_tokens):
+        return False
+
+    question_markers = (
+        "kdo ",
+        "jake ",
+        "jaky ",
+        "co ",
+        "kde ",
+        "kdy ",
+        "kolik ",
+        "?",
+    )
+    data_tokens = (
+        "schuzk",
+        "meeting",
+        "kontakt",
+        "contact",
+        "firma",
+        "spolecnost",
+        "account",
+        "zaznam",
+        "records",
+    )
+    return any(marker in normalized for marker in question_markers) and any(
+        token in normalized for token in data_tokens
+    )
 
 
 async def _load_latest_pending_action(
@@ -595,7 +696,15 @@ async def _process_input_core(
         tenant_id=tenant_id,
         user_id=user_id,
     )
-    effective_context = _merge_context_with_pending_action(payload.context, latest_pending_action)
+    incoming_context = dict(payload.context or {})
+    action_confirmation = bool(incoming_context.get("confirm_action", False))
+    should_merge_pending = bool(latest_pending_action) and (
+        action_confirmation or not _is_read_only_data_query(payload.input_text)
+    )
+    if should_merge_pending:
+        effective_context = _merge_context_with_pending_action(incoming_context, latest_pending_action)
+    else:
+        effective_context = incoming_context
     request_context = effective_context or None
 
     await _append_message(
@@ -702,6 +811,9 @@ async def _process_input_core(
     tool_calls = agent_result.get("intermediate_steps")
     if not isinstance(tool_calls, list):
         tool_calls = []
+    cards = agent_result.get("cards")
+    if not isinstance(cards, list):
+        cards = []
     duration_ms = round((time.perf_counter() - started) * 1000, 2)
     log_llm_trace(
         logger,
@@ -718,6 +830,7 @@ async def _process_input_core(
         tool_calls=tool_calls,
         outcome={
             "status": str(agent_result.get("status") or "ok"),
+            "final_answer": assistant_text,
             "message_to_user": assistant_text,
             "output": agent_result.get("output"),
             "error": agent_result.get("error"),
@@ -742,6 +855,7 @@ async def _process_input_core(
         "chat_id": chat.id,
         "chat_name": chat.name,
         "chat_history": chat_history_dump,
+        "cards": cards,
         "audio_file_id": file_id,
         "audio_response_id": file_id,
         "audio_url": audio_url,

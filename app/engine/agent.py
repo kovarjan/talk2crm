@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from langchain.agents import AgentExecutor, create_tool_calling_agent
@@ -18,6 +19,15 @@ from app.core.logging import (
 
 
 logger = get_logger(__name__)
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+
+
+def _extract_final_answer_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    without_think = _THINK_TAG_RE.sub("", text).strip()
+    return without_think or text
 
 
 def get_agent_executor(tenant_id: str, tools: list) -> AgentExecutor:
@@ -36,10 +46,12 @@ def get_agent_executor(tenant_id: str, tools: list) -> AgentExecutor:
                 "Jsi CRM asistent pro tenant '{tenant_id}'. "
                 "Odpovidej cesky, pokud uzivatel vyslovne nechce jiny jazyk. "
                 "Pouzivej nastroje pro CRM akce a vyhledavani. "
+                "Pro read-only dotazy na CRM data (schuzky, kontakty, firmy, osoby) pouzij primarne crm_data_tool. "
                 "Vzdy bud explicitni ohledne akce, vysledku a predpokladu. "
+                "Odpoved pro uzivatele pis jako cisty text bez markdown formatovani a bez emoji. "
                 "Mutacni CRM akce (create/update/patch/delete) musi byt pred provedenim potvrzena uzivatelem. "
                 "Pokud context obsahuje pending_action a uzivatel posila opravu nebo doplneni, "
-                "navaz na tuto pending_action a uprav data misto obecnych doplnujicich dotazu.",
+                "navaz na tuto pending_action jen pokud dotaz smeruje na mutaci dat, jinak pending_action ignoruj.",
             ),
             (
                 "human",
@@ -136,7 +148,14 @@ async def run_agent(
     log_llm_step(
         logger,
         LLM_STEP_FINAL_RESPONSE,
-        result.get("output") if isinstance(result, dict) else result,
+        (
+            {
+                "final_answer": _extract_final_answer_text(result.get("output")),
+                "raw_output": result.get("output"),
+            }
+            if isinstance(result, dict)
+            else result
+        ),
     )
 
     return result
