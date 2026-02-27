@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,7 +40,7 @@ from app.api.models import (
 )
 from app.core.audio import synthesize_to_file, transcribe
 from app.core.config import get_settings
-from app.core.logging import get_logger
+from app.core.logging import get_logger, log_llm_trace
 from app.engine.agent import run_agent
 from app.engine.quick_actions import try_handle_quick_action
 from app.engine.rag import TenantRAGService
@@ -565,6 +566,7 @@ async def _process_input_core(
     payload: ProcessInputRequest,
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
+    started = time.perf_counter()
     tenant_id = ctx["tenant_id"]
     user_id = ctx["user_id"]
 
@@ -606,6 +608,8 @@ async def _process_input_core(
     )
 
     action_confirmation = bool(effective_context.get("confirm_action", False))
+    execution_mode = "quick_action"
+    available_tools: list[str] = []
 
     quick_result = await try_handle_quick_action(
         input_text=payload.input_text,
@@ -616,6 +620,7 @@ async def _process_input_core(
     if quick_result is not None:
         agent_result = quick_result
     else:
+        execution_mode = "agent"
         tools = build_tools(
             tenant_id=tenant_id,
             user_id=user_id,
@@ -625,6 +630,7 @@ async def _process_input_core(
             rag_service=rag_service,
             action_confirmation=action_confirmation,
         )
+        available_tools = [str(getattr(tool, "name", "")) for tool in tools if getattr(tool, "name", None)]
         try:
             agent_result = await run_agent(
                 tenant_id=tenant_id,
@@ -692,12 +698,50 @@ async def _process_input_core(
         background_tasks=background_tasks,
     )
 
+    chat_history_dump = [item.model_dump(mode="json") for item in history]
+    tool_calls = agent_result.get("intermediate_steps")
+    if not isinstance(tool_calls, list):
+        tool_calls = []
+    duration_ms = round((time.perf_counter() - started) * 1000, 2)
+    log_llm_trace(
+        logger,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        chat_id=chat.id,
+        request={
+            "input_text": payload.input_text,
+            "chat_id": payload.chat_id or chat.id,
+            "confirm_action": action_confirmation,
+            "return_voice": payload.return_voice,
+        },
+        context=request_context,
+        tool_calls=tool_calls,
+        outcome={
+            "status": str(agent_result.get("status") or "ok"),
+            "message_to_user": assistant_text,
+            "output": agent_result.get("output"),
+            "error": agent_result.get("error"),
+        },
+        resources={
+            "execution_mode": execution_mode,
+            "llm_model": settings.llm_model,
+            "llm_base_url": settings.llm_base_url,
+            "crm_mode": settings.crm_mode,
+            "rag_available": rag_service is not None,
+            "available_tools": available_tools,
+            "return_voice": payload.return_voice,
+            "audio_generated": bool(file_id),
+            "duration_ms": duration_ms,
+        },
+        chat_history=chat_history_dump,
+    )
+
     return {
         "action_result": agent_result,
         "message_to_user": assistant_text,
         "chat_id": chat.id,
         "chat_name": chat.name,
-        "chat_history": [item.model_dump(mode="json") for item in history],
+        "chat_history": chat_history_dump,
         "audio_file_id": file_id,
         "audio_response_id": file_id,
         "audio_url": audio_url,

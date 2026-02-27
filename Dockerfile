@@ -1,5 +1,9 @@
 FROM python:3.11-slim
 
+ARG INSTALL_GPU_DEPS=false
+ARG PIP_TIMEOUT=120
+ARG PIP_RETRIES=10
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -14,8 +18,12 @@ RUN apt-get update \
        build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip && pip install -r /app/requirements.txt
+COPY requirements.txt requirements.gpu.txt /app/
+RUN pip install --upgrade pip \
+    && pip install --timeout ${PIP_TIMEOUT} --retries ${PIP_RETRIES} -r /app/requirements.txt \
+    && if [ "${INSTALL_GPU_DEPS}" = "true" ]; then \
+         pip install --timeout ${PIP_TIMEOUT} --retries ${PIP_RETRIES} -r /app/requirements.gpu.txt; \
+       fi
 
 COPY . /app
 
