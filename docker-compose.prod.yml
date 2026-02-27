@@ -25,6 +25,8 @@ services:
         condition: service_started
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8011/ping/ >/dev/null || exit 1"]
       interval: 30s
@@ -78,3 +80,4 @@ services:
 volumes:
   postgres_data:
   qdrant_data:
+  hf_cache:
