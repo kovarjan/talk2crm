@@ -111,12 +111,44 @@ def _get_whisper_model():
     return _whisper_model
 
 
+def _reset_whisper_model_to_cpu() -> None:
+    global _whisper_model
+    settings = get_settings()
+    _whisper_model = WhisperModel(
+        settings.whisper_model_size,
+        device="cpu",
+        compute_type="int8",
+    )
+    logger.info(
+        "Whisper reinitialized model=%s device=cpu compute_type=int8 (runtime fallback)",
+        settings.whisper_model_size,
+    )
+
+
 def transcribe(file_path: str, language: str | None = None) -> str:
     model = _get_whisper_model()
-    segments, _ = model.transcribe(file_path, language=language)
-    text = " ".join(segment.text.strip() for segment in segments).strip()
-    logger.info("Transcribed audio file=%s chars=%s", file_path, len(text))
-    return text
+    try:
+        segments, _ = model.transcribe(file_path, language=language)
+        text = " ".join(segment.text.strip() for segment in segments).strip()
+        logger.info("Transcribed audio file=%s chars=%s", file_path, len(text))
+        return text
+    except RuntimeError as exc:
+        settings = get_settings()
+        msg = str(exc).lower()
+        is_cuda_runtime_issue = (
+            "libcublas" in msg or "cuda" in msg or "cudnn" in msg
+        )
+        if not (is_cuda_runtime_issue and settings.whisper_allow_cpu_fallback):
+            raise
+        logger.exception(
+            "Whisper CUDA runtime failure during transcribe, retrying on CPU file=%s",
+            file_path,
+        )
+        _reset_whisper_model_to_cpu()
+        segments, _ = _whisper_model.transcribe(file_path, language=language)
+        text = " ".join(segment.text.strip() for segment in segments).strip()
+        logger.info("Transcribed audio file=%s chars=%s (cpu retry)", file_path, len(text))
+        return text
 
 
 def _write_fallback_silence_wav(output_path: str, seconds: float = 1.0) -> None:

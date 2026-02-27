@@ -208,6 +208,12 @@ docker compose -f docker-compose.prod.yml exec api nvidia-smi
 docker compose -f docker-compose.prod.yml logs api | grep -i \"Whisper initialized\"
 ```
 
+- Verify CUDA shared libraries are visible in API container:
+
+```bash
+docker compose -f docker-compose.prod.yml exec api sh -lc 'echo $LD_LIBRARY_PATH && ls -l /usr/local/lib/python3.11/site-packages/nvidia/cublas/lib/libcublas.so.12'
+```
+
 ## API Compatibility
 
 Implemented endpoints:
