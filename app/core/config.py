@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     app_version: str = "1.0.0"
     debug: bool = False
     environment: str = "dev"
+    log_format: str = "pretty"
+    log_file_enabled: bool = False
+    log_file_path: str = "./logs/talk2api2.log"
+    log_file_format: str = "json"
+    log_trace_enabled: bool = True
+    log_trace_max_chars: int = 1200
+    log_trace_history_messages: int = 10
 
     database_url: str = "sqlite+aiosqlite:///./sugar_voice_bridge.db"
 
