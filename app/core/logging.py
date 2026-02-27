@@ -268,6 +268,12 @@ class PrettyConsoleFormatter(logging.Formatter):
             if section_key == "chat_history" and isinstance(section_value, list):
                 lines.extend(self._format_chat_history(section_value))
                 continue
+            if section_key == "outcome" and isinstance(section_value, dict):
+                final_answer = section_value.get("message_to_user") or section_value.get("final_answer")
+                if isinstance(final_answer, str) and final_answer.strip():
+                    lines.append("    final_answer:")
+                    for row in final_answer.strip().splitlines():
+                        lines.append(f"      {escape(row)}")
             rendered = _preview_value(section_value, self.max_chars, compact=False)
             for row in rendered.splitlines():
                 lines.append(f"    {escape(row)}")
