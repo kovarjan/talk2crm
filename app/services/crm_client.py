@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import hmac
 import json
@@ -8,7 +9,6 @@ import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 
@@ -24,6 +24,11 @@ _UUID_RE = re.compile(
 
 
 class SugarClient:
+    """Coripo public API client used by the app.
+
+    The class name is kept for compatibility with existing call sites.
+    """
+
     def __init__(
         self,
         base_url: str,
@@ -34,44 +39,67 @@ class SugarClient:
     ):
         settings = get_settings()
         self.settings = settings
-        self.base_url = base_url.rstrip("/")
+        self.base_url = (base_url or "").strip().rstrip("/")
         self.token = (token or "").strip()
         self.timeout = timeout if timeout is not None else settings.crm_timeout_seconds
 
-        self._auth_config = self._parse_auth_config(self.token)
-        self.user_id = user_id or self._auth_config.get("user_id")
-        self.user_name = user_name or self._auth_config.get("user_name")
-        self._session_id: str | None = None
-        self._coripo_session_id: str | None = None
+        self.mode = "coripo_public"
+        self.is_v4_1 = False
 
-        self.mode = self._detect_mode()
-        self.is_v4_1 = self.mode == "sugar_v4_1"
+        self._auth_config = self._parse_auth_config(self.token)
+        self.user_id = str(user_id or self._auth_config.get("user_id") or "").strip() or None
+        self.user_name = str(user_name or self._auth_config.get("user_name") or "").strip() or None
 
         self.coripo_hmac_key_id = str(
             self._auth_config.get("hmac_key_id") or settings.coripo_hmac_key_id
-        )
-        self.coripo_hmac_secret = str(self._auth_config.get("hmac_secret") or "")
+        ).strip()
+        self.coripo_hmac_secret = str(self._auth_config.get("hmac_secret") or "").strip()
+        self.clean_response_default = bool(self._auth_config.get("clean_response", True))
+        self._coripo_session_id = str(
+            self._auth_config.get("session_id")
+            or self._auth_config.get("sid")
+            or ""
+        ).strip() or None
 
-        if self.mode == "coripo_public":
-            # For Coripo we support both HMAC secret and static sid in token.
-            if self._is_uuid(self.token):
-                self._coripo_session_id = self.token
-            elif self.token and not self.token.startswith("{"):
-                # Plain token is interpreted as HMAC secret for convenience.
-                self.coripo_hmac_secret = self.token
+        if self._is_uuid(self.token):
+            self._coripo_session_id = self.token
+        elif ":" in self.token and not self.token.startswith("{"):
+            # "keyId:secret" compact token format.
+            kid, secret = self.token.split(":", 1)
+            if kid.strip() and secret.strip():
+                self.coripo_hmac_key_id = kid.strip()
+                self.coripo_hmac_secret = secret.strip()
+        elif self.token and not self.token.startswith("{") and not self.coripo_hmac_secret:
+            # Plain token means HMAC secret for convenience.
+            self.coripo_hmac_secret = self.token
 
     @staticmethod
     def _is_uuid(value: str | None) -> bool:
-        if not value:
-            return False
-        return _UUID_RE.match(value.strip()) is not None
+        return bool(value and _UUID_RE.match(value.strip()))
 
     @staticmethod
     def _parse_auth_config(token: str) -> dict[str, Any]:
         if not token:
             return {}
-        # Support compact "keyId:secret" token format for Coripo HMAC.
-        if ":" in token and not token.startswith("{"):
+        if token.startswith("{"):
+            try:
+                parsed = json.loads(token)
+                if isinstance(parsed, dict):
+                    # Compatibility: allow {"keyId":"secret"} mapping shape.
+                    if "hmac_secret" not in parsed and "session_id" not in parsed and "sid" not in parsed:
+                        if len(parsed) == 1:
+                            only_key = next(iter(parsed.keys()))
+                            only_val = parsed.get(only_key)
+                            if str(only_key).strip() and str(only_val or "").strip():
+                                return {
+                                    "mode": "coripo_public",
+                                    "hmac_key_id": str(only_key).strip(),
+                                    "hmac_secret": str(only_val).strip(),
+                                }
+                    return parsed
+            except json.JSONDecodeError:
+                return {}
+        if ":" in token:
             key_id, secret = token.split(":", 1)
             if key_id.strip() and secret.strip():
                 return {
@@ -79,61 +107,190 @@ class SugarClient:
                     "hmac_key_id": key_id.strip(),
                     "hmac_secret": secret.strip(),
                 }
-        if token.startswith("{"):
-            try:
-                parsed = json.loads(token)
-                if isinstance(parsed, dict):
-                    return parsed
-            except json.JSONDecodeError:
-                pass
         return {}
 
-    def _detect_mode(self) -> str:
-        explicit_mode = str(self._auth_config.get("mode") or "").strip().lower()
-        if explicit_mode in {"coripo", "coripo-public", "coripo_public"}:
-            return "coripo_public"
-        if explicit_mode in {"v4_1", "sugar-v4_1", "sugar_v4_1", "legacy"}:
-            return "sugar_v4_1"
-        if explicit_mode in {"modern", "sugar-modern", "sugar_modern"}:
-            return "sugar_modern"
+    def _coripo_api_base(self) -> str:
+        base = self.base_url.rstrip("/")
+        if not base:
+            return "http://localhost:2000/public"
+        if base.endswith("/public/index.php"):
+            return base.removesuffix("/index.php")
+        if base.endswith("/public"):
+            return base
+        if "/public/" in base:
+            return base.split("/public/", 1)[0] + "/public"
+        return f"{base}/public"
 
-        if "/service/v4_1/rest.php" in self.base_url or self.base_url.endswith("/rest.php"):
-            return "sugar_v4_1"
-        if "/public" in self.base_url:
-            return "coripo_public"
-        return "sugar_modern"
+    def _can_use_hmac(self) -> bool:
+        return bool(self.coripo_hmac_secret and self.user_id)
 
-    @property
-    def headers(self) -> dict[str, str]:
-        return {
-            "OAuth-Token": self.token,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
+    def _build_coripo_hmac_headers(self, body_bytes: bytes) -> dict[str, str]:
+        if not self._can_use_hmac():
+            return {}
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        nonce = str(uuid.uuid4())
+        sign_base = f"{timestamp}|{nonce}|{self.user_id}|".encode("utf-8") + body_bytes
+        signature = base64.b64encode(
+            hmac.new(
+                self.coripo_hmac_secret.encode("utf-8"),
+                sign_base,
+                hashlib.sha256,
+            ).digest()
+        ).decode("utf-8")
+
+        headers = {
+            "Authorization": f"HMAC keyId={self.coripo_hmac_key_id}, signature={signature}",
+            "X-Timestamp": timestamp,
+            "X-Nonce": nonce,
+            "X-User-Id": str(self.user_id),
         }
+        if self.user_name:
+            headers["X-User-Name"] = str(self.user_name)
+        return headers
 
-    async def _request(
+    @staticmethod
+    def _decode_response(response: httpx.Response) -> dict[str, Any]:
+        if not response.content:
+            return {}
+        content_type = response.headers.get("content-type", "")
+        if "json" not in content_type.lower():
+            return {"raw": response.text}
+        parsed = response.json()
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            return {"records": parsed}
+        return {"data": parsed}
+
+    @staticmethod
+    def _extract_sid(payload: dict[str, Any]) -> str | None:
+        for key in ("sid", "session_id"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        message = payload.get("message")
+        if isinstance(message, dict):
+            for key in ("sid", "session_id"):
+                value = message.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            inner = message.get("data")
+            if isinstance(inner, dict):
+                for key in ("sid", "session_id"):
+                    value = inner.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+
+        data = payload.get("data")
+        if isinstance(data, dict):
+            for key in ("sid", "session_id"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return None
+
+    async def _ensure_coripo_sid(self) -> None:
+        if self._coripo_session_id:
+            return
+        if not self._can_use_hmac():
+            raise ValueError(
+                "Coripo authentication requires either SID token or HMAC secret + user_id."
+            )
+
+        # Coripo HMAC signing is computed from exact raw body bytes.
+        # Preferred flow (per rest_coripo/test_hmac_public_login.sh) is hmac-login.
+        attempts: list[tuple[str, dict[str, Any] | None]] = [
+            ("POST", {}),   # /hmac-login with "{}"
+            ("GET", None),  # /hmac-login as GET
+        ]
+        last_exc: Exception | None = None
+        for method, body in attempts:
+            try:
+                response = await self._coripo_request(
+                    method,
+                    "hmac-login",
+                    json_body=body,
+                    require_sid=False,
+                )
+                sid = self._extract_sid(response)
+                if sid:
+                    self._coripo_session_id = sid
+                    return
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                continue
+
+        # Backward-compatible fallback for older deployments.
+        fallback_attempts: list[tuple[str, dict[str, Any] | None]] = [
+            ("POST", {}),
+            ("POST", None),
+            ("GET", None),
+        ]
+        for method, body in fallback_attempts:
+            try:
+                response = await self._coripo_request(
+                    method,
+                    "checksid",
+                    json_body=body,
+                    require_sid=False,
+                )
+                sid = self._extract_sid(response)
+                if sid:
+                    self._coripo_session_id = sid
+                    return
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                continue
+
+        if last_exc is not None:
+            raise last_exc
+        raise ValueError("Coripo hmac-login/checksid did not return sid")
+
+    async def _coripo_request(
         self,
         method: str,
         path: str,
         *,
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
+        require_sid: bool = True,
     ) -> dict[str, Any]:
-        url = f"{self.base_url}/{path.lstrip('/')}"
+        if require_sid and not self._coripo_session_id:
+            await self._ensure_coripo_sid()
+
+        headers: dict[str, str] = {"Accept": "application/json"}
+        if self._coripo_session_id:
+            headers["sid"] = self._coripo_session_id
+
+        body_bytes = b""
+        if json_body is not None:
+            body_bytes = json.dumps(
+                json_body,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+
+        headers.update(self._build_coripo_hmac_headers(body_bytes))
+
+        url = f"{self._coripo_api_base()}/{path.lstrip('/')}"
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.request(
                 method=method,
                 url=url,
-                headers=self.headers,
+                headers=headers,
                 params=params,
-                json=json_body,
+                content=body_bytes if json_body is not None else None,
             )
 
         if response.status_code >= 400:
             logger.error(
-                "CRM request failed mode=%s status=%s url=%s body=%s",
-                self.mode,
+                "Coripo request failed status=%s method=%s url=%s body=%s",
                 response.status_code,
+                method,
                 url,
                 response.text,
             )
@@ -142,17 +299,11 @@ class SugarClient:
         return self._decode_response(response)
 
     @staticmethod
-    def _decode_response(response: httpx.Response) -> dict[str, Any]:
-        if not response.content:
-            return {"ok": True}
-        content_type = response.headers.get("content-type", "")
-        if "json" not in content_type.lower():
-            return {"raw": response.text}
-        parsed = response.json()
-        return parsed if isinstance(parsed, dict) else {"data": parsed}
+    def _canonical_module(module: str) -> str:
+        value = str(module or "").strip().strip("/")
+        if not value:
+            raise ValueError("Module cannot be empty")
 
-    def _canonical_module(self, module: str) -> str:
-        normalized = module.strip().strip("/")
         mapping = {
             "contacts": "Contacts",
             "accounts": "Accounts",
@@ -165,263 +316,270 @@ class SugarClient:
             "users": "Users",
             "cases": "Cases",
         }
-        lowered = normalized.lower()
+        lowered = value.lower()
         if lowered in mapping:
             return mapping[lowered]
-        # Preserve custom module casing (e.g. acm_invoices) to avoid
-        # breaking Coripo bean/module resolution for non-core modules.
-        return normalized
+        return value
 
-    def _escape_like(self, value: str) -> str:
-        return value.replace("\\", "\\\\").replace("'", "\\'")
+    @staticmethod
+    def _module_candidates(module_name: str) -> list[str]:
+        value = str(module_name or "").strip().strip("/")
+        if not value:
+            return []
 
-    # -----------------------------
-    # Coripo public REST helpers
-    # -----------------------------
+        candidates = [value]
+        if "_" in value:
+            parts = value.split("_")
+            title_parts = [part[:1].upper() + part[1:] if part else part for part in parts]
+            candidates.append("_".join(title_parts))
+            if parts and parts[0] and parts[0].isalpha() and len(parts[0]) <= 4:
+                prefixed = [parts[0].upper(), *title_parts[1:]]
+                candidates.append("_".join(prefixed))
+        candidates.append(value[:1].upper() + value[1:])
+        candidates.append(value.upper())
+        return list(dict.fromkeys(candidates))
 
-    def _coripo_api_base(self) -> str:
-        base = self.base_url.rstrip("/")
-
-        if base.endswith("/v1"):
-            return base
-        if base.endswith("/public"):
-            return base
-        if base.endswith("/public/index.php"):
-            return base.removesuffix("/index.php")
-
-        if "/public/" in base:
-            prefix = base.split("/public/", 1)[0] + "/public"
-            return prefix
-
-        # Safe default for local deployments where base_url is host root.
-        return f"{base}/public"
-
-    def _can_use_coripo_hmac(self) -> bool:
-        return (
-            self.mode == "coripo_public"
-            and bool(self.coripo_hmac_key_id)
-            and bool(self.coripo_hmac_secret)
-            and bool(self.user_id)
-        )
-
-    def _build_coripo_hmac_headers(self, body_bytes: bytes) -> dict[str, str]:
-        if not self._can_use_coripo_hmac():
-            return {}
-
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        nonce = str(uuid.uuid4())
-        base = (
-            f"{timestamp}|{nonce}|{self.user_id}|".encode("utf-8")
-            + body_bytes
-        )
-        signature = base64.b64encode(
-            hmac.new(
-                self.coripo_hmac_secret.encode("utf-8"),
-                base,
-                hashlib.sha256,
-            ).digest()
-        ).decode("utf-8")
-
-        headers = {
-            "Authorization": (
-                f"HMAC keyId={self.coripo_hmac_key_id}, signature={signature}"
-            ),
-            "X-Timestamp": timestamp,
-            "X-Nonce": nonce,
-            "X-User-Id": str(self.user_id),
-        }
-        if self.user_name:
-            headers["X-User-Name"] = str(self.user_name)
-        return headers
-
-    async def _coripo_request(
-        self,
-        method: str,
-        path: str,
-        *,
-        params: dict[str, Any] | None = None,
-        json_body: dict[str, Any] | None = None,
-        ensure_sid: bool = False,
-    ) -> dict[str, Any]:
-        if ensure_sid and not self._coripo_session_id and not self._can_use_coripo_hmac():
-            raise ValueError(
-                "Coripo request requires either a valid SID or HMAC "
-                "configuration (key id + secret + user id)."
-            )
-
-        url = f"{self._coripo_api_base()}/{path.lstrip('/')}"
-        headers: dict[str, str] = {"Accept": "application/json"}
-
-        body_bytes = b""
-        if json_body is not None:
-            body_bytes = json.dumps(
-                json_body,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-
-        if self._coripo_session_id:
-            headers["sid"] = self._coripo_session_id
-
-        hmac_headers = self._build_coripo_hmac_headers(body_bytes)
-        headers.update(hmac_headers)
-
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.request(
-                method=method,
-                url=url,
-                headers=headers,
-                params=params,
-                content=body_bytes if json_body is not None else None,
-            )
-
-        if response.status_code >= 400:
-            logger.error(
-                "Coripo request failed status=%s url=%s body=%s",
-                response.status_code,
-                url,
-                response.text,
-            )
-            response.raise_for_status()
-
-        return self._decode_response(response)
-
-    async def _bootstrap_coripo_sid(self) -> None:
-        if self._coripo_session_id:
-            return
-        if not self._can_use_coripo_hmac():
-            logger.warning(
-                "Coripo SID bootstrap skipped: missing HMAC config mode=%s key_id=%s has_secret=%s has_user_id=%s",
-                self.mode,
-                bool(self.coripo_hmac_key_id),
-                bool(self.coripo_hmac_secret),
-                bool(self.user_id),
-            )
-            return
-
-        # Coripo auth signs raw body. checksid works with an empty body and avoids
-        # signature mismatches from serializer differences.
-        try:
-            data = await self._coripo_request("POST", "checksid", json_body=None)
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code != 401:
-                raise
-
-            # Retry strategy for strict Coripo auth checks:
-            # 1) retry without X-User-Name
-            # 2) retry with user_id from tenant token JSON (if available)
-            previous_user_name = self.user_name
-            previous_user_id = self.user_id
-
-            if previous_user_name:
-                self.user_name = None
-                try:
-                    data = await self._coripo_request("POST", "checksid", json_body=None)
-                except httpx.HTTPStatusError:
-                    data = None
-                if data is not None:
-                    sid = data.get("sid")
-                    if sid and isinstance(sid, str):
-                        self._coripo_session_id = sid
-                        return
-
-            fallback_user_id = self._auth_config.get("user_id")
-            if fallback_user_id and str(fallback_user_id) != str(previous_user_id):
-                self.user_id = str(fallback_user_id)
-                self.user_name = self._auth_config.get("user_name")
-                try:
-                    data = await self._coripo_request("POST", "checksid", json_body=None)
-                except httpx.HTTPStatusError:
-                    data = None
-                if data is not None:
-                    sid = data.get("sid")
-                    if sid and isinstance(sid, str):
-                        self._coripo_session_id = sid
-                        return
-
-            self.user_id = previous_user_id
-            self.user_name = previous_user_name
-            raise
-
-        sid = data.get("sid")
-        if not sid and isinstance(data.get("message"), dict):
-            sid = data["message"].get("sid")
-        if sid and isinstance(sid, str):
-            self._coripo_session_id = sid
-
-    def _extract_coripo_global_lists(self, data: dict[str, Any]) -> list[dict[str, Any]]:
-        if isinstance(data.get("lists"), list):
-            return data["lists"]
-        if isinstance(data.get("data"), dict) and isinstance(data["data"].get("lists"), list):
-            return data["data"]["lists"]
-        if isinstance(data.get("message"), dict):
-            inner = data["message"].get("data")
-            if isinstance(inner, dict) and isinstance(inner.get("lists"), list):
-                return inner["lists"]
-        return []
-
-    def _extract_coripo_records(self, data: dict[str, Any]) -> list[dict[str, Any]]:
-        if isinstance(data.get("records"), list):
-            return data["records"]
-        if isinstance(data.get("message"), dict):
-            inner = data["message"].get("data")
-            if isinstance(inner, dict) and isinstance(inner.get("records"), list):
-                return inner["records"]
-        if isinstance(data.get("data"), dict) and isinstance(data["data"].get("records"), list):
-            return data["data"]["records"]
-        return []
-
-    def _build_coripo_list_payload(self, module_name: str, data: dict[str, Any]) -> dict[str, Any]:
-        limit = int(data.get("max_results", data.get("limit", 20)) or 20)
-        offset = int(data.get("offset", 0) or 0)
-
-        payload: dict[str, Any] = {
-            "offset": offset,
-            "limit": max(1, min(limit, 500)),
-            "savedSearch": False,
-            "recordsCount": False,
-            "listview_type": "list",
-            "filter": {
-                "operator": "and",
-                "operands": [
-                    {
-                        "field": "*",
-                        "type": "cont",
-                        "value": str(data.get("q") or data.get("query") or ""),
-                    }
-                ],
-            },
-            "order": [
+    @staticmethod
+    def _default_cont_filter(query: str) -> dict[str, Any]:
+        return {
+            "operator": "and",
+            "operands": [
                 {
-                    "field": "date_modified",
-                    "sort": "DESC",
-                    "module": module_name,
+                    "operator": "and",
+                    "operands": [
+                        {
+                            "field": "*",
+                            "fieldModule": None,
+                            "fieldRel": None,
+                            "type": "cont",
+                            "value": query,
+                            "relationField": None,
+                        }
+                    ],
                 }
             ],
-            "columns": {},
         }
 
-        query = str(data.get("q") or data.get("query") or "").strip()
-        if not query:
-            payload["filter"] = {
-                "operator": "and",
-                "operands": [{"field": "deleted", "type": "eq", "value": "0"}],
-            }
+    @staticmethod
+    def _parse_order_by(order_by: Any, module_name: str) -> list[dict[str, str]]:
+        text = str(order_by or "").strip()
+        if not text:
+            return []
+        # Supports common style: "accounts.date_modified DESC"
+        parts = text.split()
+        field_part = parts[0]
+        sort = "ASC"
+        if len(parts) > 1 and parts[1].upper() in {"ASC", "DESC"}:
+            sort = parts[1].upper()
+        if "." in field_part:
+            _, field_name = field_part.split(".", 1)
+        else:
+            field_name = field_part
+        field_name = field_name.strip()
+        if not field_name:
+            return []
+        return [{"field": field_name, "sort": sort, "module": module_name}]
 
-        if "include_hash" in data:
-            payload["include_hash"] = bool(data.get("include_hash"))
-        if data.get("hash_algorithm"):
-            payload["hash_algorithm"] = str(data.get("hash_algorithm"))
+    def _build_coripo_list_payload(self, module_name: str, data: dict[str, Any]) -> dict[str, Any]:
+        source = copy.deepcopy(data or {})
+
+        limit = int(source.pop("max_results", source.get("limit", 20)) or 20)
+        offset = int(source.get("offset", 0) or 0)
+        limit = max(1, min(limit, 500))
+
+        query = str(source.get("q") or source.get("query") or "").strip()
+        order = source.get("order")
+        if not isinstance(order, list):
+            order = self._parse_order_by(source.get("order_by"), module_name)
+
+        payload: dict[str, Any] = {
+            "limit": limit,
+            "offset": offset,
+            "columns": source.get("columns", []),
+            "order": order,
+            "groupBy": source.get("groupBy", []),
+            "function": source.get("function", {}),
+            "alterName": source.get("alterName", {}),
+            "groupByDate": source.get("groupByDate", []),
+            "savedSearch": bool(source.get("savedSearch", True)),
+        }
+
+        if "recordsCount" in source:
+            payload["recordsCount"] = bool(source["recordsCount"])
+        if "listview_type" in source:
+            payload["listview_type"] = source["listview_type"]
+
+        if isinstance(source.get("filter"), dict):
+            payload["filter"] = source["filter"]
+        elif query:
+            payload["filter"] = self._default_cont_filter(query)
+        else:
+            payload["filter"] = {"operator": "and", "operands": []}
+
+        if "include_hash" in source:
+            payload["include_hash"] = bool(source.get("include_hash"))
+        if source.get("hash_algorithm"):
+            payload["hash_algorithm"] = str(source["hash_algorithm"])
 
         return payload
 
-    def _sanitize_coripo_fields(self, data: dict[str, Any]) -> dict[str, Any]:
-        # Coripo set/{Module} expects only module fields in "fields". Remove bridge-only keys.
+    @staticmethod
+    def _extract_records(value: Any) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        record_keys = {"records", "entry_list", "items", "results"}
+
+        def walk(node: Any, parent_key: str = "") -> None:
+            if isinstance(node, list):
+                if parent_key in record_keys:
+                    for item in node:
+                        if isinstance(item, dict):
+                            records.append(item)
+                for item in node:
+                    walk(item, parent_key=parent_key)
+                return
+
+            if not isinstance(node, dict):
+                return
+
+            for key, child in node.items():
+                walk(child, parent_key=key)
+
+        walk(value, parent_key="")
+
+        unique: dict[str, dict[str, Any]] = {}
+        passthrough: list[dict[str, Any]] = []
+        for row in records:
+            row_id = str(row.get("id") or row.get("record_id") or "").strip()
+            if row_id:
+                if row_id not in unique:
+                    unique[row_id] = row
+            else:
+                passthrough.append(row)
+        return list(unique.values()) + passthrough
+
+    @staticmethod
+    def _clean_record(
+        record: dict[str, Any],
+        *,
+        include_fields: set[str] | None = None,
+    ) -> dict[str, Any]:
+        cleaned: dict[str, Any] = {}
+        for key, value in record.items():
+            field = str(key).strip()
+            if not field:
+                continue
+            if include_fields is not None and field not in include_fields:
+                continue
+
+            # Drop bridge/noise keys like "accounts|id", "email_addresses_primary|id".
+            if "|" in field:
+                continue
+
+            # Keep deterministic change hash for incremental ingest.
+            if field.startswith("_") and field != "_record_hash":
+                continue
+
+            # Drop empty values by default to reduce LLM context noise.
+            if value is None:
+                continue
+            if isinstance(value, str):
+                stripped = value.strip()
+                if not stripped:
+                    continue
+                cleaned[field] = stripped
+                continue
+            if isinstance(value, (list, dict)) and not value:
+                continue
+
+            # Keep only scalar/list payloads; nested objects are usually metadata noise.
+            if isinstance(value, dict):
+                continue
+            cleaned[field] = value
+
+        # Always preserve primary ID when present, even if empty filtering removed it.
+        if "id" in record and isinstance(record.get("id"), str) and record["id"].strip():
+            cleaned["id"] = record["id"].strip()
+        return cleaned
+
+    def _clean_records(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        include_fields: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        cleaned: list[dict[str, Any]] = []
+        for row in records:
+            if not isinstance(row, dict):
+                continue
+            sanitized = self._clean_record(row, include_fields=include_fields)
+            if sanitized:
+                cleaned.append(sanitized)
+        return cleaned
+
+    @staticmethod
+    def _extract_first_record(payload: dict[str, Any]) -> dict[str, Any] | None:
+        records = SugarClient._extract_records(payload)
+        if records:
+            return records[0]
+
+        for key in ("record", "item"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                return value
+        data = payload.get("data")
+        if isinstance(data, dict):
+            for key in ("record", "item"):
+                value = data.get(key)
+                if isinstance(value, dict):
+                    return value
+        return None
+
+    @staticmethod
+    def _extract_total(payload: dict[str, Any]) -> int | None:
+        keys = ("total", "total_count", "count", "recordsCount")
+        stack = [payload]
+        while stack:
+            node = stack.pop()
+            if not isinstance(node, dict):
+                continue
+            for key in keys:
+                value = node.get(key)
+                if isinstance(value, bool):
+                    continue
+                if isinstance(value, int):
+                    return value
+                if isinstance(value, str) and value.isdigit():
+                    return int(value)
+            for nested_key in ("data", "message", "result"):
+                nested = node.get(nested_key)
+                if isinstance(nested, dict):
+                    stack.append(nested)
+        return None
+
+    @staticmethod
+    def _extract_record_id(payload: dict[str, Any]) -> str | None:
+        keys = ("id", "record_id")
+        stack = [payload]
+        while stack:
+            node = stack.pop()
+            if not isinstance(node, dict):
+                continue
+            for key in keys:
+                value = node.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            for nested_key in ("data", "message", "result", "record"):
+                nested = node.get(nested_key)
+                if isinstance(nested, dict):
+                    stack.append(nested)
+        return None
+
+    @staticmethod
+    def _sanitize_coripo_fields(data: dict[str, Any]) -> dict[str, Any]:
         if isinstance(data.get("fields"), dict):
-            source = data["fields"]
+            source = dict(data["fields"])
         else:
-            source = data
+            source = dict(data)
         reserved = {
             "id",
             "fields",
@@ -441,184 +599,117 @@ class SugarClient:
             "company_name",
             "company",
         }
-        return {
-            key: value
-            for key, value in source.items()
-            if key not in reserved and value is not None
+        return {k: v for k, v in source.items() if k not in reserved and v is not None}
+
+    def _build_set_payload(self, data: dict[str, Any], *, include_invitees_backup: bool) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "fields": self._sanitize_coripo_fields(data),
+            "relationships": data.get("relationships", {}),
+            "customData": data.get("customData", {}),
+            "files": data.get("files", []),
+            "invitees": data.get("invitees", {"Users": [], "Contacts": [], "Leads": []}),
         }
+        if include_invitees_backup:
+            payload["inviteesBackup"] = data.get(
+                "inviteesBackup",
+                data.get("invitees", {"Users": [], "Contacts": [], "Leads": []}),
+            )
+        return payload
+
+    def _sanitize_list_response(
+        self,
+        module_name: str,
+        payload: dict[str, Any],
+        raw: dict[str, Any],
+        *,
+        clean_records: bool,
+        include_fields: set[str] | None = None,
+        include_field_names: bool = True,
+    ) -> dict[str, Any]:
+        records = self._extract_records(raw)
+        if clean_records:
+            records = self._clean_records(records, include_fields=include_fields)
+
+        output: dict[str, Any] = {"records": records}
+        if include_field_names:
+            output["column_fields"] = self._extract_column_field_names(payload, raw)
+            output["def_fields"] = self._extract_def_field_names(raw)
+        return output
 
     @staticmethod
-    def _coripo_module_candidates(module_name: str) -> list[str]:
-        value = str(module_name or "").strip().strip("/")
-        if not value:
+    def _extract_column_field_names(payload: dict[str, Any], raw: dict[str, Any]) -> list[str]:
+        names: list[str] = []
+
+        payload_columns = payload.get("columns")
+        if isinstance(payload_columns, list):
+            for item in payload_columns:
+                if isinstance(item, dict):
+                    field = str(item.get("field") or "").strip()
+                    if field:
+                        names.append(field)
+
+        if not names:
+            rows = raw.get("rows")
+            if isinstance(rows, dict):
+                for key in rows.keys():
+                    field = str(key or "").strip()
+                    if field:
+                        names.append(field.lower())
+
+        # Stable compact unique list.
+        return list(dict.fromkeys(names))
+
+    @staticmethod
+    def _extract_def_field_names(raw: dict[str, Any]) -> list[str]:
+        defs = raw.get("def")
+        if not isinstance(defs, dict):
             return []
+        names = [str(key).strip() for key in defs.keys() if str(key).strip()]
+        return list(dict.fromkeys(names))
 
-        candidates: list[str] = [value]
-        if "_" in value:
-            parts = [part for part in value.split("_")]
-            title_parts = [part[:1].upper() + part[1:] if part else part for part in parts]
-            candidates.append("_".join(title_parts))
-
-            if parts and parts[0] and parts[0].isalpha() and len(parts[0]) <= 4:
-                prefixed = [parts[0].upper(), *title_parts[1:]]
-                candidates.append("_".join(prefixed))
-
-        candidates.append(value[:1].upper() + value[1:])
-        candidates.append(value.upper())
-
-        unique: list[str] = []
-        seen: set[str] = set()
-        for item in candidates:
-            if item in seen:
-                continue
-            seen.add(item)
-            unique.append(item)
-        return unique
-
-    # -----------------------------
-    # Sugar v4.1 helpers
-    # -----------------------------
-
-    async def _call_v4_1(self, method: str, rest_data: dict[str, Any]) -> dict[str, Any]:
-        payload = {
-            "method": method,
-            "input_type": "JSON",
-            "response_type": "JSON",
-            "rest_data": json.dumps(rest_data),
-        }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(self.base_url, data=payload)
-
-        if response.status_code >= 400:
-            logger.error(
-                "SugarCRM v4_1 call failed status=%s method=%s body=%s",
-                response.status_code,
-                method,
-                response.text,
+    def _sanitize_mutation_response(
+        self,
+        raw: dict[str, Any],
+        *,
+        fallback_id: str | None = None,
+        clean_record: bool = True,
+        include_fields: set[str] | None = None,
+    ) -> dict[str, Any]:
+        response: dict[str, Any] = {"status": "ok"}
+        record_id = self._extract_record_id(raw) or (fallback_id.strip() if fallback_id else None)
+        if record_id:
+            response["id"] = record_id
+        record = self._extract_first_record(raw)
+        if record is not None:
+            response["record"] = (
+                self._clean_record(record, include_fields=include_fields) if clean_record else record
             )
-            response.raise_for_status()
-
-        return self._decode_response(response)
-
-    async def _get_v4_1_session(self) -> str:
-        if self._session_id:
-            return self._session_id
-
-        session_id = self._auth_config.get("session_id")
-        if not session_id and self.token and not self.token.startswith("{"):
-            # Backward compatibility: plain token as session id.
-            session_id = self.token
-
-        if isinstance(session_id, str) and session_id.strip():
-            self._session_id = session_id.strip()
-            return self._session_id
-
-        username = self._auth_config.get("username")
-        password = self._auth_config.get("password")
-        if not username or not password:
-            raise ValueError(
-                "SugarCRM v4.1 token must be either a session id or JSON "
-                "with username/password"
-            )
-
-        app_name = self._auth_config.get("application_name", "sugar_voice_bridge")
-        password_md5 = hashlib.md5(password.encode("utf-8")).hexdigest()
-        login_payload = {
-            "user_auth": {
-                "user_name": username,
-                "password": password_md5,
-                "version": "1",
-            },
-            "application_name": app_name,
-            "name_value_list": [],
-        }
-        result = await self._call_v4_1("login", login_payload)
-        sid = result.get("id")
-        if not sid:
-            raise ValueError(f"SugarCRM v4.1 login failed: {result}")
-        self._session_id = sid
-        return sid
-
-    # -----------------------------
-    # Public API
-    # -----------------------------
+        return response
 
     async def generic_search(self, query: str, scope: str = "all") -> dict[str, Any]:
-        scope = (scope or "all").lower().strip()
+        module_map = {
+            "contacts": "Contacts",
+            "accounts": "Accounts",
+            "meetings": "Meetings",
+        }
+        normalized_scope = str(scope or "all").strip().lower()
+        payload_data = {"query": query, "q": query, "limit": 20, "offset": 0}
 
-        if self.mode == "coripo_public":
-            module_map = {
-                "contacts": "Contacts",
-                "accounts": "Accounts",
-                "meetings": "Meetings",
-            }
-            if scope in module_map:
-                module_name = module_map[scope]
-                payload = self._build_coripo_list_payload(module_name, {"q": query, "max_results": 20})
-                result = await self._coripo_request(
-                    "POST",
-                    f"list/{module_name}",
-                    json_body=payload,
-                    ensure_sid=True,
-                )
-                return {"module": module_name, "result": result}
+        if normalized_scope in module_map:
+            return await self.execute_module_action(
+                module=module_map[normalized_scope],
+                action="list",
+                data=payload_data,
+            )
 
-            aggregate: dict[str, Any] = {}
-            for key, module_name in module_map.items():
-                payload = self._build_coripo_list_payload(module_name, {"q": query, "max_results": 20})
-                aggregate[key] = await self._coripo_request(
-                    "POST",
-                    f"list/{module_name}",
-                    json_body=payload,
-                    ensure_sid=True,
-                )
-            return aggregate
-
-        if self.is_v4_1:
-            sid = await self._get_v4_1_session()
-            escaped = self._escape_like(query)
-
-            async def list_module(module_name: str, query_sql: str) -> dict[str, Any]:
-                return await self._call_v4_1(
-                    "get_entry_list",
-                    {
-                        "session": sid,
-                        "module_name": module_name,
-                        "query": query_sql,
-                        "order_by": f"{module_name.lower()}.date_modified DESC",
-                        "offset": 0,
-                        "select_fields": [],
-                        "link_name_to_fields_array": [],
-                        "max_results": 20,
-                        "deleted": 0,
-                    },
-                )
-
-            if scope == "contacts":
-                return await list_module(
-                    "Contacts",
-                    f"(contacts.first_name LIKE '%{escaped}%' OR contacts.last_name LIKE '%{escaped}%')",
-                )
-            if scope == "accounts":
-                return await list_module("Accounts", f"accounts.name LIKE '%{escaped}%'")
-            if scope == "meetings":
-                return await list_module("Meetings", f"meetings.name LIKE '%{escaped}%'")
-
-            return {
-                "contacts": await list_module(
-                    "Contacts",
-                    f"(contacts.first_name LIKE '%{escaped}%' OR contacts.last_name LIKE '%{escaped}%')",
-                ),
-                "accounts": await list_module("Accounts", f"accounts.name LIKE '%{escaped}%'"),
-                "meetings": await list_module("Meetings", f"meetings.name LIKE '%{escaped}%'"),
-            }
-
-        # Modern Sugar REST-like fallback.
-        return await self._request(
-            "GET",
-            "/search",
-            params={"q": query, "scope": scope},
-        )
+        return {
+            key: await self.execute_module_action(
+                module=module_name,
+                action="list",
+                data=payload_data,
+            )
+            for key, module_name in module_map.items()
+        }
 
     async def execute_module_action(
         self,
@@ -626,260 +717,179 @@ class SugarClient:
         action: str,
         data: dict[str, Any],
     ) -> dict[str, Any]:
-        normalized = action.lower().strip()
+        normalized_action = str(action or "").strip().lower()
+        module_name = self._canonical_module(module)
+        clean_records = bool(data.get("clean_records", self.clean_response_default))
+        include_field_names = bool(data.get("include_field_names", True))
+        raw_value = data.get("response_fields")
+        include_fields: set[str] | None = None
+        if isinstance(raw_value, list):
+            include_fields = {str(item).strip() for item in raw_value if str(item).strip()}
+            include_fields.add("id")
 
-        if self.mode == "coripo_public":
-            module_name = self._canonical_module(module)
+        if normalized_action in {"list", "search"}:
+            payload = self._build_coripo_list_payload(module_name, data)
+            last_exc: Exception | None = None
+            for candidate in self._module_candidates(module_name):
+                try:
+                    raw = await self._coripo_request(
+                        "POST",
+                        f"list/{candidate}",
+                        json_body=payload,
+                        require_sid=True,
+                    )
+                    return self._sanitize_list_response(
+                        candidate,
+                        payload,
+                        raw,
+                        clean_records=clean_records,
+                        include_fields=include_fields,
+                        include_field_names=include_field_names,
+                    )
+                except httpx.HTTPStatusError as exc:
+                    last_exc = exc
+                    if exc.response.status_code < 500:
+                        raise
+            if last_exc is not None:
+                raise last_exc
+            raise ValueError(f"Unable to resolve module for list action: {module_name}")
 
-            if normalized == "create":
-                payload = {
-                    "fields": self._sanitize_coripo_fields(data),
-                    "relationships": data.get("relationships", {}),
-                    "customData": data.get("customData", {}),
-                    "files": data.get("files", []),
-                    "invitees": data.get(
-                        "invitees",
-                        {"Users": [], "Contacts": [], "Leads": []},
-                    ),
-                }
-                if "inviteesBackup" in data:
-                    payload["inviteesBackup"] = data.get("inviteesBackup", {})
-                return await self._coripo_request(
-                    "POST",
-                    f"set/{module_name}",
-                    json_body=payload,
-                    ensure_sid=True,
-                )
+        if normalized_action == "create":
+            payload = self._build_set_payload(data, include_invitees_backup=False)
+            raw = await self._coripo_request(
+                "POST",
+                f"set/{module_name}",
+                json_body=payload,
+                require_sid=True,
+            )
+            return self._sanitize_mutation_response(
+                raw,
+                clean_record=clean_records,
+                include_fields=include_fields,
+            )
 
-            if normalized in {"update", "patch"}:
-                record_id = data.get("id")
-                if not record_id:
-                    raise ValueError("Update action requires 'id' in data")
-                payload = {
-                    "fields": self._sanitize_coripo_fields(data),
-                    "relationships": data.get("relationships", {}),
-                    "customData": data.get("customData", {}),
-                    "files": data.get("files", []),
-                    "invitees": data.get(
-                        "invitees",
-                        {"Users": [], "Contacts": [], "Leads": []},
-                    ),
-                    "inviteesBackup": data.get(
-                        "inviteesBackup",
-                        data.get("invitees", {"Users": [], "Contacts": [], "Leads": []}),
-                    ),
-                }
-                return await self._coripo_request(
-                    "POST",
-                    f"set/{module_name}/{record_id}",
-                    json_body=payload,
-                    ensure_sid=True,
-                )
-
-            if normalized == "delete":
-                record_id = data.get("id")
-                if not record_id:
-                    raise ValueError("Delete action requires 'id' in data")
-                return await self._coripo_request(
-                    "DELETE",
-                    f"delete/{module_name}/{record_id}",
-                    ensure_sid=True,
-                )
-
-            if normalized in {"get", "read", "detail"}:
-                record_id = data.get("id")
-                if not record_id:
-                    raise ValueError("Read action requires 'id' in data")
-                return await self._coripo_request(
-                    "GET",
-                    f"detail/{module_name}/{record_id}",
-                    ensure_sid=True,
-                )
-
-            if normalized in {"list", "search"}:
-                last_exc: Exception | None = None
-                for candidate in self._coripo_module_candidates(module_name):
-                    payload = self._build_coripo_list_payload(candidate, data)
-                    try:
-                        return await self._coripo_request(
-                            "POST",
-                            f"list/{candidate}",
-                            json_body=payload,
-                            ensure_sid=True,
-                        )
-                    except httpx.HTTPStatusError as exc:
-                        last_exc = exc
-                        # Coripo returns 500 for unknown/non-bean modules.
-                        # Try casing variants before failing hard.
-                        if exc.response.status_code < 500:
-                            raise
-                        continue
-                if last_exc is not None:
-                    raise last_exc
-                raise ValueError(f"Unable to resolve Coripo module for list/search: {module_name}")
-
-        if self.is_v4_1:
-            module_name = self._canonical_module(module)
-            sid = await self._get_v4_1_session()
-
-            if normalized == "create":
-                values = [
-                    {"name": k, "value": v}
-                    for k, v in data.items()
-                    if k != "id" and v is not None
-                ]
-                return await self._call_v4_1(
-                    "set_entry",
-                    {"session": sid, "module_name": module_name, "name_value_list": values},
-                )
-
-            if normalized in {"update", "patch"}:
-                if not data.get("id"):
-                    raise ValueError("Update action requires 'id' in data")
-                values = [{"name": "id", "value": data["id"]}] + [
-                    {"name": k, "value": v}
-                    for k, v in data.items()
-                    if k != "id" and v is not None
-                ]
-                return await self._call_v4_1(
-                    "set_entry",
-                    {"session": sid, "module_name": module_name, "name_value_list": values},
-                )
-
-            if normalized == "delete":
-                record_id = data.get("id")
-                if not record_id:
-                    raise ValueError("Delete action requires 'id' in data")
-                return await self._call_v4_1(
-                    "set_entry",
-                    {
-                        "session": sid,
-                        "module_name": module_name,
-                        "name_value_list": [
-                            {"name": "id", "value": record_id},
-                            {"name": "deleted", "value": 1},
-                        ],
-                    },
-                )
-
-            if normalized in {"get", "read", "detail"}:
-                record_id = data.get("id")
-                if not record_id:
-                    raise ValueError("Read action requires 'id' in data")
-                return await self._call_v4_1(
-                    "get_entry",
-                    {
-                        "session": sid,
-                        "module_name": module_name,
-                        "id": record_id,
-                        "select_fields": data.get("select_fields", []),
-                        "link_name_to_fields_array": [],
-                    },
-                )
-
-            if normalized in {"list", "search"}:
-                query_sql = data.get("query", "")
-                return await self._call_v4_1(
-                    "get_entry_list",
-                    {
-                        "session": sid,
-                        "module_name": module_name,
-                        "query": query_sql,
-                        "order_by": data.get("order_by", f"{module_name.lower()}.date_modified DESC"),
-                        "offset": int(data.get("offset", 0)),
-                        "select_fields": data.get("select_fields", []),
-                        "link_name_to_fields_array": [],
-                        "max_results": int(data.get("max_results", 20)),
-                        "deleted": int(data.get("deleted", 0)),
-                    },
-                )
-
-        module_name = module.strip("/")
-        if normalized == "create":
-            return await self._request("POST", f"/{module_name}", json_body=data)
-        if normalized in {"update", "patch"}:
-            record_id = data.get("id")
+        if normalized_action in {"update", "patch"}:
+            record_id = str(data.get("id") or "").strip()
             if not record_id:
                 raise ValueError("Update action requires 'id' in data")
-            body = {k: v for k, v in data.items() if k != "id"}
-            return await self._request("PUT", f"/{module_name}/{record_id}", json_body=body)
-        if normalized == "delete":
-            record_id = data.get("id")
+            payload = self._build_set_payload(data, include_invitees_backup=True)
+            raw = await self._coripo_request(
+                "POST",
+                f"set/{module_name}/{record_id}",
+                json_body=payload,
+                require_sid=True,
+            )
+            return self._sanitize_mutation_response(
+                raw,
+                fallback_id=record_id,
+                clean_record=clean_records,
+                include_fields=include_fields,
+            )
+
+        if normalized_action == "delete":
+            record_id = str(data.get("id") or "").strip()
             if not record_id:
                 raise ValueError("Delete action requires 'id' in data")
-            return await self._request("DELETE", f"/{module_name}/{record_id}")
-        if normalized in {"get", "read", "detail"}:
-            record_id = data.get("id")
+            await self._coripo_request(
+                "DELETE",
+                f"delete/{module_name}/{record_id}",
+                require_sid=True,
+            )
+            return {"status": "ok", "id": record_id}
+
+        if normalized_action in {"get", "read", "detail"}:
+            record_id = str(data.get("id") or "").strip()
             if not record_id:
                 raise ValueError("Read action requires 'id' in data")
-            return await self._request("GET", f"/{module_name}/{record_id}")
-        if normalized in {"list", "search"}:
-            return await self._request("GET", f"/{module_name}", params=data)
+            raw = await self._coripo_request(
+                "GET",
+                f"detail/{module_name}/{record_id}",
+                require_sid=True,
+            )
+            record = self._extract_first_record(raw)
+            output: dict[str, Any] = {"id": record_id}
+            if record is not None:
+                output["record"] = (
+                    self._clean_record(record, include_fields=include_fields)
+                    if clean_records
+                    else record
+                )
+            return output
 
-        return await self._request(
-            normalized.upper(),
-            f"/{module_name}/{normalized}",
-            json_body=data,
+        # Fallback for uncommon Coripo actions.
+        return await self._coripo_request(
+            normalized_action.upper(),
+            f"{normalized_action}/{module_name}",
+            json_body=data if data else None,
+            require_sid=True,
         )
 
     async def get_dynamic_schema(self, module: str) -> dict[str, Any]:
         module_name = self._canonical_module(module)
+        raw = await self._coripo_request(
+            "GET",
+            f"defs/{module_name}",
+            require_sid=True,
+        )
 
-        if self.mode == "coripo_public":
-            return await self._coripo_request(
-                "GET",
-                f"defs/{module_name}",
-                ensure_sid=True,
-            )
+        defs: dict[str, Any] | None = None
+        if isinstance(raw.get("defs"), dict):
+            defs = raw["defs"]
+        elif isinstance(raw.get("field_defs"), dict):
+            defs = raw["field_defs"]
+        elif isinstance(raw.get("fields"), dict):
+            defs = raw["fields"]
+        else:
+            data = raw.get("data")
+            if isinstance(data, dict):
+                if isinstance(data.get("defs"), dict):
+                    defs = data["defs"]
+                elif isinstance(data.get("field_defs"), dict):
+                    defs = data["field_defs"]
+                elif isinstance(data.get("fields"), dict):
+                    defs = data["fields"]
+            message = raw.get("message")
+            if defs is None and isinstance(message, dict):
+                inner = message.get("data")
+                if isinstance(inner, dict):
+                    if isinstance(inner.get("defs"), dict):
+                        defs = inner["defs"]
+                    elif isinstance(inner.get("field_defs"), dict):
+                        defs = inner["field_defs"]
+                    elif isinstance(inner.get("fields"), dict):
+                        defs = inner["fields"]
 
-        if self.is_v4_1:
-            sid = await self._get_v4_1_session()
-            return await self._call_v4_1(
-                "get_module_fields",
-                {
-                    "session": sid,
-                    "module_name": module_name,
-                    "fields": [],
-                },
-            )
-
-        try:
-            return await self._request(
-                "GET",
-                "/metadata",
-                params={"type_filter": "modules", "module_filter[]": module_name},
-            )
-        except httpx.HTTPError:
-            logger.warning("Metadata endpoint unavailable, falling back to AiIngest schema")
-            return await self._request("GET", f"/AiIngest/schema/{module_name}")
+        return {"module": module_name, "defs": defs or {}}
 
     async def fetch_ai_ingest_dump(self, module: str) -> dict[str, Any]:
         module_name = self._canonical_module(module)
+        offset = 0
+        page_size = 500
+        all_records: list[dict[str, Any]] = []
 
-        if self.mode == "coripo_public":
-            payload = self._build_coripo_list_payload(module_name, {"max_results": 500})
-            data = await self._coripo_request(
-                "POST",
-                f"list/{module_name}",
-                json_body=payload,
-                ensure_sid=True,
+        while True:
+            payload = await self.execute_module_action(
+                module=module_name,
+                action="list",
+                data={
+                    "query": "",
+                    "q": "",
+                    "offset": offset,
+                    "limit": page_size,
+                    "include_hash": True,
+                    "hash_algorithm": "sha256",
+                    "savedSearch": False,
+                },
             )
-            return {"records": self._extract_coripo_records(data)}
+            records = payload.get("records", [])
+            if not isinstance(records, list) or not records:
+                break
 
-        if not self.is_v4_1:
-            return await self._request("GET", f"/AiIngest/dump/{module_name}")
+            batch = [row for row in records if isinstance(row, dict)]
+            all_records.extend(batch)
 
-        parsed = urlparse(self.base_url)
-        host_root = f"{parsed.scheme}://{parsed.netloc}"
-        url = f"{host_root}/AiIngest/dump/{module_name}"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.get(url)
-        if response.status_code >= 400:
-            logger.error(
-                "AiIngest dump failed status=%s url=%s body=%s",
-                response.status_code,
-                url,
-                response.text,
-            )
-            response.raise_for_status()
-        return self._decode_response(response)
+            if len(batch) < page_size:
+                break
+            offset += len(batch)
+
+        return {"records": all_records}
