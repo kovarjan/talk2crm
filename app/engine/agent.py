@@ -6,6 +6,7 @@ from typing import Any
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
+from datetime import datetime
 
 from app.core.config import get_settings
 from app.core.logging import (
@@ -38,7 +39,9 @@ def get_agent_executor(tenant_id: str, tools: list) -> AgentExecutor:
         model=settings.llm_model,
         temperature=settings.llm_temperature,
     )
-
+    now = datetime.now()
+    current_date = now.strftime("%Y-%m-%d %H:%M:%S")
+    current_day = now.strftime("%A")
     prompt = ChatPromptTemplate.from_messages(
         [
             (
@@ -47,11 +50,18 @@ def get_agent_executor(tenant_id: str, tools: list) -> AgentExecutor:
                 "Odpovidej cesky, pokud uzivatel vyslovne nechce jiny jazyk. "
                 "Pouzivej nastroje pro CRM akce a vyhledavani. "
                 "Pro read-only dotazy na CRM data (schuzky, kontakty, firmy, osoby) pouzij primarne crm_data_tool. "
+                "Pro slozite list/search dotazy vyuzivej plny JSON filtr Coripo API "
+                "(filter/operands, relate, order, columns) misto jednoducheho query stringu. "
+                "Pri dotazech na kontakty podle firmy nejdriv vyhledej firmu fuzzy v tenant RAG/Qdrant datech, "
+                "ziskej account id a pak filtruj Contacts pres relate filtr na Accounts.id. "
+                "Pokud je RAG/Qdrant prazdny nebo bez shody, nikdy neukoncuj odpoved jako 'nenalezeno' bez overeni v CRM "
+                "(crm_data_tool nebo crm_action_tool list/search). "
                 "Vzdy bud explicitni ohledne akce, vysledku a predpokladu. "
                 "Odpoved pro uzivatele pis jako cisty text bez markdown formatovani a bez emoji. "
                 "Mutacni CRM akce (create/update/patch/delete) musi byt pred provedenim potvrzena uzivatelem. "
                 "Pokud context obsahuje pending_action a uzivatel posila opravu nebo doplneni, "
-                "navaz na tuto pending_action jen pokud dotaz smeruje na mutaci dat, jinak pending_action ignoruj.",
+                "navaz na tuto pending_action jen pokud dotaz smeruje na mutaci dat, jinak pending_action ignoruj. "
+                "Aktuální datum a čas: {current_date}, den v týdnu: {current_day}.",
             ),
             (
                 "human",
@@ -62,7 +72,7 @@ def get_agent_executor(tenant_id: str, tools: list) -> AgentExecutor:
             ),
             ("placeholder", "{agent_scratchpad}"),
         ]
-    )
+    ).partial(current_date=current_date, current_day=current_day)
 
     agent = create_tool_calling_agent(llm=llm, tools=tools, prompt=prompt)
     return AgentExecutor(
