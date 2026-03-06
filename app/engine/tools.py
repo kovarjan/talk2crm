@@ -1810,7 +1810,12 @@ def build_tools(
         return json.dumps(result, ensure_ascii=False)
 
     @tool("crm_data_tool")
-    async def crm_data_tool(query: Any, query_type: str = "auto", limit: int = 20) -> str:
+    async def crm_data_tool(
+        query: Any,
+        query_type: str = "auto",
+        scope: Any | None = None,
+        limit: int = 20,
+    ) -> str:
         """Read CRM data for user questions and return UI-friendly cards/table payload."""
         if settings.crm_mode.lower() == "off":
             return json.dumps(
@@ -1975,6 +1980,8 @@ def build_tools(
             if resolved_type == "contacts_by_company":
                 company_name = _extract_company_name(user_query or effective_query, request_context)
                 direct_account_ids = _extract_account_ids_from_query(query, request_context)
+                if not direct_account_ids and scope is not None:
+                    direct_account_ids = _extract_account_ids_from_query(scope, request_context)
                 resolved_accounts: list[dict[str, Any]] = []
                 if direct_account_ids:
                     account_ids = direct_account_ids
