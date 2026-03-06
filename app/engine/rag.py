@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import uuid
+import warnings
 from datetime import datetime, timezone
 from typing import Any
 
@@ -48,11 +49,16 @@ class TenantRAGService:
 
     def _build_client_with_fallback(self) -> QdrantClient:
         try:
-            remote = QdrantClient(
-                url=self.settings.qdrant_url,
-                api_key=self.settings.qdrant_api_key,
-                timeout=10.0,
-            )
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Api key is used with an insecure connection.",
+                )
+                remote = QdrantClient(
+                    url=self.settings.qdrant_url,
+                    api_key=self.settings.qdrant_api_key,
+                    timeout=10.0,
+                )
             # Connectivity preflight to fail fast on startup.
             remote.get_collections()
             logger.info("Connected to remote Qdrant url=%s", self.settings.qdrant_url)

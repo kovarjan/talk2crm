@@ -57,7 +57,7 @@ def get_agent_executor(tenant_id: str, tools: list) -> AgentExecutor:
                 "Pokud je RAG/Qdrant prazdny nebo bez shody, nikdy neukoncuj odpoved jako 'nenalezeno' bez overeni v CRM "
                 "(crm_data_tool nebo crm_action_tool list/search). "
                 "Vzdy bud explicitni ohledne akce, vysledku a predpokladu. "
-                "Odpoved pro uzivatele pis jako cisty text bez markdown formatovani a bez emoji. "
+                "Odpoved pro uzivatele pis jako cisty text bez markdown formatovani a bez emoji! "
                 "Mutacni CRM akce (create/update/patch/delete) musi byt pred provedenim potvrzena uzivatelem. "
                 "Pokud context obsahuje pending_action a uzivatel posila opravu nebo doplneni, "
                 "navaz na tuto pending_action jen pokud dotaz smeruje na mutaci dat, jinak pending_action ignoruj. "

@@ -55,13 +55,6 @@ def _infer_module_from_intent(input_text: str, requested_module: str) -> str:
         "poznamky": "Notes",
     }
 
-    # Respect explicit module provided by the agent/user and only infer when module is missing/unknown.
-    explicit_module = module_aliases.get(module_norm)
-    if explicit_module:
-        return explicit_module
-    if module_norm:
-        return requested_module
-
     call_tokens = ("hovor", "telefonat", "zavolej", "volat", "call")
     task_tokens = ("ukol", "task", "todo", "pripomen", "follow up")
     note_tokens = ("poznamk", "zapis", "zapisek", "note")
@@ -71,6 +64,17 @@ def _infer_module_from_intent(input_text: str, requested_module: str) -> str:
     has_task = any(token in normalized for token in task_tokens)
     has_note = any(token in normalized for token in note_tokens)
     has_meeting = any(token in normalized for token in meeting_tokens)
+
+    explicit_module = module_aliases.get(module_norm)
+    if explicit_module:
+        # Resolve explicit LLM/user module conflicts by trusting clear user intent tokens.
+        if explicit_module == "Meetings" and has_call and not has_meeting:
+            return "Calls"
+        if explicit_module == "Calls" and has_meeting and not has_call:
+            return "Meetings"
+        return explicit_module
+    if module_norm:
+        return requested_module
 
     if has_task:
         return "Tasks"
@@ -858,6 +862,7 @@ def _extract_person_name(query: str, context: dict[str, Any] | None) -> str:
     patterns = [
         r"\bkdo\s+je\s+([^?.!,]+)",
         r"\bkontakt\s+([^?.!,]+)",
+        r"\bs\s+([^?.!,]+?)(?:\s+na\s+|\s+v\s+|$)",
     ]
     for pattern in patterns:
         match = re.search(pattern, query, re.IGNORECASE)
@@ -870,6 +875,59 @@ def _extract_person_name(query: str, context: dict[str, Any] | None) -> str:
         if candidate:
             return candidate
     return _safe_text(query)
+
+
+def _recent_contacts_from_context(context: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(context, dict):
+        return []
+    raw = context.get("recent_contacts")
+    if not isinstance(raw, list):
+        return []
+
+    contacts: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        record_id = _safe_text(item.get("id") or item.get("contact_id"))
+        name = _safe_text(item.get("name") or item.get("full_name") or item.get("title"))
+        first_name = _safe_text(item.get("first_name"))
+        last_name = _safe_text(item.get("last_name"))
+        if not name and (first_name or last_name):
+            name = f"{first_name} {last_name}".strip()
+        if not name:
+            continue
+        contact = {
+            "id": record_id,
+            "name": name,
+            "first_name": first_name,
+            "last_name": last_name,
+            "account_name": _safe_text(item.get("account_name") or item.get("company")),
+            "email1": _safe_text(item.get("email1") or item.get("email")),
+            "phone_mobile": _safe_text(item.get("phone_mobile") or item.get("phone_work") or item.get("phone")),
+        }
+        contacts.append(contact)
+    return contacts
+
+
+def _best_recent_contact_match(query: str, candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    search = _safe_text(query)
+    if not search or not candidates:
+        return None
+
+    best: tuple[float, dict[str, Any]] | None = None
+    for row in candidates:
+        candidate_name = _record_name(row)
+        if not candidate_name:
+            continue
+        lexical = _score_lexical_fuzzy(search, candidate_name) * 100.0
+        token_score = float(_score_text_match(search, candidate_name))
+        score = max(lexical, token_score)
+        if best is None or score > best[0]:
+            best = (score, row)
+
+    if best and best[0] >= 70.0:
+        return best[1]
+    return None
 
 
 def _extract_company_name(query: str, context: dict[str, Any] | None) -> str:
@@ -1348,7 +1406,8 @@ def build_tools(
                         # "Pro provedení zopakujte požadavek s context.confirm_action=true."
                     ),
                     "pending_action": {
-                        "module": module,
+                        "module": effective_module,
+                        "requested_module": module,
                         "effective_module": effective_module,
                         "action": normalized_action,
                         "data": data,
@@ -1927,7 +1986,32 @@ def build_tools(
                 )
 
             if resolved_type == "contact_by_name":
-                person_name = _extract_person_name(user_query or effective_query, request_context)
+                explicit_query = _safe_text(query)
+                person_source = explicit_query or user_query or effective_query
+                person_name = _extract_person_name(person_source, request_context)
+
+                recent_contacts = _recent_contacts_from_context(request_context)
+                recent_match = _best_recent_contact_match(person_name or person_source, recent_contacts)
+                if recent_match is not None:
+                    selected = [recent_match]
+                    total_count = 1
+                    cards = _contact_cards(selected, total_count, title=f"Kontakty ({total_count})")
+                    return json.dumps(
+                        {
+                            "status": "ok",
+                            "query_type": resolved_type,
+                            "module": "Contacts",
+                            "total_count": total_count,
+                            "cards": cards,
+                            "message_to_user": (
+                                f"Navazuji na poslední kontext. "
+                                f"Kontakt '{_record_name(recent_match)}' jsem našla."
+                            ),
+                            "source": "recent_contacts_context",
+                        },
+                        ensure_ascii=False,
+                    )
+
                 rag_candidates: list[dict[str, Any]] = []
                 if rag_service is not None:
                     try:

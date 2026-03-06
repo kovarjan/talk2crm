@@ -443,7 +443,7 @@ class ModuleAdjustmentEngine:
             if topic:
                 return topic[0].upper() + topic[1:]
 
-        for key in ("description", "note"):
+        for key in ("description", "note", "subject"):
             val = str(fields.get(key) or "").strip()
             if val:
                 return val

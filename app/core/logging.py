@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import sys
 import time
@@ -28,6 +29,7 @@ _HEALTH_PATHS = ("/ping", "/ping/", "/health", "/health/")
 _STANDARD_RECORD_ATTRS = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__.keys())
 
 _F = TypeVar("_F", bound=Callable[..., Any])
+_TOKEN_ENCODER: Any | None = None
 
 LLM_STEP_USER_INPUT = "USER INPUT"
 LLM_STEP_AGENT_ACTION = "AGENT THINKING/ACTION"
@@ -115,6 +117,59 @@ def _render_pretty_value(value: Any, *, compact: bool = False) -> str:
 def _preview_value(value: Any, max_chars: int, *, compact: bool = False) -> str:
     rendered = _render_pretty_value(value, compact=compact)
     return _truncate_text(rendered, max_chars)
+
+
+def _get_token_encoder() -> Any | None:
+    global _TOKEN_ENCODER
+    if _TOKEN_ENCODER is not None:
+        return _TOKEN_ENCODER
+    try:
+        import tiktoken
+
+        try:
+            _TOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            _TOKEN_ENCODER = None
+    except Exception:
+        _TOKEN_ENCODER = None
+    return _TOKEN_ENCODER
+
+
+def _estimate_token_count(value: Any) -> int:
+    text = _safe_json_dumps(_normalize_for_display(value), indent=None)
+    if not text:
+        return 0
+    encoder = _get_token_encoder()
+    if encoder is not None:
+        try:
+            return len(encoder.encode(text))
+        except Exception:
+            pass
+    return max(1, math.ceil(len(text) / 4))
+
+
+def _build_context_usage(resources: dict[str, Any], request: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    window = resources.get("llm_context_window_tokens")
+    try:
+        context_window_tokens = int(window)
+    except (TypeError, ValueError):
+        context_window_tokens = 0
+    if context_window_tokens <= 0:
+        return {}
+
+    estimated_input_tokens = _estimate_token_count(
+        {
+            "request": request,
+            "context": context,
+        }
+    )
+    used_percent = round((estimated_input_tokens / context_window_tokens) * 100, 2)
+    return {
+        "estimated_input_tokens": estimated_input_tokens,
+        "context_window_tokens": context_window_tokens,
+        "used_percent": used_percent,
+        "method": "estimate",
+    }
 
 
 class HealthcheckAccessFilter(logging.Filter):
@@ -545,6 +600,14 @@ def log_llm_trace(
     if not _TRACE_ENABLED:
         return
 
+    normalized_request = _normalize_for_display(request)
+    normalized_context = _normalize_for_display(context or {})
+    normalized_resources = _normalize_for_display(resources or {})
+    if isinstance(normalized_request, dict) and isinstance(normalized_context, dict) and isinstance(normalized_resources, dict):
+        context_usage = _build_context_usage(normalized_resources, normalized_request, normalized_context)
+        if context_usage:
+            normalized_resources["context_usage"] = context_usage
+
     payload = {
         "session": {
             "tenant_id": tenant_id,
@@ -552,11 +615,11 @@ def log_llm_trace(
             "chat_id": chat_id,
             "request_id": request_id_ctx.get(),
         },
-        "request": _normalize_for_display(request),
-        "context": _normalize_for_display(context or {}),
+        "request": normalized_request,
+        "context": normalized_context,
         "tool_calls": _normalize_for_display(tool_calls or []),
         "outcome": _normalize_for_display(outcome),
-        "resources": _normalize_for_display(resources or {}),
+        "resources": normalized_resources,
         "chat_history": summarize_chat_history(chat_history or []),
     }
     logger.info("LLM interaction trace", extra={"trace": payload})
