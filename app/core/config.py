@@ -17,25 +17,26 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "SugarVoice AI Bridge"
+    app_name: str = "tak2crm"
     app_version: str = "1.0.0"
     debug: bool = False
     environment: str = "dev"
     log_format: str = "pretty"
     log_force_color: bool = True
     log_file_enabled: bool = False
-    log_file_path: str = "./logs/talk2api2.log"
+    log_file_path: str = "./logs/tak2crm.log"
     log_file_format: str = "json"
     log_trace_enabled: bool = True
     log_trace_max_chars: int = 1200
     log_trace_history_messages: int = 10
 
-    database_url: str = "sqlite+aiosqlite:///./sugar_voice_bridge.db"
+    database_url: str = "sqlite+aiosqlite:///./talk2crm.db"
 
     llm_base_url: str = "http://localhost:11434/v1"
     llm_model: str = "qwen3:latest"
     llm_api_key: str = "EMPTY"
     llm_temperature: float = 0.1
+    llm_context_window_tokens: int = 32768
 
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str | None = None
