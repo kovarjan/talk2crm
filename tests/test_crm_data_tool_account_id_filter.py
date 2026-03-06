@@ -135,3 +135,32 @@ def test_crm_data_tool_uses_relate_filter_with_account_id_expression_string() ->
     result = json.loads(raw)
     assert result.get("resolved_account_ids") == [ACCOUNT_ID]
     assert result.get("total_count") == 1
+
+
+def test_crm_data_tool_reads_account_id_from_scope_expression() -> None:
+    client = DummyCrmClient()
+    tools = build_tools(
+        tenant_id="ai-local",
+        user_id="28",
+        input_text="jaké máme kontakty k firmě Zliner",
+        request_context={},
+        crm_client=client,  # type: ignore[arg-type]
+        rag_service=None,
+        action_confirmation=False,
+    )
+    crm_data_tool = next(tool for tool in tools if getattr(tool, "name", "") == "crm_data_tool")
+
+    raw = asyncio.run(
+        crm_data_tool.ainvoke(
+            {
+                "query": "Zliner",
+                "query_type": "contacts",
+                "scope": f"Accounts.id={ACCOUNT_ID}",
+                "limit": 100,
+            }
+        )
+    )
+    result = json.loads(raw)
+    assert result.get("query_type") == "contacts_by_company"
+    assert result.get("resolved_account_ids") == [ACCOUNT_ID]
+    assert result.get("total_count") == 1

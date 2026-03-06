@@ -22,7 +22,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse
-from sqlalchemy import delete, select
+from sqlalchemy import case, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import OperationalError
 
@@ -84,10 +84,18 @@ def get_rag_service() -> TenantRAGService | None:
 
 
 def _chat_message_to_model(message: ChatMessage) -> ChatMessageItem:
+    metadata = message.metadata_json or {}
+    if message.role == "assistant" and isinstance(metadata, dict):
+        cards = metadata.get("cards")
+        if not isinstance(cards, list):
+            agent_result = metadata.get("agent_result")
+            if isinstance(agent_result, dict) and isinstance(agent_result.get("cards"), list):
+                metadata = dict(metadata)
+                metadata["cards"] = agent_result["cards"]
     return ChatMessageItem(
         role=message.role,
         content=message.content,
-        metadata=message.metadata_json or {},
+        metadata=metadata,
         created_at=message.created_at,
     )
 
@@ -106,7 +114,15 @@ async def _load_messages(
             ChatMessage.tenant_id == tenant_id,
             ChatMessage.user_id == user_id,
         )
-        .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
+        .order_by(
+            ChatMessage.created_at.asc(),
+            case(
+                (ChatMessage.role == "user", 0),
+                (ChatMessage.role == "assistant", 1),
+                else_=2,
+            ).asc(),
+            ChatMessage.id.asc(),
+        )
     )
     result = await db.execute(stmt)
     return [_chat_message_to_model(item) for item in result.scalars().all()]
