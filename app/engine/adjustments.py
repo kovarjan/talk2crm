@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import re
 import unicodedata
+from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -470,6 +471,15 @@ class ModuleAdjustmentEngine:
         for key, value in mapping.items():
             if key in normalized:
                 return value
+
+        # Tolerate minor typos in weekday names from speech-to-text (e.g. "podneli").
+        tokens = [token for token in normalized.split() if token]
+        for token in tokens:
+            for key, value in mapping.items():
+                if len(token) < 4 or abs(len(token) - len(key)) > 2:
+                    continue
+                if SequenceMatcher(None, token, key).ratio() >= 0.8:
+                    return value
         return None
 
     @classmethod
@@ -505,6 +515,9 @@ class ModuleAdjustmentEngine:
             normalized_input = cls._normalize_text(input_text or "")
             if "po poledni" in normalized_input:
                 hour = 13
+                minute = 0
+            elif "odpoledne" in normalized_input:
+                hour = 14
                 minute = 0
             elif "hned rano" in normalized_input or "rano" in normalized_input:
                 hour = 8

@@ -6,6 +6,8 @@ import unicodedata
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from app.engine.adjustments import ModuleAdjustmentEngine
+
 if TYPE_CHECKING:
     from app.services.crm_client import SugarClient
 
@@ -155,6 +157,52 @@ def _extract_create_contact_payload(text: str) -> dict[str, str] | None:
     return payload
 
 
+def _extract_create_meeting_payload(text: str) -> dict[str, Any] | None:
+    normalized = _normalize_text(text)
+    if "schuzk" not in normalized and "meeting" not in normalized:
+        return None
+    if not any(
+        trigger in normalized
+        for trigger in ("vytvor", "zaloz", "naplanuj", "pridej", "domluv", "zarid")
+    ):
+        return None
+
+    person_match = re.search(
+        (
+            r"\b(?:s\s+)?(?:pan[ií]|panem|pan)\s+([^,.;:]+?)"
+            r"(?=\s+(?:z|ze|na|v|ve|o|ohledn[eě]|kv[uů]li|k|do|od|u)\b|$)"
+        ),
+        text,
+        re.IGNORECASE,
+    )
+    company_match = re.search(
+        (
+            r"\b(?:z|ze|od)\s+(?:firmy|spole[cč]nosti|company)\s+([^,.;:]+?)"
+            r"(?=\s+(?:na|v|ve|o|ohledn[eě]|kv[uů]li|k|do|od|u|s|se)\b|$)"
+        ),
+        text,
+        re.IGNORECASE,
+    )
+    topic_match = re.search(
+        r"\b(?:ohledn[eě]|kv[uů]li|pro)\s+([^,.;:]+)",
+        text,
+        re.IGNORECASE,
+    )
+
+    fields: dict[str, Any] = {}
+    if person_match:
+        fields["contact_name"] = re.sub(r"\s+", " ", person_match.group(1)).strip(" ,.;")
+    if company_match:
+        fields["account_name"] = re.sub(r"\s+", " ", company_match.group(1)).strip(" ,.;")
+    if topic_match:
+        fields["description"] = re.sub(r"\s+", " ", topic_match.group(1)).strip(" ,.;")
+
+    date_start = ModuleAdjustmentEngine._derive_meeting_datetime(fields, text)
+    if date_start:
+        fields["date_start"] = date_start
+
+    return {"fields": fields}
+
 
 def _parse_datetime(value: str) -> datetime | None:
     raw = str(value or "").strip()
@@ -257,6 +305,80 @@ async def try_handle_quick_action(
             message = f"Hotovo. Kontakt {full_name} byl vytvořen (ID: {created_id})."
         else:
             message = f"Hotovo. Kontakt {full_name} byl vytvořen."
+        return {
+            "status": "ok",
+            "output": json.dumps(result, ensure_ascii=False),
+            "message_to_user": message,
+        }
+
+    create_meeting = _extract_create_meeting_payload(input_text)
+    if create_meeting is not None:
+        fields_raw = create_meeting.get("fields")
+        fields = fields_raw if isinstance(fields_raw, dict) else {}
+        date_start = str(fields.get("date_start") or "").strip()
+        if not date_start:
+            message = (
+                "Pro vytvoření schůzky potřebuji i termín. "
+                "Napište prosím den a čas (např. v pondělí 14:00)."
+            )
+            return {
+                "status": "needs_input",
+                "output": json.dumps({"status": "needs_input", "message_to_user": message}, ensure_ascii=False),
+                "message_to_user": message,
+            }
+
+        contact_name = str(fields.get("contact_name") or "").strip()
+        account_name = str(fields.get("account_name") or "").strip()
+        start_dt = _parse_datetime(date_start)
+        when_text = start_dt.strftime("%d.%m.%Y %H:%M") if start_dt else date_start
+
+        confirmation_text = "Připraveno: vytvořit schůzku"
+        if contact_name:
+            confirmation_text += f" s {contact_name}"
+        if account_name:
+            confirmation_text += f" ({account_name})"
+        confirmation_text += f" na {when_text}. Potvrďte prosím provedení."
+
+        pending_action = {
+            "module": "Meetings",
+            "action": "create",
+            "data": create_meeting,
+        }
+
+        if not action_confirmation:
+            return {
+                "status": "confirmation_required",
+                "pending_action": pending_action,
+                "output": json.dumps(
+                    {
+                        "action": "create",
+                        "module": "Meetings",
+                        "data_json": json.dumps(create_meeting, ensure_ascii=False),
+                        "message_to_user": confirmation_text,
+                    },
+                    ensure_ascii=False,
+                ),
+                "message_to_user": confirmation_text,
+            }
+
+        adjustment_engine = ModuleAdjustmentEngine(
+            tenant_id="quick-action",
+            user_id=user_id,
+            crm_client=crm_client,
+            input_text=input_text,
+            request_context={},
+        )
+        adjusted = await adjustment_engine.apply(
+            module="Meetings",
+            action="create",
+            data=create_meeting,
+        )
+        result = await crm_client.execute_module_action("Meetings", "create", adjusted.data)
+        created_id = str(result.get("id") or result.get("record_id") or "").strip()
+        if created_id:
+            message = f"Hotovo. Schůzka byla vytvořena (ID: {created_id})."
+        else:
+            message = "Hotovo. Schůzka byla vytvořena."
         return {
             "status": "ok",
             "output": json.dumps(result, ensure_ascii=False),

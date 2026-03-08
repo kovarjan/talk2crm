@@ -365,7 +365,7 @@ def _normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, An
         return normalized
 
     clean = _to_user_message(output_text)
-    if _looks_like_noise(clean):
+    if not clean or _looks_like_noise(clean):
         clean = (
             "Nerozuměla jsem spolehlivě požadavku. "
             "Upřesněte prosím akci, modul a čas (např. schůzka v úterý 9:30)."
@@ -790,9 +790,14 @@ async def _process_input_core(
     assistant_raw_text = str(
         agent_result.get("message_to_user")
         or agent_result.get("output")
-        or agent_result
+        or ""
     )
     assistant_text = _to_user_message(assistant_raw_text)
+    if not assistant_text:
+        assistant_text = (
+            "Nerozuměla jsem spolehlivě požadavku. "
+            "Upřesněte prosím akci, modul a čas (např. schůzka v úterý 9:30)."
+        )
     await _append_message(
         db,
         chat=chat,
