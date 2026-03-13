@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     log_trace_enabled: bool = True
     log_trace_max_chars: int = 1200
     log_trace_history_messages: int = 10
+    tool_call_logging: bool = False
 
     database_url: str = "sqlite+aiosqlite:///./talk2crm.db"
 
