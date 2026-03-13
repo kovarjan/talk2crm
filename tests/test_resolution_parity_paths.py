@@ -89,7 +89,7 @@ def _outcome_from_adjustment(result: dict[str, Any]) -> str:
 
 
 def _outcome_from_data_tool(result: dict[str, Any]) -> str:
-    return "resolved" if int(result.get("total") or result.get("total_count") or 0) > 0 else "unresolved"
+    return "resolved" if int(result.get("total") or 0) > 0 else "unresolved"
 
 
 
