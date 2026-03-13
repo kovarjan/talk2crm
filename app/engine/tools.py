@@ -14,6 +14,8 @@ from app.engine.rag import TenantRAGService
 from app.services.crm_read_service import CRMReadHelpers, CRMReadService
 from app.services.crm_client import SugarClient
 from app.services.crm_write_service import CRMWriteService
+from app.engine.filter_builder import FilterSpec, build_filter, build_order
+from app.engine.tool_logger import ToolCallLogger
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -1438,219 +1440,314 @@ def build_tools(
 
     @tool("crm_action_tool")
     async def crm_action_tool(module: str, action: str, data_json: str = "{}") -> str:
-        """Execute Coripo CRM module action using module/action/data JSON (supports full list filter/order payloads)."""
-        if settings.crm_mode.lower() == "off":
-            return json.dumps(
-                {
-                    "status": "crm-disabled",
-                    "message": "CRM mode is off, action skipped",
-                },
-                ensure_ascii=False,
-            )
+        """
+        Create, update, or delete CRM records. Use ONLY for write operations.
 
-        result = await write_service.execute_action(module=module, action=action, data_json=data_json)
-        return json.dumps(result, ensure_ascii=False)
+        module: Meetings | Calls | Tasks | Notes | Contacts | Accounts | Leads
+        action: create | update | delete
+
+        data_json: JSON object with the record fields.
+
+        Creating a Meeting:
+          module="Meetings", action="create",
+          data_json='{"name":"...", "date_start":"YYYY-MM-DD HH:MM:SS",
+                      "duration_hours":1, "status":"Planned",
+                      "invitees":[{"type":"Contacts","id":"<uuid>"}]}'
+
+        Logging a Call:
+          module="Calls", action="create",
+          data_json='{"name":"...", "direction":"Outbound", "status":"Held",
+                      "duration_hours":0, "duration_minutes":15}'
+
+        Creating a Task:
+          module="Tasks", action="create",
+          data_json='{"name":"...", "date_due":"YYYY-MM-DD", "status":"Not Started",
+                      "contact_id":"<uuid>"}'
+
+        Updating a record:
+          module="Contacts", action="update",
+          data_json='{"id":"<uuid>", "phone_mobile":"+420..."}'
+
+        ALWAYS resolve contact/account IDs first using crm_query_tool or
+        rag_search_tool before creating related records.
+        When action_confirmation is enabled, mutations return a pending_action
+        envelope — do not re-submit; wait for user confirmation.
+        """
+        if settings.crm_mode.lower() == "off":
+            return json.dumps({"status": "crm-disabled",
+                               "message": "CRM mode is off."}, ensure_ascii=False)
+
+        async with ToolCallLogger(
+            "crm_action_tool", tenant_id, user_id,
+            inputs={"module": module, "action": action, "data_json": data_json},
+        ) as tcl:
+            result = await write_service.execute_action(
+                module=module, action=action, data_json=data_json
+            )
+            tcl.set_output({"status": result.get("status"), "module": module, "action": action})
+            return json.dumps(result, ensure_ascii=False)
 
     @tool("rag_search_tool")
     async def rag_search_tool(query: str, limit: int = 5, module: str = "") -> str:
-        """Search tenant-scoped knowledge in Qdrant using semantic retrieval (optional module filter)."""
-        if rag_service is None:
-            return json.dumps(
-                {"warning": "RAG unavailable", "results": []},
-                ensure_ascii=False,
-            )
-        wide_limit = max(10, int(limit or 5) * 4)
-        results = rag_service.search(tenant_id=tenant_id, query=query, limit=wide_limit)
-        module_filter = _safe_text(module).lower()
-        if module_filter:
-            filtered: list[dict[str, Any]] = []
-            for item in results:
-                if not isinstance(item, dict):
-                    continue
-                payload = item.get("payload")
-                if not isinstance(payload, dict):
-                    continue
-                payload_module = _safe_text(payload.get("module")).lower()
-                if payload_module == module_filter:
-                    filtered.append(item)
-            results = filtered
+        """
+        Semantic vector search across tenant knowledge in Qdrant.
 
-            # Augment vector search with lexical fuzzy scan (case/diacritics/morphology).
-            lexical_hits = _lexical_module_search_in_qdrant(
-                rag_service=rag_service,
-                tenant_id=tenant_id,
-                module=module_filter,
-                query=query,
-                limit=max(10, int(limit or 5) * 4),
-            )
-            results = _dedupe_rag_hits_by_record(results + lexical_hits, limit=max(10, int(limit or 5) * 4))
+        Use this BEFORE crm_query_tool when you need to resolve a name to a UUID,
+        or when the user's query is vague and you need to find the best matching
+        record to anchor subsequent queries.
 
-            # Useful fallback for company lookups: derive account candidates from contacts.
-            if module_filter == "accounts":
-                wide_results = rag_service.search(
-                    tenant_id=tenant_id,
-                    query=query,
-                    limit=max(30, limit * 8),
-                )
-                contact_rows = _extract_rag_records(wide_results, module_hint="contacts")
-                derived_accounts: list[dict[str, Any]] = []
-                for row in contact_rows:
-                    account_id, account_name = _contact_row_account_ref(row)
-                    if not account_id or not account_name:
-                        continue
-                    if _score_text_match(query, account_name) < 65:
-                        continue
-                    derived_accounts.append(
-                        {
-                            "id": account_id,
-                            "name": account_name,
-                            "_rag_score": float(row.get("_rag_score", 0.0)),
-                        }
-                    )
-                picked = _select_account_candidates(
-                    company_name=query,
-                    records=derived_accounts,
-                    limit=limit,
-                    min_name_score=65,
-                )
-                derived_hits = [
-                    {
-                        "score": float(item.get("_rag_score", 0.0)),
-                        "payload": {
-                            "module": "accounts",
-                            "record_id": item.get("id"),
-                            "record": item,
-                            "derived_from": "contacts",
-                        },
-                    }
-                    for item in picked
-                ]
-                results = _dedupe_rag_hits_by_record(
-                    results + derived_hits,
-                    limit=max(10, int(limit or 5) * 4),
-                )
+        query: Natural language search — names, company names, topics
+        limit: Number of results (default 5)
+        module: Optional filter: contacts | accounts | meetings | calls | tasks
 
-                # CRM-backed fallback for account names when Qdrant account payloads are sparse.
-                try:
-                    query_variants: list[str] = []
-                    normalized_query = _normalize_text(query)
-                    for value in (query, normalized_query):
-                        candidate = _safe_text(value)
-                        if candidate and candidate not in query_variants:
-                            query_variants.append(candidate)
-                    tokens = [token for token in normalized_query.split() if token]
-                    for token in tokens:
-                        if len(token) >= 3 and token not in query_variants:
-                            query_variants.append(token)
-                    query_variants = query_variants[:4]
-
-                    crm_hits_by_id: dict[str, dict[str, Any]] = {}
-                    for variant in query_variants:
-                        crm_accounts = await crm_client.execute_module_action(
-                            module="Accounts",
-                            action="list",
-                            data={
-                                "limit": max(10, int(limit or 5) * 4),
-                                "offset": 0,
-                                "columns": [{"field": "name", "module": "Accounts", "width": "20%", "function": None}],
-                                "filter": {
-                                    "operator": "and",
-                                    "operands": [
-                                        {
-                                            "operator": "and",
-                                            "operands": [
-                                                {
-                                                    "field": "*",
-                                                    "fieldModule": None,
-                                                    "fieldRel": None,
-                                                    "type": "cont",
-                                                    "value": variant,
-                                                    "relationField": None,
-                                                }
-                                            ],
-                                        }
-                                    ],
-                                },
-                                "include_field_names": False,
-                                "response_fields": ["id", "name", "account_name"],
-                            },
-                        )
-                        for row in _extract_records(crm_accounts):
-                            row_id = _safe_text(row.get("id"))
-                            row_name = _record_primary_name(row)
-                            if not row_id or not row_name:
-                                continue
-                            score = _score_lexical_fuzzy(query, row_name)
-                            if score < 0.55:
-                                continue
-                            existing = crm_hits_by_id.get(row_id)
-                            if existing is None or float(existing.get("score") or 0.0) < score:
-                                crm_hits_by_id[row_id] = {
-                                    "score": max(0.72, score),
-                                    "payload": {
-                                        "module": "accounts",
-                                        "record_id": row_id,
-                                        "record": {"id": row_id, "name": row_name},
-                                        "source": "crm-filter",
-                                    },
-                                }
-                    crm_hits = list(crm_hits_by_id.values())
-                    if crm_hits:
-                        results = _dedupe_rag_hits_by_record(
-                            results + crm_hits,
-                            limit=max(10, int(limit or 5) * 4),
-                        )
-                except Exception:
-                    pass
-
-            # If Accounts records in Qdrant have only {"id"}, enrich names from CRM.
-            if module_filter == "accounts" and results:
-                account_ids: list[str] = []
+        Returns records with IDs you can pass to crm_query_tool filters or
+        crm_action_tool data_json.
+        """
+        async with ToolCallLogger(
+            "rag_search_tool", tenant_id, user_id,
+            inputs={"query": query, "limit": limit, "module": module},
+        ) as tcl:
+            if rag_service is None:
+                result_payload = {"warning": "RAG unavailable", "results": []}
+                tcl.set_output(result_payload)
+                return json.dumps(result_payload, ensure_ascii=False)
+            wide_limit = max(10, int(limit or 5) * 4)
+            results = rag_service.search(tenant_id=tenant_id, query=query, limit=wide_limit)
+            module_filter = _safe_text(module).lower()
+            if module_filter:
+                filtered: list[dict[str, Any]] = []
                 for item in results:
-                    payload = item.get("payload") if isinstance(item, dict) else None
+                    if not isinstance(item, dict):
+                        continue
+                    payload = item.get("payload")
                     if not isinstance(payload, dict):
                         continue
-                    record = payload.get("record")
-                    if not isinstance(record, dict):
-                        continue
-                    name = _record_primary_name(record)
-                    record_id = _safe_text(record.get("id") or payload.get("record_id"))
-                    if record_id and not name:
-                        account_ids.append(record_id)
-
-                account_ids = list(dict.fromkeys(account_ids))[:30]
-                if account_ids:
-                    try:
-                        id_filter = {
-                            "operator": "and",
-                            "operands": [
-                                {
-                                    "operator": "or",
-                                    "operands": [
-                                        {"field": "id", "type": "eq", "value": row_id}
-                                        for row_id in account_ids
-                                    ],
-                                }
-                            ],
-                        }
-                        hydrated = await crm_client.execute_module_action(
-                            module="Accounts",
-                            action="list",
-                            data={
-                                "limit": max(30, len(account_ids) * 2),
-                                "offset": 0,
-                                "filter": id_filter,
-                                "include_field_names": False,
-                                "response_fields": ["id", "name", "account_name"],
-                            },
+                    payload_module = _safe_text(payload.get("module")).lower()
+                    if payload_module == module_filter:
+                        filtered.append(item)
+                results = filtered
+    
+                # Augment vector search with lexical fuzzy scan (case/diacritics/morphology).
+                lexical_hits = _lexical_module_search_in_qdrant(
+                    rag_service=rag_service,
+                    tenant_id=tenant_id,
+                    module=module_filter,
+                    query=query,
+                    limit=max(10, int(limit or 5) * 4),
+                )
+                results = _dedupe_rag_hits_by_record(results + lexical_hits, limit=max(10, int(limit or 5) * 4))
+    
+                # Useful fallback for company lookups: derive account candidates from contacts.
+                if module_filter == "accounts":
+                    wide_results = rag_service.search(
+                        tenant_id=tenant_id,
+                        query=query,
+                        limit=max(30, limit * 8),
+                    )
+                    contact_rows = _extract_rag_records(wide_results, module_hint="contacts")
+                    derived_accounts: list[dict[str, Any]] = []
+                    for row in contact_rows:
+                        account_id, account_name = _contact_row_account_ref(row)
+                        if not account_id or not account_name:
+                            continue
+                        if _score_text_match(query, account_name) < 65:
+                            continue
+                        derived_accounts.append(
+                            {
+                                "id": account_id,
+                                "name": account_name,
+                                "_rag_score": float(row.get("_rag_score", 0.0)),
+                            }
                         )
-                        names_by_id: dict[str, str] = {}
-                        for row in _extract_records(hydrated):
-                            row_id = _safe_text(row.get("id"))
-                            row_name = _record_primary_name(row)
-                            if row_id and row_name:
-                                names_by_id[row_id] = row_name
-
+                    picked = _select_account_candidates(
+                        company_name=query,
+                        records=derived_accounts,
+                        limit=limit,
+                        min_name_score=65,
+                    )
+                    derived_hits = [
+                        {
+                            "score": float(item.get("_rag_score", 0.0)),
+                            "payload": {
+                                "module": "accounts",
+                                "record_id": item.get("id"),
+                                "record": item,
+                                "derived_from": "contacts",
+                            },
+                        }
+                        for item in picked
+                    ]
+                    results = _dedupe_rag_hits_by_record(
+                        results + derived_hits,
+                        limit=max(10, int(limit or 5) * 4),
+                    )
+    
+                    # CRM-backed fallback for account names when Qdrant account payloads are sparse.
+                    try:
+                        query_variants: list[str] = []
+                        normalized_query = _normalize_text(query)
+                        for value in (query, normalized_query):
+                            candidate = _safe_text(value)
+                            if candidate and candidate not in query_variants:
+                                query_variants.append(candidate)
+                        tokens = [token for token in normalized_query.split() if token]
+                        for token in tokens:
+                            if len(token) >= 3 and token not in query_variants:
+                                query_variants.append(token)
+                        query_variants = query_variants[:4]
+    
+                        crm_hits_by_id: dict[str, dict[str, Any]] = {}
+                        for variant in query_variants:
+                            crm_accounts = await crm_client.execute_module_action(
+                                module="Accounts",
+                                action="list",
+                                data={
+                                    "limit": max(10, int(limit or 5) * 4),
+                                    "offset": 0,
+                                    "columns": [{"field": "name", "module": "Accounts", "width": "20%", "function": None}],
+                                    "filter": {
+                                        "operator": "and",
+                                        "operands": [
+                                            {
+                                                "operator": "and",
+                                                "operands": [
+                                                    {
+                                                        "field": "*",
+                                                        "fieldModule": None,
+                                                        "fieldRel": None,
+                                                        "type": "cont",
+                                                        "value": variant,
+                                                        "relationField": None,
+                                                    }
+                                                ],
+                                            }
+                                        ],
+                                    },
+                                    "include_field_names": False,
+                                    "response_fields": ["id", "name", "account_name"],
+                                },
+                            )
+                            for row in _extract_records(crm_accounts):
+                                row_id = _safe_text(row.get("id"))
+                                row_name = _record_primary_name(row)
+                                if not row_id or not row_name:
+                                    continue
+                                score = _score_lexical_fuzzy(query, row_name)
+                                if score < 0.55:
+                                    continue
+                                existing = crm_hits_by_id.get(row_id)
+                                if existing is None or float(existing.get("score") or 0.0) < score:
+                                    crm_hits_by_id[row_id] = {
+                                        "score": max(0.72, score),
+                                        "payload": {
+                                            "module": "accounts",
+                                            "record_id": row_id,
+                                            "record": {"id": row_id, "name": row_name},
+                                            "source": "crm-filter",
+                                        },
+                                    }
+                        crm_hits = list(crm_hits_by_id.values())
+                        if crm_hits:
+                            results = _dedupe_rag_hits_by_record(
+                                results + crm_hits,
+                                limit=max(10, int(limit or 5) * 4),
+                            )
+                    except Exception:
+                        pass
+    
+                # If Accounts records in Qdrant have only {"id"}, enrich names from CRM.
+                if module_filter == "accounts" and results:
+                    account_ids: list[str] = []
+                    for item in results:
+                        payload = item.get("payload") if isinstance(item, dict) else None
+                        if not isinstance(payload, dict):
+                            continue
+                        record = payload.get("record")
+                        if not isinstance(record, dict):
+                            continue
+                        name = _record_primary_name(record)
+                        record_id = _safe_text(record.get("id") or payload.get("record_id"))
+                        if record_id and not name:
+                            account_ids.append(record_id)
+    
+                    account_ids = list(dict.fromkeys(account_ids))[:30]
+                    if account_ids:
+                        try:
+                            id_filter = {
+                                "operator": "and",
+                                "operands": [
+                                    {
+                                        "operator": "or",
+                                        "operands": [
+                                            {"field": "id", "type": "eq", "value": row_id}
+                                            for row_id in account_ids
+                                        ],
+                                    }
+                                ],
+                            }
+                            hydrated = await crm_client.execute_module_action(
+                                module="Accounts",
+                                action="list",
+                                data={
+                                    "limit": max(30, len(account_ids) * 2),
+                                    "offset": 0,
+                                    "filter": id_filter,
+                                    "include_field_names": False,
+                                    "response_fields": ["id", "name", "account_name"],
+                                },
+                            )
+                            names_by_id: dict[str, str] = {}
+                            for row in _extract_records(hydrated):
+                                row_id = _safe_text(row.get("id"))
+                                row_name = _record_primary_name(row)
+                                if row_id and row_name:
+                                    names_by_id[row_id] = row_name
+    
+                            if names_by_id:
+                                for item in results:
+                                    payload = item.get("payload") if isinstance(item, dict) else None
+                                    if not isinstance(payload, dict):
+                                        continue
+                                    record = payload.get("record")
+                                    if not isinstance(record, dict):
+                                        continue
+                                    row_id = _safe_text(record.get("id") or payload.get("record_id"))
+                                    if row_id and row_id in names_by_id and not _record_primary_name(record):
+                                        record = dict(record)
+                                        record["name"] = names_by_id[row_id]
+                                        payload["record"] = record
+                        except Exception:
+                            # Keep raw RAG hits when hydration is not available.
+                            pass
+    
+                    # Fallback for tests/dev where Accounts vectors may contain only IDs and CRM auth
+                    # is not configured: infer account names from contact records in Qdrant.
+                    unresolved_ids: list[str] = []
+                    for item in results:
+                        payload = item.get("payload") if isinstance(item, dict) else None
+                        if not isinstance(payload, dict):
+                            continue
+                        record = payload.get("record")
+                        if not isinstance(record, dict):
+                            continue
+                        row_id = _safe_text(record.get("id") or payload.get("record_id"))
+                        if row_id and not _record_primary_name(record):
+                            unresolved_ids.append(row_id)
+                    unresolved_ids = list(dict.fromkeys(unresolved_ids))
+    
+                    if unresolved_ids:
+                        names_by_id = _lookup_account_names_in_contacts_by_ids(
+                            rag_service=rag_service,
+                            tenant_id=tenant_id,
+                            account_ids=unresolved_ids,
+                        )
+                        contact_scan = rag_service.search(
+                            tenant_id=tenant_id,
+                            query=query,
+                            limit=max(100, int(limit or 5) * 20),
+                        )
+                        contact_rows = _extract_rag_records(contact_scan, module_hint="contacts")
+                        names_by_id.update(_account_names_from_contact_rows(contact_rows))
                         if names_by_id:
                             for item in results:
                                 payload = item.get("payload") if isinstance(item, dict) else None
@@ -1664,83 +1761,135 @@ def build_tools(
                                     record = dict(record)
                                     record["name"] = names_by_id[row_id]
                                     payload["record"] = record
-                    except Exception:
-                        # Keep raw RAG hits when hydration is not available.
-                        pass
+            tcl.set_output({"result_count": len(results[: max(1, int(limit or 5))]), "module_filter": _safe_text(module).lower()})
+            return json.dumps(results[: max(1, int(limit or 5))], ensure_ascii=False)
 
-                # Fallback for tests/dev where Accounts vectors may contain only IDs and CRM auth
-                # is not configured: infer account names from contact records in Qdrant.
-                unresolved_ids: list[str] = []
-                for item in results:
-                    payload = item.get("payload") if isinstance(item, dict) else None
-                    if not isinstance(payload, dict):
-                        continue
-                    record = payload.get("record")
-                    if not isinstance(record, dict):
-                        continue
-                    row_id = _safe_text(record.get("id") or payload.get("record_id"))
-                    if row_id and not _record_primary_name(record):
-                        unresolved_ids.append(row_id)
-                unresolved_ids = list(dict.fromkeys(unresolved_ids))
-
-                if unresolved_ids:
-                    names_by_id = _lookup_account_names_in_contacts_by_ids(
-                        rag_service=rag_service,
-                        tenant_id=tenant_id,
-                        account_ids=unresolved_ids,
-                    )
-                    contact_scan = rag_service.search(
-                        tenant_id=tenant_id,
-                        query=query,
-                        limit=max(100, int(limit or 5) * 20),
-                    )
-                    contact_rows = _extract_rag_records(contact_scan, module_hint="contacts")
-                    names_by_id.update(_account_names_from_contact_rows(contact_rows))
-                    if names_by_id:
-                        for item in results:
-                            payload = item.get("payload") if isinstance(item, dict) else None
-                            if not isinstance(payload, dict):
-                                continue
-                            record = payload.get("record")
-                            if not isinstance(record, dict):
-                                continue
-                            row_id = _safe_text(record.get("id") or payload.get("record_id"))
-                            if row_id and row_id in names_by_id and not _record_primary_name(record):
-                                record = dict(record)
-                                record["name"] = names_by_id[row_id]
-                                payload["record"] = record
-        return json.dumps(results[: max(1, int(limit or 5))], ensure_ascii=False)
-
-    @tool("crm_search_tool")
-    async def crm_search_tool(query: Any, scope: str = "all", limit: int = 20) -> str:
-        """Run CRM search for contacts/accounts/meetings/all and return table cards when useful."""
-        result = await read_service.run_search(query=query, scope=scope, limit=limit)
-        return json.dumps(result, ensure_ascii=False)
-
-    @tool("crm_data_tool")
-    async def crm_data_tool(
-        query: Any,
-        query_type: str = "auto",
-        scope: Any | None = None,
+    @tool("crm_query_tool")
+    async def crm_query_tool(
+        module: str,
+        search: str | None = None,
+        filters: str = "[]",
+        date_from: str | None = None,
+        date_to: str | None = None,
+        order_by: str | None = None,
         limit: int = 20,
     ) -> str:
-        """Read CRM data for user questions and return UI-friendly cards/table payload."""
+        """
+        Read and search CRM records. Use this for ALL read operations.
+
+        module: Which CRM module to query.
+          Contacts | Accounts | Meetings | Calls | Tasks | Notes | Leads
+
+        search: Free-text search across all fields (names, subjects, etc).
+          Use for: "find Jan Novak", "search quarterly review meetings"
+
+        filters: JSON list of field conditions (AND-ed together).
+          Each item: {"field": "<field_name>", "op": "<op>", "value": "<value>"}
+          Operators: eq, neq, cont, starts, nnull, null, gte, lte
+          Examples:
+            [{"field": "status", "op": "eq", "value": "Held"}]
+            [{"field": "account_id", "op": "eq", "value": "<uuid>"}]
+            [{"field": "assigned_user_id", "op": "eq", "value": "<uuid>"},
+             {"field": "status", "op": "neq", "value": "Not Started"}]
+
+        date_from: ISO date "YYYY-MM-DD". Lower bound (inclusive).
+          Filters date_start for Meetings/Calls, date_due for Tasks.
+        date_to: ISO date "YYYY-MM-DD". Upper bound (inclusive).
+
+        order_by: Sort field and direction: "date_start:asc" or "name:desc"
+
+        limit: Max records to return (default 20, max 100)
+
+        IMPORTANT — When to use filters vs search:
+          - Use `search` when you have a name or keyword and no ID yet.
+          - Use `filters` with account_id when you already resolved the company UUID
+            (more accurate than searching by company name in the contact list).
+          - For contacts at a company: first resolve account_id via rag_search_tool,
+            then call crm_query_tool(module="Contacts",
+                                     filters='[{"field":"account_id","op":"eq","value":"<uuid>"}]')
+
+        Do NOT use for creating, updating, or deleting — use crm_action_tool for that.
+        """
         if settings.crm_mode.lower() == "off":
-            return json.dumps(
-                {
-                    "status": "crm-disabled",
-                    "message_to_user": "CRM je vypnuté, data teď nemohu načíst.",
-                    "cards": [],
-                },
-                ensure_ascii=False,
+            return json.dumps({"status": "crm-disabled",
+                               "message_to_user": "CRM je vypnuté."}, ensure_ascii=False)
+
+        async with ToolCallLogger(
+            "crm_query_tool", tenant_id, user_id,
+            inputs={"module": module, "search": search, "filters": filters,
+                    "date_from": date_from, "date_to": date_to,
+                    "order_by": order_by, "limit": limit},
+        ) as tcl:
+            try:
+                parsed_filters = [FilterSpec(**f) for f in json.loads(filters or "[]")]
+            except Exception as exc:
+                error_payload = {"status": "error",
+                                 "message": f"Invalid filters JSON: {exc}",
+                                 "cards": []}
+                tcl.set_output(error_payload)
+                return json.dumps(error_payload, ensure_ascii=False)
+
+            crm_filter = build_filter(
+                module=module,
+                search=search,
+                filters=parsed_filters,
+                date_from=date_from,
+                date_to=date_to,
             )
+            order = build_order(order_by)
 
-        result = await read_service.run_data(
-            query=query,
-            query_type=query_type,
-            scope=scope,
-            limit=limit,
-        )
-        return json.dumps(result, ensure_ascii=False)
+            data: dict = {
+                "limit": max(1, min(int(limit), 100)),
+                "offset": 0,
+                "filter": crm_filter,
+                "include_field_names": False,
+            }
+            if order:
+                data["order"] = order
 
-    return [crm_action_tool, rag_search_tool, crm_search_tool, crm_data_tool]
+            try:
+                raw = await crm_client.execute_module_action(
+                    module=module,
+                    action="list",
+                    data=data,
+                )
+            except Exception as exc:
+                error_payload = {"status": "error", "message": str(exc), "cards": []}
+                tcl.set_output(error_payload)
+                return json.dumps(error_payload, ensure_ascii=False)
+
+            records = _extract_records(raw)
+
+            cards: list[dict] = []
+            module_lower = module.strip().lower()
+            total = len(records)
+
+            if module_lower == "meetings":
+                cards = _meeting_cards(records, total)
+            elif module_lower == "contacts":
+                title = f"Kontakty ({total})"
+                cards = _contact_cards(records, total, title, force_table=total > 4)
+            else:
+                cards = _generic_cards(records, total)
+
+            summary_lines = []
+            for row in records[:10]:
+                name = _record_name(row)
+                extra = ""
+                if module_lower == "contacts":
+                    extra = f" — {_safe_text(row.get('account_name') or row.get('company'))}"
+                elif module_lower in ("meetings", "calls"):
+                    extra = f" — {_safe_text(row.get('date_start', ''))[:10]} {_safe_text(row.get('status', ''))}"
+                summary_lines.append(f"• {name}{extra}".strip())
+
+            result = {
+                "status": "ok",
+                "module": module,
+                "total": total,
+                "summary": "\n".join(summary_lines) if summary_lines else "Žádné záznamy.",
+                "cards": cards,
+            }
+            tcl.set_output({"total": total, "module": module})
+            return json.dumps(result, ensure_ascii=False)
+
+    return [crm_action_tool, rag_search_tool, crm_query_tool]
