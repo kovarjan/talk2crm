@@ -397,7 +397,7 @@ def _normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, An
         if not isinstance(step, dict):
             continue
         tool_name = str(step.get("tool") or "").strip()
-        if tool_name not in {"crm_data_tool", "crm_search_tool", "crm_query_tool"}:
+        if tool_name not in {"crm_data_tool", "crm_search_tool", "crm_query_tool", "my_meetings_tool"}:
             continue
 
         observation = step.get("observation")
@@ -847,6 +847,7 @@ async def _process_input_core(
                             "crm_data_tool",
                             "crm_search_tool",
                             "crm_query_tool",
+                            "my_meetings_tool",
                         }:
                             read_tool_used = True
                             break
