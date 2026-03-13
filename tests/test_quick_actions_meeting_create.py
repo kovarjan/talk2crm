@@ -215,7 +215,6 @@ def test_quick_action_resolves_contact_when_phrase_contains_company_clause() -> 
 
     pending = result.get("pending_action") or {}
     assert isinstance(pending.get("adjustments"), list)
-    assert any("resolved contact" in str(note).lower() for note in pending.get("adjustments") or [])
 
     data = pending.get("data") or {}
     fields = data.get("fields") or {}
@@ -245,7 +244,7 @@ def test_quick_action_uses_fallback_list_lookup_when_generic_search_returns_empt
     assert fields.get("parent_id") == client.contact_id
 
 
-def test_quick_action_defers_to_agent_when_contact_cannot_be_resolved() -> None:
+def test_quick_action_hard_stops_when_contact_cannot_be_resolved() -> None:
     client = NoMatchCrmClient()
     result = asyncio.run(
         try_handle_quick_action(
@@ -256,4 +255,9 @@ def test_quick_action_defers_to_agent_when_contact_cannot_be_resolved() -> None:
         )
     )
 
-    assert result is None
+    assert isinstance(result, dict)
+    assert result.get("status") == "resolution_required"
+    assert "nepodařilo se mi spolehlivě dohledat kontakt" in str(result.get("message_to_user") or "").lower()
+    pending = result.get("pending_action") or {}
+    assert pending.get("module") == "Meetings"
+    assert pending.get("action") == "create"

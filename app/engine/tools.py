@@ -7,13 +7,13 @@ from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from typing import Any
 
-import httpx
 from langchain_core.tools import tool
 
 from app.core.config import get_settings
-from app.engine.adjustments import ModuleAdjustmentEngine
 from app.engine.rag import TenantRAGService
+from app.services.crm_read_service import CRMReadHelpers, CRMReadService
 from app.services.crm_client import SugarClient
+from app.services.crm_write_service import CRMWriteService
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -1031,6 +1031,7 @@ def _infer_data_query_type(query: str, requested: str = "auto") -> str:
         "contact_by_name": "contact_by_name",
         "contacts_by_company": "contacts_by_company",
         "company_contacts": "contacts_by_company",
+        "search": "search",
         "generic": "generic_search",
         "generic_search": "generic_search",
     }
@@ -1356,12 +1357,83 @@ def build_tools(
     action_confirmation: bool = False,
 ) -> list:
     settings = get_settings()
-    adjustment_engine = ModuleAdjustmentEngine(
+    write_service = CRMWriteService(
         tenant_id=tenant_id,
         user_id=user_id,
         crm_client=crm_client,
         input_text=input_text,
         request_context=request_context,
+        rag_service=rag_service,
+        action_confirmation=action_confirmation,
+    )
+    read_helpers = CRMReadHelpers(
+        safe_text=_safe_text,
+        normalize_text=_normalize_text,
+        parse_datetime=_parse_datetime,
+        extract_records=_extract_records,
+        extract_date_range_from_text=_extract_date_range_from_text,
+        infer_data_query_type=_infer_data_query_type,
+        next_week_range=lambda: _next_week_range(),
+        build_meetings_date_filter=_build_meetings_date_filter,
+        sort_records_by_datetime=_sort_records_by_datetime,
+        dedupe_and_limit=_dedupe_and_limit,
+        meeting_cards=_meeting_cards,
+        filter_valid_contact_records=_filter_valid_contact_records,
+        contact_cards=lambda records, total_count, title: _contact_cards(
+            records,
+            total_count,
+            title=title,
+            force_table=total_count > 4,
+        ),
+        contact_cards_force_table=lambda records, total_count, title: _contact_cards(
+            records,
+            total_count,
+            title=title,
+            force_table=True,
+        ),
+        generic_cards=_generic_cards,
+        extract_person_name=_extract_person_name,
+        recent_contacts_from_context=_recent_contacts_from_context,
+        best_recent_contact_match=_best_recent_contact_match,
+        extract_rag_records=lambda results, module_hint: _extract_rag_records(
+            results,
+            module_hint=module_hint,
+        ),
+        merge_records_by_id=_merge_records_by_id,
+        best_record_match=_best_record_match,
+        extract_company_name=_extract_company_name,
+        extract_account_ids_from_query=_extract_account_ids_from_query,
+        resolve_accounts_from_qdrant=lambda company_name: _resolve_accounts_from_qdrant(
+            rag_service=rag_service,
+            tenant_id=tenant_id,
+            company_name=company_name,
+            limit=5,
+        ),
+        select_account_candidates=lambda company_name, records, limit, min_name_score: _select_account_candidates(
+            company_name=company_name,
+            records=records,
+            limit=limit,
+            min_name_score=min_name_score,
+        ),
+        query_requires_filled_email=_query_requires_filled_email,
+        build_contacts_filter_by_account_ids=lambda account_ids, require_email: _build_contacts_filter_by_account_ids(
+            account_ids=account_ids,
+            require_email=require_email,
+        ),
+        filter_records_by_company=lambda records, company_name, fallback_to_original: _filter_records_by_company(
+            records,
+            company_name,
+            fallback_to_original=fallback_to_original,
+        ),
+    )
+    read_service = CRMReadService(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        input_text=input_text,
+        request_context=request_context,
+        crm_client=crm_client,
+        rag_service=rag_service,
+        helpers=read_helpers,
     )
 
     @tool("crm_action_tool")
@@ -1376,108 +1448,8 @@ def build_tools(
                 ensure_ascii=False,
             )
 
-        try:
-            data: dict[str, Any] = json.loads(data_json) if data_json else {}
-            if not isinstance(data, dict):
-                raise ValueError("data_json must decode to an object")
-        except Exception as exc:
-            return json.dumps({"error": f"Invalid data_json: {exc}"}, ensure_ascii=False)
-
-        normalized_action = (action or "").strip().lower()
-        mutating_actions = {"create", "update", "patch", "delete"}
-        effective_module = module
-        if normalized_action in {"create", "update", "patch"}:
-            effective_module = _infer_module_from_intent(input_text=input_text, requested_module=module)
-
-        adjustment = await adjustment_engine.apply(
-            module=effective_module,
-            action=normalized_action,
-            data=data,
-        )
-        data = adjustment.data
-
-        if normalized_action in mutating_actions and not action_confirmation:
-            return json.dumps(
-                {
-                    "status": "confirmation_required",
-                    "message": (
-                        "Akce mění CRM data a vyžaduje potvrzení uživatele. "
-                        # "Akce mění CRM data a vyžaduje explicitní potvrzení uživatele. "
-                        # "Pro provedení zopakujte požadavek s context.confirm_action=true."
-                    ),
-                    "pending_action": {
-                        "module": effective_module,
-                        "requested_module": module,
-                        "effective_module": effective_module,
-                        "action": normalized_action,
-                        "data": data,
-                    },
-                    "adjustments": adjustment.notes,
-                },
-                ensure_ascii=False,
-            )
-
-        data.setdefault("requested_by_user_id", user_id)
-        try:
-            result = await crm_client.execute_module_action(
-                module=effective_module,
-                action=action,
-                data=data,
-            )
-            if normalized_action in mutating_actions and rag_service is not None:
-                try:
-                    ingested = await rag_service.ingest_from_crm(
-                        tenant_id=tenant_id,
-                        crm_client=crm_client,
-                        module=effective_module,
-                    )
-                    if isinstance(result, dict):
-                        result["_rag_ingested"] = ingested
-                except Exception:
-                    if isinstance(result, dict):
-                        result["_rag_ingest_error"] = "failed"
-            if adjustment.notes and isinstance(result, dict):
-                result["_adjustments"] = adjustment.notes
-            return json.dumps(result, ensure_ascii=False)
-        except httpx.HTTPStatusError as exc:
-            body_preview = ""
-            try:
-                body_preview = exc.response.text[:1000]
-            except Exception:
-                body_preview = ""
-            return json.dumps(
-                {
-                    "status": "crm_http_error",
-                    "http_status": exc.response.status_code,
-                    "url": str(exc.request.url),
-                    "message": (
-                        "CRM rejected the action. Confirm field mapping/required "
-                        "values for this module."
-                    ),
-                    "response_body": body_preview,
-                    "failed_action": {
-                        "module": module,
-                        "effective_module": effective_module,
-                        "action": normalized_action,
-                        "data": data,
-                    },
-                },
-                ensure_ascii=False,
-            )
-        except Exception as exc:
-            return json.dumps(
-                {
-                    "status": "crm_action_error",
-                    "message": str(exc),
-                    "failed_action": {
-                        "module": module,
-                        "effective_module": effective_module,
-                        "action": normalized_action,
-                        "data": data,
-                    },
-                },
-                ensure_ascii=False,
-            )
+        result = await write_service.execute_action(module=module, action=action, data_json=data_json)
+        return json.dumps(result, ensure_ascii=False)
 
     @tool("rag_search_tool")
     async def rag_search_tool(query: str, limit: int = 5, module: str = "") -> str:
@@ -1742,130 +1714,7 @@ def build_tools(
     @tool("crm_search_tool")
     async def crm_search_tool(query: Any, scope: str = "all", limit: int = 20) -> str:
         """Run CRM search for contacts/accounts/meetings/all and return table cards when useful."""
-        normalized_scope = _safe_text(scope).lower() or "all"
-        safe_limit = max(1, min(int(limit or 20), 15))
-        module_map = {
-            "contacts": "Contacts",
-            "accounts": "Accounts",
-            "meetings": "Meetings",
-        }
-
-        if normalized_scope in module_map:
-            payload: dict[str, Any]
-            if isinstance(query, dict):
-                payload = dict(query)
-            else:
-                query_text = _safe_text(query)
-                payload = {"query": query_text, "q": query_text}
-
-            payload.setdefault("limit", max(50, safe_limit * 4))
-            payload.setdefault("offset", 0)
-            payload.setdefault("include_field_names", False)
-
-            if normalized_scope == "meetings":
-                payload.setdefault(
-                    "columns",
-                    [
-                        {"field": "date_start", "module": "Meetings"},
-                        {"field": "name", "module": "Meetings"},
-                        {"field": "location", "module": "Meetings"},
-                        {"field": "status", "module": "Meetings"},
-                    ],
-                )
-                payload.setdefault(
-                    "response_fields",
-                    [
-                        "id",
-                        "name",
-                        "date_start",
-                        "date_entered",
-                        "location",
-                        "status",
-                        "assigned_user_name",
-                    ],
-                )
-            elif normalized_scope == "contacts":
-                payload.setdefault(
-                    "response_fields",
-                    [
-                        "id",
-                        "name",
-                        "first_name",
-                        "last_name",
-                        "account_name",
-                        "email",
-                        "email1",
-                        "phone_mobile",
-                        "phone_work",
-                    ],
-                )
-            elif normalized_scope == "accounts":
-                payload.setdefault("response_fields", ["id", "name", "account_name", "billing_address_city"])
-
-            result = await crm_client.execute_module_action(
-                module=module_map[normalized_scope],
-                action="list",
-                data=payload,
-            )
-        else:
-            result = await crm_client.generic_search(query=_safe_text(query), scope=normalized_scope)
-
-        if normalized_scope in module_map and isinstance(result, dict):
-            records = _extract_records(result)
-            if normalized_scope == "meetings":
-                ordered = _sort_records_by_datetime(records, "date_start")
-                selected = _dedupe_and_limit(ordered, safe_limit)
-                total_count = len(ordered)
-                cards = _meeting_cards(selected, total_count)
-                message = (
-                    f"Našla jsem {total_count} schůzek."
-                    if total_count
-                    else "Nenašla jsem žádné schůzky."
-                )
-                return json.dumps(
-                    {
-                        "status": "ok",
-                        "query_type": "crm_search_meetings",
-                        "module": "Meetings",
-                        "total_count": total_count,
-                        "cards": cards,
-                        "message_to_user": message,
-                    },
-                    ensure_ascii=False,
-                )
-            if normalized_scope == "contacts":
-                selected = _dedupe_and_limit(_filter_valid_contact_records(records), safe_limit)
-                total_count = len(selected)
-                cards = _contact_cards(
-                    selected,
-                    total_count,
-                    title=f"Kontakty ({total_count})",
-                    force_table=total_count > 4,
-                )
-                return json.dumps(
-                    {
-                        "status": "ok",
-                        "query_type": "crm_search_contacts",
-                        "module": "Contacts",
-                        "total_count": total_count,
-                        "cards": cards,
-                    },
-                    ensure_ascii=False,
-                )
-            merged = _dedupe_and_limit(records, safe_limit)
-            total_count = len(records)
-            cards = _generic_cards(merged, total_count)
-            return json.dumps(
-                {
-                    "status": "ok",
-                    "query_type": "crm_search_generic",
-                    "module": module_map[normalized_scope],
-                    "total_count": total_count,
-                    "cards": cards,
-                },
-                ensure_ascii=False,
-            )
-
+        result = await read_service.run_search(query=query, scope=scope, limit=limit)
         return json.dumps(result, ensure_ascii=False)
 
     @tool("crm_data_tool")
@@ -1886,449 +1735,12 @@ def build_tools(
                 ensure_ascii=False,
             )
 
-        safe_limit = max(1, min(int(limit or 20), 15))
-        user_query = _safe_text(input_text)
-        effective_query = _safe_text(query) or user_query
-        # Prefer original user text for intent classification to avoid LLM-rewritten date mistakes.
-        resolved_type = _infer_data_query_type(query=user_query or effective_query, requested=query_type)
-        explicit_range = _extract_date_range_from_text(effective_query)
-        normalized_user_query = _normalize_text(user_query)
-        user_mentions_next_week = any(
-            token in normalized_user_query for token in ("dalsi tyden", "pristi tyden", "next week")
+        result = await read_service.run_data(
+            query=query,
+            query_type=query_type,
+            scope=scope,
+            limit=limit,
         )
-        if (
-            explicit_range is not None
-            and resolved_type in {"meetings_next_week", "meetings_range"}
-            and not user_mentions_next_week
-        ):
-            # If tool input carries explicit dates, honor them over natural-language "next week".
-            resolved_type = "meetings_range"
-
-        try:
-            if resolved_type in {"meetings_next_week", "meetings_range"}:
-                if resolved_type == "meetings_next_week":
-                    range_start, range_end = _next_week_range()
-                elif explicit_range:
-                    range_start, range_end = explicit_range
-                else:
-                    range_start, range_end = _next_week_range()
-
-                meeting_filter = _build_meetings_date_filter(range_start, range_end)
-                result = await crm_client.execute_module_action(
-                    module="Meetings",
-                    action="list",
-                    data={
-                        "limit": 500,
-                        "offset": 0,
-                        "filter": meeting_filter,
-                        "columns": [
-                            {"field": "date_start", "module": "Meetings"},
-                            {"field": "name", "module": "Meetings"},
-                            {"field": "location", "module": "Meetings"},
-                            {"field": "status", "module": "Meetings"},
-                            {"field": "assigned_user_name", "module": "Meetings"},
-                        ],
-                        "order": [{"field": "date_start", "sort": "ASC", "module": "Meetings"}],
-                        "include_field_names": False,
-                        "response_fields": [
-                            "id",
-                            "name",
-                            "date_start",
-                            "date_entered",
-                            "location",
-                            "status",
-                            "assigned_user_id",
-                            "assigned_user_name",
-                            "users_id_c",
-                        ],
-                    },
-                )
-                all_records = _extract_records(result)
-
-                selected: list[dict[str, Any]] = []
-                for row in all_records:
-                    start_value = row.get("date_start") or row.get("date_entered")
-                    dt = _parse_datetime(start_value)
-                    if dt is None or not (range_start <= dt < range_end):
-                        continue
-                    assigned_user = _safe_text(row.get("assigned_user_id") or row.get("users_id_c"))
-                    # Only enforce per-user filter when user_id is a CRM UUID.
-                    if _UUID_RE.match(_safe_text(user_id)) and assigned_user and assigned_user != _safe_text(user_id):
-                        continue
-                    selected.append(row)
-
-                selected = _sort_records_by_datetime(selected, "date_start")
-                limited = _dedupe_and_limit(selected, safe_limit)
-                total_count = len(selected)
-                cards = _meeting_cards(limited, total_count)
-
-                if total_count == 0:
-                    message = (
-                        "Na příští týden nemáte žádné schůzky. "
-                        f"Kontrolované období: {range_start.strftime('%d.%m.%Y')} - {range_end.strftime('%d.%m.%Y')}."
-                    )
-                else:
-                    message = (
-                        f"Na příští týden jsem našla {total_count} schůzek. "
-                        f"Období: {range_start.strftime('%d.%m.%Y')} - {range_end.strftime('%d.%m.%Y')}."
-                    )
-
-                return json.dumps(
-                    {
-                        "status": "ok",
-                        "query_type": resolved_type,
-                        "module": "Meetings",
-                        "total_count": total_count,
-                        "cards": cards,
-                        "message_to_user": message,
-                    },
-                    ensure_ascii=False,
-                )
-
-            if resolved_type == "contact_by_name":
-                explicit_query = _safe_text(query)
-                person_source = explicit_query or user_query or effective_query
-                person_name = _extract_person_name(person_source, request_context)
-
-                recent_contacts = _recent_contacts_from_context(request_context)
-                recent_match = _best_recent_contact_match(person_name or person_source, recent_contacts)
-                if recent_match is not None:
-                    selected = [recent_match]
-                    total_count = 1
-                    cards = _contact_cards(selected, total_count, title=f"Kontakty ({total_count})")
-                    return json.dumps(
-                        {
-                            "status": "ok",
-                            "query_type": resolved_type,
-                            "module": "Contacts",
-                            "total_count": total_count,
-                            "cards": cards,
-                            "message_to_user": (
-                                f"Navazuji na poslední kontext. "
-                                f"Kontakt '{_record_name(recent_match)}' jsem našla."
-                            ),
-                            "source": "recent_contacts_context",
-                        },
-                        ensure_ascii=False,
-                    )
-
-                rag_candidates: list[dict[str, Any]] = []
-                if rag_service is not None:
-                    try:
-                        rag_hits = rag_service.search(
-                            tenant_id=tenant_id,
-                            query=person_name,
-                            limit=max(20, safe_limit * 3),
-                        )
-                        rag_candidates = _filter_valid_contact_records(
-                            _extract_rag_records(rag_hits, module_hint="contacts")
-                        )
-                    except Exception:
-                        rag_candidates = []
-
-                list_result = await crm_client.execute_module_action(
-                    module="Contacts",
-                    action="list",
-                    data={"query": person_name, "q": person_name, "max_results": max(50, safe_limit)},
-                )
-                search_result = await crm_client.generic_search(query=person_name, scope="contacts")
-                all_records = _merge_records_by_id(
-                    rag_candidates,
-                    _filter_valid_contact_records(_extract_records(list_result)),
-                    _filter_valid_contact_records(_extract_records(search_result)),
-                )
-                match = _best_record_match(all_records, person_name)
-                selected = [match] if match else _dedupe_and_limit(all_records, safe_limit)
-                total_count = len(selected)
-                cards = _contact_cards(selected, total_count, title=f"Kontakty ({total_count})")
-
-                if total_count == 0:
-                    message = f"Kontakt '{person_name}' jsem nenašla."
-                elif match:
-                    message = f"Kontakt '{_record_name(match)}' jsem našla."
-                else:
-                    message = f"Našla jsem {total_count} kontaktů k dotazu '{person_name}'."
-
-                return json.dumps(
-                    {
-                        "status": "ok",
-                        "query_type": resolved_type,
-                        "module": "Contacts",
-                        "total_count": total_count,
-                        "cards": cards,
-                        "message_to_user": message,
-                    },
-                    ensure_ascii=False,
-                )
-
-            if resolved_type == "contacts_by_company":
-                company_name = _extract_company_name(user_query or effective_query, request_context)
-                direct_account_ids = _extract_account_ids_from_query(query, request_context)
-                if not direct_account_ids and scope is not None:
-                    direct_account_ids = _extract_account_ids_from_query(scope, request_context)
-                resolved_accounts: list[dict[str, Any]] = []
-                if direct_account_ids:
-                    account_ids = direct_account_ids
-                    # Hydrate account names for user-facing message and diagnostics.
-                    try:
-                        id_filter = {
-                            "operator": "and",
-                            "operands": [
-                                {
-                                    "operator": "or",
-                                    "operands": [{"field": "id", "type": "eq", "value": row_id} for row_id in account_ids],
-                                }
-                            ],
-                        }
-                        accounts_by_id = await crm_client.execute_module_action(
-                            module="Accounts",
-                            action="list",
-                            data={
-                                "limit": max(30, len(account_ids) * 2),
-                                "offset": 0,
-                                "filter": id_filter,
-                                "include_field_names": False,
-                                "response_fields": ["id", "name", "account_name", "billing_address_city"],
-                            },
-                        )
-                        resolved_accounts = _extract_records(accounts_by_id)
-                    except Exception:
-                        resolved_accounts = [{"id": row_id} for row_id in account_ids]
-                else:
-                    resolved_accounts = _resolve_accounts_from_qdrant(
-                        rag_service=rag_service,
-                        tenant_id=tenant_id,
-                        company_name=company_name,
-                        limit=5,
-                    )
-                    if not resolved_accounts:
-                        # Qdrant can miss if Accounts module is not ingested or stale.
-                        accounts_list_result = await crm_client.execute_module_action(
-                            module="Accounts",
-                            action="list",
-                            data={
-                                "query": company_name,
-                                "q": company_name,
-                                "max_results": 60,
-                                "include_field_names": False,
-                                "response_fields": ["id", "name", "account_name", "billing_address_city"],
-                            },
-                        )
-                        crm_account_candidates = _extract_records(accounts_list_result)
-                        resolved_accounts = _select_account_candidates(
-                            company_name=company_name,
-                            records=crm_account_candidates,
-                            limit=5,
-                            min_name_score=65,
-                        )
-
-                    account_ids = [
-                        _safe_text(row.get("id"))
-                        for row in resolved_accounts
-                        if _UUID_RE.match(_safe_text(row.get("id")))
-                    ]
-                require_email = _query_requires_filled_email(user_query or effective_query)
-
-                contacts_relation_result: dict[str, Any] = {"records": []}
-                relation_contacts: list[dict[str, Any]] = []
-                if account_ids:
-                    relation_filter = _build_contacts_filter_by_account_ids(
-                        account_ids=account_ids,
-                        require_email=require_email,
-                    )
-                    contacts_relation_result = await crm_client.execute_module_action(
-                        module="Contacts",
-                        action="list",
-                        data={
-                            "limit": 200,
-                            "offset": 0,
-                            "filter": relation_filter,
-                            "columns": [
-                                {"field": "name", "module": "Contacts"},
-                                {"field": "title", "module": "Contacts"},
-                                {"field": "account_name", "module": "Contacts"},
-                                {"field": "phone_mobile", "module": "Contacts"},
-                                {"field": "phone_work", "module": "Contacts"},
-                                {"field": "email", "module": "Contacts"},
-                                {"field": "assigned_user_name", "module": "Contacts"},
-                            ],
-                            "order": [],
-                            "groupBy": [],
-                            "function": {},
-                            "alterName": {},
-                            "groupByDate": [],
-                            "savedSearch": True,
-                            "include_field_names": False,
-                            "response_fields": [
-                                "id",
-                                "name",
-                                "first_name",
-                                "last_name",
-                                "account_name",
-                                "email",
-                                "email1",
-                                "phone_mobile",
-                                "phone_work",
-                            ],
-                        },
-                    )
-                    relation_contacts = _filter_valid_contact_records(
-                        _extract_records(contacts_relation_result)
-                    )
-
-                contacts: list[dict[str, Any]] = []
-                used_relation_filter = bool(account_ids)
-                if account_ids and relation_contacts:
-                    contacts = relation_contacts
-                else:
-                    # Fallback text search for cases where Accounts are not ingested
-                    # or relation filter returned no rows.
-                    contacts_list_result = await crm_client.execute_module_action(
-                        module="Contacts",
-                        action="list",
-                        data={
-                            "query": company_name,
-                            "q": company_name,
-                            "max_results": 200,
-                            "include_field_names": False,
-                            "response_fields": [
-                                "id",
-                                "name",
-                                "first_name",
-                                "last_name",
-                                "account_name",
-                                "email",
-                                "email1",
-                                "phone_mobile",
-                                "phone_work",
-                            ],
-                        },
-                    )
-                    contacts_search_result = await crm_client.generic_search(query=company_name, scope="contacts")
-                    contacts = _merge_records_by_id(
-                        _filter_valid_contact_records(_extract_records(contacts_list_result)),
-                        _filter_valid_contact_records(_extract_records(contacts_search_result)),
-                    )
-
-                filtered_contacts = _filter_records_by_company(
-                    contacts,
-                    company_name,
-                    fallback_to_original=not used_relation_filter,
-                )
-                display_limit = min(safe_limit, 10)
-                selected = _dedupe_and_limit(filtered_contacts, display_limit)
-                total_count = len(filtered_contacts)
-                cards = _contact_cards(
-                    selected,
-                    total_count,
-                    title=f"Kontakty firmy ({total_count})",
-                    force_table=True,
-                )
-
-                if total_count == 0:
-                    message = f"Kontakty k firmě '{company_name}' jsem nenašla."
-                else:
-                    if account_ids:
-                        account_labels = ", ".join(
-                            _safe_text(row.get("name")) or _safe_text(row.get("account_name"))
-                            for row in resolved_accounts[:3]
-                            if _safe_text(row.get("name")) or _safe_text(row.get("account_name"))
-                        )
-                        if account_labels:
-                            message = (
-                                f"K firmě '{company_name}' jsem našla {total_count} kontaktů. "
-                                f"Filtrovala jsem přes účet: {account_labels}."
-                            )
-                        else:
-                            message = f"K firmě '{company_name}' jsem našla {total_count} kontaktů."
-                    else:
-                        message = (
-                            f"K firmě '{company_name}' jsem našla {total_count} kontaktů. "
-                            "Účet nebyl nalezen v RAG indexu, použila jsem textové CRM filtrování."
-                        )
-
-                return json.dumps(
-                    {
-                        "status": "ok",
-                        "query_type": resolved_type,
-                        "module": "Contacts",
-                        "total_count": total_count,
-                        "resolved_account_ids": account_ids,
-                        "cards": cards,
-                        "message_to_user": message,
-                    },
-                    ensure_ascii=False,
-                )
-
-            aggregate = await crm_client.generic_search(query=effective_query, scope="all")
-            merged: list[dict[str, Any]] = []
-            if rag_service is not None:
-                try:
-                    rag_hits = rag_service.search(
-                        tenant_id=tenant_id,
-                        query=effective_query,
-                        limit=max(30, safe_limit * 4),
-                    )
-                    rag_rows = _extract_rag_records(rag_hits, module_hint=None)
-                    for row in rag_rows:
-                        module_hint = _safe_text(row.get("_module_hint")).capitalize()
-                        if module_hint:
-                            row["_module_hint"] = module_hint
-                        merged.append(row)
-                except Exception:
-                    pass
-            if isinstance(aggregate, dict):
-                module_map = {
-                    "contacts": "Contacts",
-                    "accounts": "Accounts",
-                    "meetings": "Meetings",
-                }
-                for module_key, payload in aggregate.items():
-                    module_name = module_map.get(str(module_key).lower(), str(module_key))
-                    for row in _extract_records(payload):
-                        row["_module_hint"] = module_name
-                        merged.append(row)
-            merged = _dedupe_and_limit(merged, safe_limit)
-            total_count = len(merged)
-            cards = _generic_cards(merged, total_count)
-            message = (
-                f"Našla jsem {total_count} záznamů pro dotaz '{effective_query}'."
-                if total_count
-                else f"K dotazu '{effective_query}' jsem nic nenašla."
-            )
-            return json.dumps(
-                {
-                    "status": "ok",
-                    "query_type": "generic_search",
-                    "module": "CRM",
-                    "total_count": total_count,
-                    "cards": cards,
-                    "message_to_user": message,
-                },
-                ensure_ascii=False,
-            )
-        except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code if exc.response is not None else None
-            return json.dumps(
-                {
-                    "status": "crm_http_error",
-                    "query_type": resolved_type,
-                    "http_status": status_code,
-                    "message_to_user": "CRM data se nepodařilo načíst. Zkuste to prosím znovu.",
-                    "cards": [],
-                },
-                ensure_ascii=False,
-            )
-        except Exception as exc:
-            return json.dumps(
-                {
-                    "status": "crm_data_error",
-                    "query_type": resolved_type,
-                    "message_to_user": "Nastala chyba při načítání CRM dat.",
-                    "error": str(exc),
-                    "cards": [],
-                },
-                ensure_ascii=False,
-            )
+        return json.dumps(result, ensure_ascii=False)
 
     return [crm_action_tool, rag_search_tool, crm_search_tool, crm_data_tool]

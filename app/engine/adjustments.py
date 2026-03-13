@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from app.core.logging import get_logger
+from app.domain.entity_resolver import EntityResolver
+from app.domain.temporal_resolver import TemporalResolver
 from app.services.crm_client import SugarClient
 
 
@@ -21,7 +23,17 @@ _CRM_ID_RE = re.compile(
     r"^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
 )
 _PLACEHOLDER_ID_RE = re.compile(r"^[A-Z_]+_ID$")
-_CZECH_PERSON_RE = re.compile(r"\b(?:pan[ií]|panem)\s+([^\s,.;:]+)", re.IGNORECASE)
+_CZECH_PERSON_RE = re.compile(
+    (
+        r"\b(?:pan[ií]|panem|pan)\s+([^,.;:]+?)"
+        r"(?=\s+(?:z|ze|na|v|ve|o|ohledn[eě]|kv[uů]li|k|do|od|u)\b|$)"
+    ),
+    re.IGNORECASE,
+)
+_PERSON_WITH_PREPOSITION_RE = re.compile(
+    r"\b(?:s|se)\s+([^,.;:]+?)(?=\s+(?:z|ze|na|v|ve|o|ohledn[eě]|kv[uů]li|k|do|od|u)\b|$)",
+    re.IGNORECASE,
+)
 _COMPANY_RE = re.compile(
     r"\b(?:firma|firmy|spole[cč]nost|company)\s+([^,.;:]+?)(?=\s+(?:na|v|ohledn[eě]|s|od|u)\b|$)",
     re.IGNORECASE,
@@ -54,6 +66,11 @@ class ModuleAdjustmentEngine:
         self.crm_client = crm_client
         self.input_text = input_text or ""
         self.request_context = request_context or {}
+        self.entity_resolver = EntityResolver.from_settings(
+            tenant_id=tenant_id,
+            crm_client=crm_client,
+        )
+        self.temporal_resolver = TemporalResolver.from_settings()
 
     async def apply(
         self,
@@ -86,6 +103,14 @@ class ModuleAdjustmentEngine:
             return AdjustmentResult(data=adjusted, notes=notes)
 
         fields = self._collect_coripo_fields(adjusted)
+        contact_name = self._first_nonempty(
+            fields,
+            ["contact_name", "related_contact_name", "invite_contact_name", "participant_name"],
+        )
+        account_name = self._first_nonempty(
+            fields,
+            ["account_name", "related_account_name", "company", "company_name"],
+        )
         self._drop_helper_fields(fields)
 
         contact_id = self._first_nonempty(fields, ["contact_id", "related_contact_id", "invite_contact_id"])
@@ -95,30 +120,26 @@ class ModuleAdjustmentEngine:
         if account_id and not self._is_valid_crm_id(account_id):
             account_id = None
 
-        contact_name = self._first_nonempty(
-            fields,
-            ["contact_name", "related_contact_name", "invite_contact_name", "participant_name"],
-        )
-        account_name = self._first_nonempty(
-            fields,
-            ["account_name", "related_account_name", "company", "company_name"],
-        )
         text_contact_hint, text_account_hint = self._extract_text_hints(self.input_text)
         contact_name = contact_name or text_contact_hint
         account_name = account_name or text_account_hint
 
-        if not contact_id and contact_name:
-            contact_candidate = await self._resolve_record_by_name(scope="contacts", name=contact_name)
-            if contact_candidate:
-                resolved = str(contact_candidate.get("id") or "").strip()
-                if self._is_valid_crm_id(resolved):
-                    contact_id = resolved
         if not account_id and account_name:
             account_candidate = await self._resolve_record_by_name(scope="accounts", name=account_name)
             if account_candidate:
                 resolved = str(account_candidate.get("id") or "").strip()
                 if self._is_valid_crm_id(resolved):
                     account_id = resolved
+        if not contact_id and contact_name:
+            contact_candidate = await self._resolve_contact_by_name_in_account(
+                contact_name=contact_name,
+                account_id=account_id,
+                account_name=account_name,
+            )
+            if contact_candidate:
+                resolved = str(contact_candidate.get("id") or "").strip()
+                if self._is_valid_crm_id(resolved):
+                    contact_id = resolved
 
         # Always prefer person relation for "Týká se" when available.
         if contact_id:
@@ -164,6 +185,24 @@ class ModuleAdjustmentEngine:
             return AdjustmentResult(data=adjusted, notes=notes)
 
         fields = self._collect_coripo_fields(adjusted)
+        contact_name = self._first_nonempty(
+            fields,
+            [
+                "contact_name",
+                "related_contact_name",
+                "invite_contact_name",
+                "participant_name",
+            ],
+        )
+        account_name = self._first_nonempty(
+            fields,
+            [
+                "account_name",
+                "related_account_name",
+                "company",
+                "company_name",
+            ],
+        )
         self._drop_helper_fields(fields)
 
         contact_id = self._first_nonempty(
@@ -194,25 +233,6 @@ class ModuleAdjustmentEngine:
             fields.pop("company_id", None)
             account_id = None
 
-        contact_name = self._first_nonempty(
-            fields,
-            [
-                "contact_name",
-                "related_contact_name",
-                "invite_contact_name",
-                "participant_name",
-            ],
-        )
-        account_name = self._first_nonempty(
-            fields,
-            [
-                "account_name",
-                "related_account_name",
-                "company",
-                "company_name",
-            ],
-        )
-
         ctx_entities = self.request_context.get("entities", {})
         if isinstance(ctx_entities, dict):
             contact_name = contact_name or self._first_nonempty(
@@ -231,16 +251,6 @@ class ModuleAdjustmentEngine:
         contact_candidate: dict[str, Any] | None = None
         account_candidate: dict[str, Any] | None = None
 
-        if not contact_id and contact_name:
-            contact_candidate = await self._resolve_record_by_name(
-                scope="contacts",
-                name=contact_name,
-            )
-            if contact_candidate:
-                contact_id = str(contact_candidate.get("id") or "").strip()
-                if contact_id:
-                    notes.append(f"Resolved contact '{contact_name}' -> {contact_id}")
-
         if not account_id and account_name:
             account_candidate = await self._resolve_record_by_name(
                 scope="accounts",
@@ -250,6 +260,21 @@ class ModuleAdjustmentEngine:
                 account_id = str(account_candidate.get("id") or "").strip()
                 if account_id:
                     notes.append(f"Resolved account '{account_name}' -> {account_id}")
+            else:
+                notes.append(f"Account '{account_name}' was not resolved in CRM search")
+
+        if not contact_id and contact_name:
+            contact_candidate = await self._resolve_contact_by_name_in_account(
+                contact_name=contact_name,
+                account_id=account_id,
+                account_name=account_name,
+            )
+            if contact_candidate:
+                contact_id = str(contact_candidate.get("id") or "").strip()
+                if contact_id:
+                    notes.append(f"Resolved contact '{contact_name}' -> {contact_id}")
+            else:
+                notes.append(f"Contact '{contact_name}' was not resolved in CRM search")
 
         if contact_candidate and not account_id:
             linked_account_id = self._first_nonempty(
@@ -291,7 +316,7 @@ class ModuleAdjustmentEngine:
             fields["parent_id"] = account_id
 
         topic = self._derive_topic(fields, self.input_text)
-        contact_display_name = contact_name or self._record_label(contact_candidate or {})
+        contact_display_name = self._record_label(contact_candidate or {}) or contact_name
         surname = self._extract_last_name(contact_display_name)
         surname = self._normalize_czech_last_name(surname)
         if surname:
@@ -398,6 +423,15 @@ class ModuleAdjustmentEngine:
         person_match = _CZECH_PERSON_RE.search(text or "")
         if person_match:
             contact = person_match.group(1).strip()
+        else:
+            prep_match = _PERSON_WITH_PREPOSITION_RE.search(text or "")
+            if prep_match:
+                candidate = prep_match.group(1).strip()
+                candidate_norm = ModuleAdjustmentEngine._normalize_text(candidate)
+                if candidate_norm and not any(
+                    token in candidate_norm for token in ("firma", "firm", "spolecnost", "company")
+                ):
+                    contact = candidate
 
         company_match = _COMPANY_RE.search(text or "")
         if company_match:
@@ -458,96 +492,19 @@ class ModuleAdjustmentEngine:
 
     @staticmethod
     def _weekday_from_text(text: str) -> int | None:
-        normalized = ModuleAdjustmentEngine._normalize_text(text or "")
-        mapping = {
-            "pondeli": 0,
-            "utery": 1,
-            "streda": 2,
-            "ctvrtek": 3,
-            "patek": 4,
-            "sobota": 5,
-            "nedele": 6,
-        }
-        for key, value in mapping.items():
-            if key in normalized:
-                return value
-
-        # Tolerate minor typos in weekday names from speech-to-text (e.g. "podneli").
-        tokens = [token for token in normalized.split() if token]
-        for token in tokens:
-            for key, value in mapping.items():
-                if len(token) < 4 or abs(len(token) - len(key)) > 2:
-                    continue
-                if SequenceMatcher(None, token, key).ratio() >= 0.8:
-                    return value
-        return None
+        return TemporalResolver.from_settings()._weekday_from_text(text)
 
     @classmethod
     def _derive_meeting_datetime(cls, fields: dict[str, Any], input_text: str) -> str | None:
-        current = cls._first_nonempty(
-            fields,
-            ["date_start", "scheduled_time", "scheduled_at", "start_time"],
+        resolution = TemporalResolver.from_settings().resolve_meeting_datetime(
+            fields=fields,
+            input_text=input_text,
         )
-        parsed_current: datetime | None = None
-        if current:
-            try:
-                parsed_current = datetime.strptime(current, "%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                try:
-                    parsed_current = datetime.fromisoformat(current.replace("Z", "+00:00")).replace(
-                        tzinfo=None
-                    )
-                except ValueError:
-                    parsed_current = None
-
-        now = datetime.now()
-        if parsed_current and parsed_current.year >= now.year - 1:
-            return parsed_current.strftime("%Y-%m-%d %H:%M:%S")
-
-        weekday = cls._weekday_from_text(input_text)
-        time_match = _TIME_RE.search(input_text or "")
-        hour = 9
-        minute = 0
-        if time_match:
-            hour = max(0, min(23, int(time_match.group("hour"))))
-            minute = max(0, min(59, int(time_match.group("minute"))))
-        else:
-            normalized_input = cls._normalize_text(input_text or "")
-            if "po poledni" in normalized_input:
-                hour = 13
-                minute = 0
-            elif "odpoledne" in normalized_input:
-                hour = 14
-                minute = 0
-            elif "hned rano" in normalized_input or "rano" in normalized_input:
-                hour = 8
-                minute = 0
-
-        if weekday is None:
-            if parsed_current:
-                return parsed_current.strftime("%Y-%m-%d %H:%M:%S")
-            return None
-
-        delta = (weekday - now.weekday()) % 7
-        if delta == 0 and (hour, minute) <= (now.hour, now.minute):
-            delta = 7
-        target = (now + timedelta(days=delta)).replace(
-            hour=hour,
-            minute=minute,
-            second=0,
-            microsecond=0,
-        )
-        return target.strftime("%Y-%m-%d %H:%M:%S")
+        return resolution.datetime_value if resolution.status == "resolved" else None
 
     @classmethod
     def _expand_name_variants(cls, name: str) -> list[str]:
-        variants = [name]
-        norm = cls._normalize_text(name)
-        if norm.endswith("ovou"):
-            variants.append(name[:-4] + "ova")
-        elif norm.endswith("ou"):
-            variants.append(name[:-2] + "a")
-        return list(dict.fromkeys(v for v in variants if v.strip()))
+        return EntityResolver.expand_name_variants(name)
 
     @classmethod
     def _extract_records(cls, payload: Any) -> list[dict[str, Any]]:
@@ -622,29 +579,93 @@ class ModuleAdjustmentEngine:
         if not s_tokens:
             return 0
         overlap = len(s_tokens & c_tokens) / len(s_tokens)
-        return int(overlap * 60)
+        score = int(overlap * 60)
+
+        # Handle Czech inflection variants (e.g. "Karlem Vybíhalem" vs "Karel Vybíhal").
+        seq_ratio = SequenceMatcher(None, n_search, n_candidate).ratio()
+        if seq_ratio >= 0.72:
+            score = max(score, int(seq_ratio * 85))
+        return score
+
+    @staticmethod
+    def _lookup_filter_for_scope(scope: str, query: str) -> dict[str, Any]:
+        value = str(query or "").strip()
+        if not value:
+            return {"operator": "and", "operands": []}
+
+        if scope == "contacts":
+            return {
+                "operator": "and",
+                "operands": [
+                    {
+                        "operator": "or",
+                        "operands": [
+                            {"field": "name", "type": "cont", "value": value},
+                            {"field": "first_name", "type": "cont", "value": value},
+                            {"field": "last_name", "type": "cont", "value": value},
+                        ],
+                    }
+                ],
+            }
+        return {
+            "operator": "and",
+            "operands": [
+                {
+                    "operator": "or",
+                    "operands": [
+                        {"field": "name", "type": "cont", "value": value},
+                    ],
+                }
+            ],
+        }
 
     async def _resolve_record_by_name(self, *, scope: str, name: str) -> dict[str, Any] | None:
-        variants = self._expand_name_variants(name)
-        for candidate_name in variants:
-            try:
-                payload = await self.crm_client.generic_search(query=candidate_name, scope=scope)
-            except Exception:
-                logger.exception(
-                    "Adjustment %s lookup failed tenant=%s query=%s",
-                    scope,
-                    self.tenant_id,
-                    candidate_name,
-                )
-                continue
-            records = self._extract_records(payload)
-            if not records:
-                continue
-            best = max(records, key=lambda item: self._score_match(candidate_name, item))
-            best_score = self._score_match(candidate_name, best)
-            if best_score <= 0:
-                continue
-            return best
+        resolution = await self.entity_resolver.resolve_record_by_name(
+            scope=scope,
+            name=name,
+            for_mutation=True,
+        )
+        if resolution.status == "resolved":
+            return resolution.selected
+        return None
+
+    async def _resolve_contact_by_name_in_account(
+        self,
+        *,
+        contact_name: str,
+        account_id: str | None,
+        account_name: str | None,
+    ) -> dict[str, Any] | None:
+        if not contact_name:
+            return None
+
+        resolved_contact = await self._resolve_record_by_name(scope="contacts", name=contact_name)
+        if not resolved_contact:
+            return None
+
+        target_account_id = str(account_id or "").strip()
+        target_account_norm = self._normalize_text(str(account_name or ""))
+        if not target_account_id and not target_account_norm:
+            return resolved_contact
+
+        resolved_account_id = self._first_nonempty(
+            resolved_contact,
+            ["account_id", "accountid", "accountId"],
+        ) or ""
+        resolved_account_norm = self._normalize_text(
+            self._first_nonempty(
+                resolved_contact,
+                ["account_name", "accountName", "company_name"],
+            )
+            or ""
+        )
+
+        if target_account_id and resolved_account_id and target_account_id == resolved_account_id:
+            return resolved_contact
+        if target_account_norm and resolved_account_norm and (
+            target_account_norm in resolved_account_norm or resolved_account_norm in target_account_norm
+        ):
+            return resolved_contact
         return None
 
     @staticmethod

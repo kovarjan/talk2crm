@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./talk2crm.db"
 
     llm_base_url: str = "http://localhost:11434/v1"
-    llm_model: str = "qwen3:latest"
+    llm_model: str = "qwen3.5:latest"
     llm_api_key: str = "EMPTY"
     llm_temperature: float = 0.1
     llm_context_window_tokens: int = 32768
@@ -59,6 +59,17 @@ class Settings(BaseSettings):
     crm_mode: str = "on"
     crm_timeout_seconds: float = 25.0
     coripo_hmac_key_id: str = "acmark-ai"
+    engine_v2_enabled: bool = True
+    resolver_v2_enabled: bool = True
+    temporal_v2_enabled: bool = True
+    read_service_v2_enabled: bool = True
+    write_service_v2_enabled: bool = True
+
+    # Resolver thresholds stay config-driven until calibrated from runtime telemetry.
+    resolver_read_confidence_threshold: float = 0.70
+    resolver_mutation_confidence_threshold: float = 0.70
+    resolver_ambiguity_gap_threshold: float = 0.08
+    resolver_strict_mutation_confirmation: bool = True
 
     hmac_keys_json: str = Field(default="{}")
     hmac_max_skew_seconds: int = 300
@@ -90,6 +101,22 @@ class Settings(BaseSettings):
         except json.JSONDecodeError:
             return {}
         return parsed if isinstance(parsed, dict) else {}
+
+    @property
+    def resolver_v2_active(self) -> bool:
+        return bool(self.engine_v2_enabled and self.resolver_v2_enabled)
+
+    @property
+    def temporal_v2_active(self) -> bool:
+        return bool(self.engine_v2_enabled and self.temporal_v2_enabled)
+
+    @property
+    def read_service_v2_active(self) -> bool:
+        return bool(self.engine_v2_enabled and self.read_service_v2_enabled)
+
+    @property
+    def write_service_v2_active(self) -> bool:
+        return bool(self.engine_v2_enabled and self.write_service_v2_enabled)
 
 
 @lru_cache(maxsize=1)

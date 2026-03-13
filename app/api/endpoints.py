@@ -42,6 +42,7 @@ from app.api.models import (
 from app.core.audio import synthesize_to_file, transcribe
 from app.core.config import get_settings
 from app.core.logging import get_logger, log_llm_trace
+from app.domain.contracts import normalize_pending_action_envelope
 from app.engine.agent import run_agent
 from app.engine.quick_actions import try_handle_quick_action
 from app.engine.rag import TenantRAGService
@@ -295,14 +296,24 @@ def _normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, An
             continue
 
         status = str(obs.get("status") or "").strip().lower()
-        if status == "confirmation_required":
-            pending = obs.get("pending_action") if isinstance(obs.get("pending_action"), dict) else {}
-            module = str(pending.get("module") or "").strip()
+        if status in {"confirmation_required", "resolution_required"}:
+            pending_raw = obs.get("pending_action") if isinstance(obs.get("pending_action"), dict) else {}
+            pending = normalize_pending_action_envelope(pending_raw) or pending_raw
+            module = str(
+                pending.get("effective_module")
+                or pending.get("module")
+                or pending.get("requested_module")
+                or ""
+            ).strip()
             action = str(pending.get("action") or "").strip()
             data = pending.get("data") if isinstance(pending.get("data"), dict) else {}
             message = str(
                 obs.get("message")
-                or "Akce je připravena a čeká na vaše potvrzení."
+                or (
+                    "Akce je připravena a čeká na vaše potvrzení."
+                    if status == "confirmation_required"
+                    else "Pro pokračování potřebuji upřesnit cílový záznam."
+                )
             ).strip()
 
             command_payload = {
@@ -380,7 +391,7 @@ def _extract_pending_action_from_agent_result(agent_result: dict[str, Any]) -> d
 
     direct_pending = agent_result.get("pending_action")
     if isinstance(direct_pending, dict):
-        return direct_pending
+        return normalize_pending_action_envelope(direct_pending) or direct_pending
 
     steps = agent_result.get("intermediate_steps")
     if not isinstance(steps, list):
@@ -400,8 +411,8 @@ def _extract_pending_action_from_agent_result(agent_result: dict[str, Any]) -> d
             continue
         status = str(obs.get("status") or "").strip().lower()
         pending = obs.get("pending_action")
-        if status == "confirmation_required" and isinstance(pending, dict):
-            return pending
+        if status in {"confirmation_required", "resolution_required"} and isinstance(pending, dict):
+            return normalize_pending_action_envelope(pending) or pending
     return None
 
 
@@ -765,6 +776,62 @@ async def _process_input_core(
                 tools=tools,
             )
             agent_result = _normalize_agent_result_for_ui(agent_result)
+            if settings.read_service_v2_active and _is_read_only_data_query(payload.input_text):
+                steps = agent_result.get("intermediate_steps")
+                read_tool_used = False
+                if isinstance(steps, list):
+                    for step in steps:
+                        if not isinstance(step, dict):
+                            continue
+                        if str(step.get("tool") or "").strip() in {"crm_data_tool", "crm_search_tool"}:
+                            read_tool_used = True
+                            break
+
+                needs_fallback = not read_tool_used
+                if not needs_fallback:
+                    message_probe = _to_user_message(str(agent_result.get("message_to_user") or ""))
+                    needs_fallback = not message_probe
+                if not needs_fallback:
+                    message_probe = _to_user_message(str(agent_result.get("message_to_user") or ""))
+                    if "Nerozuměla jsem spolehlivě požadavku" in message_probe:
+                        needs_fallback = True
+
+                if needs_fallback:
+                    crm_data_tool = next(
+                        (tool for tool in tools if str(getattr(tool, "name", "")).strip() == "crm_data_tool"),
+                        None,
+                    )
+                    if crm_data_tool is not None:
+                        fallback_raw = await crm_data_tool.ainvoke(
+                            {
+                                "query": payload.input_text,
+                                "query_type": "auto",
+                                "limit": 10,
+                            }
+                        )
+                        fallback_obs = _try_parse_json(str(fallback_raw)) or {}
+                        if isinstance(fallback_obs, dict) and fallback_obs:
+                            fallback_message = _to_user_message(str(fallback_obs.get("message_to_user") or ""))
+                            agent_result = {
+                                "status": str(fallback_obs.get("status") or "ok"),
+                                "output": json.dumps(fallback_obs, ensure_ascii=False),
+                                "message_to_user": fallback_message
+                                or _to_user_message(str(agent_result.get("message_to_user") or "")),
+                                "cards": fallback_obs.get("cards") if isinstance(fallback_obs.get("cards"), list) else [],
+                                "intermediate_steps": [
+                                    {
+                                        "tool": "crm_data_tool",
+                                        "tool_input": {
+                                            "query": payload.input_text,
+                                            "query_type": "auto",
+                                            "limit": 10,
+                                        },
+                                        "observation": fallback_obs,
+                                        "log": "deterministic_read_fallback",
+                                    }
+                                ],
+                            }
+                            execution_mode = "deterministic_read_fallback"
         except Exception as exc:
             logger.exception(
                 "Agent execution failed tenant=%s user=%s chat=%s",
