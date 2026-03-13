@@ -6,13 +6,11 @@ import unicodedata
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from app.engine.adjustments import ModuleAdjustmentEngine
+from app.nlu.command_parser import CommandParser
+from app.services.crm_write_service import CRMWriteService
 
 if TYPE_CHECKING:
     from app.services.crm_client import SugarClient
-
-_EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
-_PHONE_RE = re.compile(r"(?:\+420\s*)?(\d[\d\s]{7,}\d)")
 
 
 
@@ -30,7 +28,6 @@ def _extract_records(value: Any) -> list[dict[str, Any]]:
     record_list_keys = {"records", "entry_list", "items"}
 
     def is_record_candidate(item: dict[str, Any]) -> bool:
-        # Exclude field-definition dictionaries and similar metadata objects.
         if "vname" in item and "type" in item and "name" in item and "id" not in item:
             return False
         return bool(str(item.get("id") or "").strip())
@@ -53,7 +50,6 @@ def _extract_records(value: Any) -> list[dict[str, Any]]:
 
     walk(value)
 
-    # Fallback for edge payloads that embed a single record directly.
     if not records and isinstance(value, dict):
         if bool(str(value.get("id") or "").strip()):
             records.append(value)
@@ -68,140 +64,6 @@ def _extract_records(value: Any) -> list[dict[str, Any]]:
         deduped.append(item)
     return deduped
 
-
-
-def _pick_best_match_by_name(records: list[dict[str, Any]], search: str) -> dict[str, Any] | None:
-    if not records:
-        return None
-
-    search_norm = _normalize_text(search)
-    best: tuple[int, dict[str, Any]] | None = None
-
-    for record in records:
-        name = str(record.get("name") or "").strip()
-        if not name:
-            first = str(record.get("first_name") or "").strip()
-            last = str(record.get("last_name") or "").strip()
-            name = f"{first} {last}".strip()
-        if not name:
-            continue
-
-        candidate_norm = _normalize_text(name)
-        score = 0
-        if candidate_norm == search_norm:
-            score = 100
-        elif candidate_norm.startswith(search_norm):
-            score = 80
-        elif search_norm in candidate_norm:
-            score = 70
-        elif candidate_norm in search_norm:
-            score = 60
-
-        if best is None or score > best[0]:
-            best = (score, record)
-
-    if best and best[0] >= 70:
-        return best[1]
-    return None
-
-
-
-def _extract_create_contact_payload(text: str) -> dict[str, str] | None:
-    normalized = _normalize_text(text)
-    if "kontakt" not in normalized:
-        return None
-    if not any(trigger in normalized for trigger in ("vytvor", "zaloz", "pridej kontakt", "novy kontakt")):
-        return None
-
-    name_match = re.search(
-        r"vytvo[rř]\s+kontakt\s+(.+?)(?=\s+(?:tel|telefon|mail|email|e-mail|pridej|přidej|ke\s+spole[cč]nosti)\b|$)",
-        text,
-        re.IGNORECASE,
-    )
-    if not name_match:
-        name_match = re.search(
-            r"zalo[zž]\s+kontakt\s+(.+?)(?=\s+(?:tel|telefon|mail|email|e-mail|pridej|přidej|ke\s+spole[cč]nosti)\b|$)",
-            text,
-            re.IGNORECASE,
-        )
-
-    full_name = ""
-    if name_match:
-        full_name = re.sub(r"\s+", " ", name_match.group(1)).strip(" ,.;")
-
-    if not full_name:
-        return None
-
-    parts = full_name.split()
-    first_name = parts[0]
-    last_name = " ".join(parts[1:]) if len(parts) > 1 else ""
-
-    email_match = _EMAIL_RE.search(text)
-    phone_match = _PHONE_RE.search(text)
-    company_match = re.search(
-        r"(?:ke\s+spole[cč]nosti|k\s+firm[eě]|do\s+spole[cč]nosti)\s+([^,.;:]+)",
-        text,
-        re.IGNORECASE,
-    )
-
-    payload: dict[str, str] = {
-        "first_name": first_name,
-        "last_name": last_name,
-    }
-    if email_match:
-        payload["email1"] = email_match.group(0).strip()
-    if phone_match:
-        payload["phone_mobile"] = re.sub(r"\s+", "", phone_match.group(1))
-    if company_match:
-        payload["company_name_hint"] = company_match.group(1).strip(" ,.;")
-    return payload
-
-
-def _extract_create_meeting_payload(text: str) -> dict[str, Any] | None:
-    normalized = _normalize_text(text)
-    if "schuzk" not in normalized and "meeting" not in normalized:
-        return None
-    if not any(
-        trigger in normalized
-        for trigger in ("vytvor", "zaloz", "naplanuj", "pridej", "domluv", "zarid")
-    ):
-        return None
-
-    person_match = re.search(
-        (
-            r"\b(?:s\s+)?(?:pan[ií]|panem|pan)\s+([^,.;:]+?)"
-            r"(?=\s+(?:z|ze|na|v|ve|o|ohledn[eě]|kv[uů]li|k|do|od|u)\b|$)"
-        ),
-        text,
-        re.IGNORECASE,
-    )
-    company_match = re.search(
-        (
-            r"\b(?:z|ze|od)\s+(?:firmy|spole[cč]nosti|company)\s+([^,.;:]+?)"
-            r"(?=\s+(?:na|v|ve|o|ohledn[eě]|kv[uů]li|k|do|od|u|s|se)\b|$)"
-        ),
-        text,
-        re.IGNORECASE,
-    )
-    topic_match = re.search(
-        r"\b(?:ohledn[eě]|kv[uů]li|pro)\s+([^,.;:]+)",
-        text,
-        re.IGNORECASE,
-    )
-
-    fields: dict[str, Any] = {}
-    if person_match:
-        fields["contact_name"] = re.sub(r"\s+", " ", person_match.group(1)).strip(" ,.;")
-    if company_match:
-        fields["account_name"] = re.sub(r"\s+", " ", company_match.group(1)).strip(" ,.;")
-    if topic_match:
-        fields["description"] = re.sub(r"\s+", " ", topic_match.group(1)).strip(" ,.;")
-
-    date_start = ModuleAdjustmentEngine._derive_meeting_datetime(fields, text)
-    if date_start:
-        fields["date_start"] = date_start
-
-    return {"fields": fields}
 
 
 def _parse_datetime(value: str) -> datetime | None:
@@ -227,20 +89,6 @@ def _format_contact_name(item: dict[str, Any]) -> str:
     return full or str(item.get("name") or "(bez jména)").strip()
 
 
-
-def _is_latest_leads_query(normalized: str) -> bool:
-    if "zajemc" not in normalized and "lead" not in normalized:
-        return False
-    return any(trigger in normalized for trigger in ("nejnovejs", "nove", "posledn"))
-
-
-
-def _is_week_meetings_query(normalized: str) -> bool:
-    if "tento tyden" not in normalized and "tenhle tyden" not in normalized:
-        return False
-    return any(token in normalized for token in ("schuzk", "scuzk", "plan", "meeting"))
-
-
 async def try_handle_quick_action(
     *,
     input_text: str,
@@ -248,144 +96,27 @@ async def try_handle_quick_action(
     user_id: str,
     action_confirmation: bool,
 ) -> dict[str, Any] | None:
+    parser = CommandParser()
+    command = parser.parse(input_text)
+    if command is None:
+        return None
+
+    write_service = CRMWriteService(
+        tenant_id="quick-action",
+        user_id=user_id,
+        input_text=input_text,
+        request_context={},
+        crm_client=crm_client,
+        rag_service=None,
+        action_confirmation=action_confirmation,
+    )
+
+    if command.intent in {"create_contact", "create_meeting"}:
+        return await write_service.execute_quick_command(command)
+
     normalized = _normalize_text(input_text)
 
-    create_contact = _extract_create_contact_payload(input_text)
-    if create_contact is not None:
-        company_hint = create_contact.pop("company_name_hint", "")
-        data: dict[str, Any] = dict(create_contact)
-
-        if company_hint:
-            account_search = await crm_client.generic_search(query=company_hint, scope="accounts")
-            account_records = _extract_records(account_search)
-            account = _pick_best_match_by_name(account_records, company_hint)
-            if account:
-                account_id = str(account.get("id") or "").strip()
-                account_name = str(account.get("name") or company_hint).strip()
-                if account_id:
-                    data["account_id"] = account_id
-                if account_name:
-                    data["account_name"] = account_name
-
-        full_name = f"{data.get('first_name', '')} {data.get('last_name', '')}".strip()
-        confirmation_text = f"Připraveno: vytvořit kontakt {full_name}."
-        if data.get("phone_mobile"):
-            confirmation_text += f" Tel: {data['phone_mobile']}."
-        if data.get("email1"):
-            confirmation_text += f" Email: {data['email1']}."
-        if data.get("account_name"):
-            confirmation_text += f" Společnost: {data['account_name']}."
-        confirmation_text += " Potvrďte prosím provedení."
-
-        pending_action = {
-            "module": "Contacts",
-            "action": "create",
-            "data": data,
-        }
-
-        if not action_confirmation:
-            return {
-                "status": "confirmation_required",
-                "pending_action": pending_action,
-                "output": json.dumps(
-                    {
-                        "action": "create",
-                        "module": "Contacts",
-                        "data_json": json.dumps(data, ensure_ascii=False),
-                        "message_to_user": confirmation_text,
-                    },
-                    ensure_ascii=False,
-                ),
-                "message_to_user": confirmation_text,
-            }
-
-        result = await crm_client.execute_module_action("Contacts", "create", data)
-        created_id = str(result.get("id") or result.get("record_id") or "").strip()
-        if created_id:
-            message = f"Hotovo. Kontakt {full_name} byl vytvořen (ID: {created_id})."
-        else:
-            message = f"Hotovo. Kontakt {full_name} byl vytvořen."
-        return {
-            "status": "ok",
-            "output": json.dumps(result, ensure_ascii=False),
-            "message_to_user": message,
-        }
-
-    create_meeting = _extract_create_meeting_payload(input_text)
-    if create_meeting is not None:
-        fields_raw = create_meeting.get("fields")
-        fields = fields_raw if isinstance(fields_raw, dict) else {}
-        date_start = str(fields.get("date_start") or "").strip()
-        if not date_start:
-            message = (
-                "Pro vytvoření schůzky potřebuji i termín. "
-                "Napište prosím den a čas (např. v pondělí 14:00)."
-            )
-            return {
-                "status": "needs_input",
-                "output": json.dumps({"status": "needs_input", "message_to_user": message}, ensure_ascii=False),
-                "message_to_user": message,
-            }
-
-        contact_name = str(fields.get("contact_name") or "").strip()
-        account_name = str(fields.get("account_name") or "").strip()
-        start_dt = _parse_datetime(date_start)
-        when_text = start_dt.strftime("%d.%m.%Y %H:%M") if start_dt else date_start
-
-        confirmation_text = "Připraveno: vytvořit schůzku"
-        if contact_name:
-            confirmation_text += f" s {contact_name}"
-        if account_name:
-            confirmation_text += f" ({account_name})"
-        confirmation_text += f" na {when_text}. Potvrďte prosím provedení."
-
-        pending_action = {
-            "module": "Meetings",
-            "action": "create",
-            "data": create_meeting,
-        }
-
-        if not action_confirmation:
-            return {
-                "status": "confirmation_required",
-                "pending_action": pending_action,
-                "output": json.dumps(
-                    {
-                        "action": "create",
-                        "module": "Meetings",
-                        "data_json": json.dumps(create_meeting, ensure_ascii=False),
-                        "message_to_user": confirmation_text,
-                    },
-                    ensure_ascii=False,
-                ),
-                "message_to_user": confirmation_text,
-            }
-
-        adjustment_engine = ModuleAdjustmentEngine(
-            tenant_id="quick-action",
-            user_id=user_id,
-            crm_client=crm_client,
-            input_text=input_text,
-            request_context={},
-        )
-        adjusted = await adjustment_engine.apply(
-            module="Meetings",
-            action="create",
-            data=create_meeting,
-        )
-        result = await crm_client.execute_module_action("Meetings", "create", adjusted.data)
-        created_id = str(result.get("id") or result.get("record_id") or "").strip()
-        if created_id:
-            message = f"Hotovo. Schůzka byla vytvořena (ID: {created_id})."
-        else:
-            message = "Hotovo. Schůzka byla vytvořena."
-        return {
-            "status": "ok",
-            "output": json.dumps(result, ensure_ascii=False),
-            "message_to_user": message,
-        }
-
-    if _is_latest_leads_query(normalized):
+    if command.intent == "latest_leads":
         result = await crm_client.execute_module_action(
             "Leads",
             "list",
@@ -420,7 +151,7 @@ async def try_handle_quick_action(
             "message_to_user": "\n".join(lines),
         }
 
-    if _is_week_meetings_query(normalized):
+    if command.intent == "week_meetings":
         result = await crm_client.execute_module_action(
             "Meetings",
             "list",
