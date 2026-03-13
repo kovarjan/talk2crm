@@ -87,7 +87,7 @@ def build_filter(
         operands.append(_make_operand(date_field, "lessThanInclude", date_to))
 
     for spec in (filters or []):
-        coripo_op = _OP_MAP.get(spec.op, "cont")
+        coripo_op = _OP_MAP[spec.op]
         operands.append(_make_operand(spec.field, coripo_op, spec.value))
 
     return {"operator": "and", "operands": operands}
