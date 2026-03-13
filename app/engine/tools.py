@@ -1481,9 +1481,14 @@ def build_tools(
             "crm_action_tool", tenant_id, user_id,
             inputs={"module": module, "action": action, "data_json": data_json},
         ) as tcl:
-            result = await write_service.execute_action(
-                module=module, action=action, data_json=data_json
-            )
+            try:
+                result = await write_service.execute_action(
+                    module=module, action=action, data_json=data_json
+                )
+            except Exception as exc:
+                error_payload = {"status": "error", "message": str(exc)}
+                tcl.set_output(error_payload)
+                return json.dumps(error_payload, ensure_ascii=False)
             tcl.set_output({"status": result.get("status"), "module": module, "action": action})
             return json.dumps(result, ensure_ascii=False)
 
