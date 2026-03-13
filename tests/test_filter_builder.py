@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import json
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -60,6 +61,28 @@ def test_build_filter_gte_maps_to_more_than_include():
 def test_build_filter_empty():
     f = build_filter()
     assert f == {"operator": "and", "operands": []}
+
+
+def test_build_filter_contacts_account_id_uses_relation_filter():
+    specs = [FilterSpec(field="account_id", op="eq", value="a42333d4-c035-2f73-865c-64ee30906163")]
+    f = build_filter(module="Contacts", filters=specs)
+    relation_group = f["operands"][0]
+    relation_operand = relation_group["operands"][0]
+    relate_operand = relation_group["operands"][1]
+
+    print(json.dumps(relation_group, indent=2))
+
+    assert relation_group["operator"] == "or"
+    assert relation_operand["field"] == "id"
+    assert relation_operand["fieldModule"] == "Contacts"
+    assert relation_operand["fieldRel"] == ["accounts"]
+    assert relation_operand["type"] == "eq"
+    assert relation_operand["value"] == "a42333d4-c035-2f73-865c-64ee30906163"
+    assert relate_operand["type"] == "relate"
+    assert relate_operand["module"] == "Accounts"
+    assert relate_operand["relationship"] == ["accounts"]
+    assert relate_operand["filter"]["operands"][0]["field"] == "id"
+    assert relate_operand["filter"]["operands"][0]["value"] == "a42333d4-c035-2f73-865c-64ee30906163"
 
 
 def test_build_order_asc():

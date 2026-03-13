@@ -22,7 +22,7 @@ from rich.pretty import pretty_repr
 
 request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
 _TRACE_ENABLED = True
-_TRACE_MAX_CHARS = 1200
+_TRACE_MAX_CHARS = 2200
 _TRACE_HISTORY_MESSAGES = 10
 _HEALTH_PATHS = ("/ping", "/ping/", "/health", "/health/")
 

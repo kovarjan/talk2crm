@@ -89,6 +89,35 @@ def _format_contact_name(item: dict[str, Any]) -> str:
     return full or str(item.get("name") or "(bez jména)").strip()
 
 
+def _build_meetings_week_filter(week_start: datetime, week_end: datetime) -> dict[str, Any]:
+    return {
+        "operator": "and",
+        "operands": [
+            {
+                "operator": "and",
+                "operands": [
+                    {
+                        "field": "date_start",
+                        "fieldModule": None,
+                        "fieldRel": None,
+                        "type": "moreThanInclude",
+                        "value": week_start.strftime("%Y-%m-%d"),
+                        "relationField": None,
+                    },
+                    {
+                        "field": "date_start",
+                        "fieldModule": None,
+                        "fieldRel": None,
+                        "type": "lessThanInclude",
+                        "value": (week_end - timedelta(days=1)).strftime("%Y-%m-%d"),
+                        "relationField": None,
+                    },
+                ],
+            }
+        ],
+    }
+
+
 async def try_handle_quick_action(
     *,
     input_text: str,
@@ -152,26 +181,37 @@ async def try_handle_quick_action(
         }
 
     if command.intent == "week_meetings":
-        result = await crm_client.execute_module_action(
-            "Meetings",
-            "list",
-            {"query": "", "max_results": 100},
-        )
-        meetings = _extract_records(result)
-
         now = datetime.now()
         week_start = now - timedelta(days=now.weekday())
         week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
         week_end = week_start + timedelta(days=7)
 
+        result = await crm_client.execute_module_action(
+            "Meetings",
+            "list",
+            {
+                "limit": 500,
+                "offset": 0,
+                "filter": _build_meetings_week_filter(week_start, week_end),
+                "include_field_names": False,
+                "response_fields": [
+                    "id",
+                    "name",
+                    "date_start",
+                    "status",
+                    "location",
+                    "assigned_user_name",
+                    "parent_name",
+                ],
+                "order": [{"field": "date_start", "sort": "ASC", "module": "Meetings"}],
+            },
+        )
+        meetings = _extract_records(result)
+
         selected: list[dict[str, Any]] = []
         for item in meetings:
             dt = _parse_datetime(str(item.get("date_start") or ""))
             if dt is None or not (week_start <= dt < week_end):
-                continue
-
-            assigned_id = str(item.get("assigned_user_id") or "").strip()
-            if assigned_id and assigned_id != str(user_id):
                 continue
             selected.append(item)
 
