@@ -16,10 +16,12 @@ from app.engine.tools import build_tools
 
 class FakeCrmClient:
     mode = "coripo_public"
-    last_call: dict[str, Any] | None = None
+
+    def __init__(self) -> None:
+        self.last_call: dict[str, Any] | None = None
 
     async def execute_module_action(self, module: str, action: str, data: dict[str, Any]) -> dict[str, Any]:
-        FakeCrmClient.last_call = {"module": module, "action": action, "data": data}
+        self.last_call = {"module": module, "action": action, "data": data}
         return {"records": []}
 
 

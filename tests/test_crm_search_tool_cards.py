@@ -10,6 +10,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from unittest.mock import patch
+
 from app.engine.tools import build_tools
 
 
@@ -39,15 +41,18 @@ class DummyCrmClient:
 
 def test_crm_query_tool_returns_cards_and_summary_for_meetings() -> None:
     client = DummyCrmClient()
-    tools = build_tools(
-        tenant_id="ai-local",
-        user_id="28",
-        input_text="jaké mám schůzky na další týden",
-        request_context={},
-        crm_client=client,  # type: ignore[arg-type]
-        rag_service=None,
-        action_confirmation=False,
-    )
+    with patch("app.engine.tools.get_settings") as mock_settings:
+        mock_settings.return_value.crm_mode = "on"
+        mock_settings.return_value.tool_call_logging = False
+        tools = build_tools(
+            tenant_id="ai-local",
+            user_id="28",
+            input_text="jaké mám schůzky na další týden",
+            request_context={},
+            crm_client=client,  # type: ignore[arg-type]
+            rag_service=None,
+            action_confirmation=False,
+        )
     crm_query_tool = next(tool for tool in tools if getattr(tool, "name", "") == "crm_query_tool")
 
     raw = asyncio.run(

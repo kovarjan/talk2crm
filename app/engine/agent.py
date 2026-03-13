@@ -57,7 +57,7 @@ def get_agent_executor(tenant_id: str, tools: list) -> AgentExecutor:
                 "Pri dotazech na kontakty podle firmy nejdriv vyhledej firmu fuzzy v tenant RAG/Qdrant datech, "
                 "ziskej account id a pak filtruj Contacts pres relate filtr na Accounts.id. "
                 "Pokud je RAG/Qdrant prazdny nebo bez shody, nikdy neukoncuj odpoved jako 'nenalezeno' bez overeni v CRM "
-                "(crm_data_tool nebo crm_action_tool list/search). "
+                "(crm_query_tool nebo crm_action_tool list/search). "
                 "Vzdy bud explicitni ohledne akce, vysledku a predpokladu. "
                 "Odpoved pro uzivatele pis jako cisty text bez markdown formatovani a bez emoji! "
                 "Mutacni CRM akce (create/update/patch/delete) musi byt pred provedenim potvrzena uzivatelem. "
