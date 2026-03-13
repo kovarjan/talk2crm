@@ -89,7 +89,7 @@ def _outcome_from_adjustment(result: dict[str, Any]) -> str:
 
 
 def _outcome_from_data_tool(result: dict[str, Any]) -> str:
-    return "resolved" if int(result.get("total_count") or 0) > 0 else "unresolved"
+    return "resolved" if int(result.get("total") or result.get("total_count") or 0) > 0 else "unresolved"
 
 
 
@@ -131,12 +131,12 @@ def test_resolution_outcome_parity_across_quick_adjustment_and_read_tool() -> No
         rag_service=None,
         action_confirmation=False,
     )
-    crm_data_tool = next(tool for tool in tools if getattr(tool, "name", "") == "crm_data_tool")
+    crm_query_tool = next(tool for tool in tools if getattr(tool, "name", "") == "crm_query_tool")
     raw = asyncio.run(
-        crm_data_tool.ainvoke(
+        crm_query_tool.ainvoke(
             {
-                "query": "Karlem Vybíhalem",
-                "query_type": "contact",
+                "module": "Contacts",
+                "search": "Karlem Vybíhalem",
                 "limit": 1,
             }
         )
