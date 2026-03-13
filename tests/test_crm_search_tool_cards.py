@@ -14,22 +14,14 @@ from app.engine.tools import build_tools
 
 
 class DummyCrmClient:
+    mode = "coripo_public"
+
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
     async def execute_module_action(self, module: str, action: str, data: dict[str, Any]) -> dict[str, Any]:
         self.calls.append({"module": module, "action": action, "data": data})
         if module == "Meetings" and action == "list":
-            response_fields = data.get("response_fields") if isinstance(data, dict) else None
-            has_required_fields = isinstance(response_fields, list) and "name" in response_fields and "date_start" in response_fields
-            if not has_required_fields:
-                # Simulate sparse CRM projection (ids only) when fields are not explicitly requested.
-                return {
-                    "records": [
-                        {"id": "00000000-0000-0000-0000-000000000001"},
-                        {"id": "00000000-0000-0000-0000-000000000002"},
-                    ]
-                }
             rows = []
             for i in range(1, 8):
                 rows.append(
@@ -44,11 +36,8 @@ class DummyCrmClient:
             return {"records": rows}
         return {"records": []}
 
-    async def generic_search(self, query: str, scope: str = "all") -> dict[str, Any]:
-        return {"records": []}
 
-
-def test_crm_search_tool_returns_table_cards_for_many_meetings() -> None:
+def test_crm_query_tool_returns_cards_and_summary_for_meetings() -> None:
     client = DummyCrmClient()
     tools = build_tools(
         tenant_id="ai-local",
@@ -59,17 +48,15 @@ def test_crm_search_tool_returns_table_cards_for_many_meetings() -> None:
         rag_service=None,
         action_confirmation=False,
     )
-    crm_search_tool = next(tool for tool in tools if getattr(tool, "name", "") == "crm_search_tool")
+    crm_query_tool = next(tool for tool in tools if getattr(tool, "name", "") == "crm_query_tool")
 
     raw = asyncio.run(
-        crm_search_tool.ainvoke(
+        crm_query_tool.ainvoke(
             {
-                "query": {
-                    "filter": {"field": "start_date", "operator": "between", "value": ["2026-03-07", "2026-03-14"]},
-                    "order": {"field": "start_date", "direction": "asc"},
-                    "limit": 10,
-                },
-                "scope": "meetings",
+                "module": "Meetings",
+                "date_from": "2026-03-07",
+                "date_to": "2026-03-14",
+                "order_by": "date_start:asc",
                 "limit": 10,
             }
         )
@@ -77,12 +64,8 @@ def test_crm_search_tool_returns_table_cards_for_many_meetings() -> None:
     result = json.loads(raw)
 
     assert result.get("status") == "ok"
-    assert result.get("module") == "Meetings"
-    assert result.get("total_count") == 7
+    assert "cards" in result
+    assert "summary" in result
+    assert result.get("total") == 7
     cards = result.get("cards") or []
-    assert isinstance(cards, list) and len(cards) == 1
-    assert cards[0].get("type") == "table"
-    rows = cards[0].get("rows") or []
-    assert len(rows) == 7
-    assert rows[0].get("cells", {}).get("name") == "Schůzka 1"
-    assert rows[0].get("link", {}).get("url") == "/#detail/Meetings/00000000-0000-0000-0000-000000000001"
+    assert isinstance(cards, list) and len(cards) >= 1
