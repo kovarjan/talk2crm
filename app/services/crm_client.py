@@ -395,13 +395,18 @@ class SugarClient:
         payload: dict[str, Any] = {
             "limit": limit,
             "offset": offset,
-            "columns": source.get("columns", []),
+            "columns": source.get("columns", None),
+            # "columns": None, # None means default list view columns; can be overridden by "columns" key in source
             "order": order,
-            "groupBy": source.get("groupBy", []),
-            "function": source.get("function", {}),
-            "alterName": source.get("alterName", {}),
-            "groupByDate": source.get("groupByDate", []),
-            "savedSearch": bool(source.get("savedSearch", True)),
+            # "groupBy": source.get("groupBy", []),
+            # "function": source.get("function", {}),
+            # "alterName": source.get("alterName", {}),
+            # "groupByDate": source.get("groupByDate", []),
+            # "savedSearch": bool(source.get("savedSearch", True)),
+            "saved_search_id": "", # should be empty do display default list view
+            "prefix": None,
+            "listview_type": "list",
+            "viewType": "desktop",
         }
 
         if "recordsCount" in source:

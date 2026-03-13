@@ -49,6 +49,34 @@ def _make_operand(field: str, op_type: str, value: str | None) -> dict[str, Any]
         "relationField": None,
     }
 
+def _make_contacts_account_relation_operand(op_type: str, value: str | None) -> dict[str, Any]:
+    # Contacts->Accounts relation: keep fieldRel variant and add relate fallback
+    # because some Coripo builds only return data for the relate form.
+    operands: list[dict[str, Any]] = [
+        {
+            "field": "id",
+            "fieldModule": "Contacts",
+            "fieldRel": ["accounts"],
+            "type": op_type,
+            "value": value,
+            "relationField": None,
+        }
+    ]
+    if op_type == "eq" and value:
+        operands.append(
+            {
+                "module": "Accounts",
+                "type": "relate",
+                "name": "account_name",
+                "relationship": ["accounts"],
+                "filter": {
+                    "operator": "and",
+                    "operands": [{"field": "id", "type": "eq", "value": value}],
+                },
+            }
+        )
+    return {"operator": "or", "operands": operands}
+
 
 def build_filter(
     *,
@@ -86,8 +114,13 @@ def build_filter(
     if date_to:
         operands.append(_make_operand(date_field, "lessThanInclude", date_to))
 
+    account_id_aliases = {"account_id", "accounts.id", "accounts|id"}
+
     for spec in (filters or []):
         coripo_op = _OP_MAP[spec.op]
+        if module_lower == "contacts" and (spec.field or "").strip().lower() in account_id_aliases:
+            operands.append(_make_contacts_account_relation_operand(coripo_op, spec.value))
+            continue
         operands.append(_make_operand(spec.field, coripo_op, spec.value))
 
     return {"operator": "and", "operands": operands}

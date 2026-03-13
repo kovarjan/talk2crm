@@ -1807,8 +1807,9 @@ def build_tools(
 
         IMPORTANT — When to use filters vs search:
           - Use `search` when you have a name or keyword and no ID yet.
-          - Use `filters` with account_id when you already resolved the company UUID
-            (more accurate than searching by company name in the contact list).
+          - For Contacts, `account_id` in filters is treated as an alias and converted
+            to an Accounts relation filter (uses `fieldRel=["accounts"]` and a
+            `type="relate"` fallback for Coripo compatibility).
           - For contacts at a company: first resolve account_id via rag_search_tool,
             then call crm_query_tool(module="Contacts",
                                      filters='[{"field":"account_id","op":"eq","value":"<uuid>"}]')
@@ -1843,6 +1844,8 @@ def build_tools(
             )
             order = build_order(order_by)
 
+            print(f"Built CRM filter: {json.dumps(crm_filter, ensure_ascii=False)}")
+
             data: dict = {
                 "limit": max(1, min(int(limit), 100)),
                 "offset": 0,
@@ -1858,12 +1861,17 @@ def build_tools(
                     action="list",
                     data=data,
                 )
+
+                print(f"Raw CRM response: {json.dumps(raw, ensure_ascii=False)}")
             except Exception as exc:
                 error_payload = {"status": "error", "message": str(exc), "cards": []}
                 tcl.set_output(error_payload)
                 return json.dumps(error_payload, ensure_ascii=False)
 
             records = _extract_records(raw)
+
+            print(f"Extracted {len(records)} records from CRM response.")
+            print(f"First 10 records: {json.dumps(records[:10], ensure_ascii=False)}")
 
             cards: list[dict] = []
             module_lower = module.strip().lower()
@@ -1876,6 +1884,9 @@ def build_tools(
                 cards = _contact_cards(records, total, title, force_table=total > 4)
             else:
                 cards = _generic_cards(records, total)
+
+            print(f"Generated {len(cards)} cards for module '{module}'.")
+            print(f"First 5 cards: {json.dumps(cards[:5], ensure_ascii=False)}")
 
             summary_lines = []
             for row in records[:10]:

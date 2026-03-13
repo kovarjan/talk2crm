@@ -95,6 +95,30 @@ def test_crm_query_tool_filters_parsed():
     assert filt["operands"][0]["value"] == "Held"
 
 
+def test_crm_query_tool_contacts_account_id_translates_to_relation_filter():
+    client = FakeCrmClient()
+    tools = _make_tools(crm_client=client)
+    tool = _get_tool(tools, "crm_query_tool")
+    filters_json = json.dumps([{"field": "account_id", "op": "eq", "value": "a42333d4-c035-2f73-865c-64ee30906163"}])
+    asyncio.run(tool.ainvoke({"module": "Contacts", "filters": filters_json}))
+    filt = client.last_call["data"]["filter"]
+    relation_group = filt["operands"][0]
+    relation_operand = relation_group["operands"][0]
+    relate_operand = relation_group["operands"][1]
+
+    assert relation_group["operator"] == "or"
+    assert relation_operand["field"] == "id"
+    assert relation_operand["fieldModule"] == "Contacts"
+    assert relation_operand["fieldRel"] == ["accounts"]
+    assert relation_operand["type"] == "eq"
+    assert relation_operand["value"] == "a42333d4-c035-2f73-865c-64ee30906163"
+    assert relate_operand["type"] == "relate"
+    assert relate_operand["module"] == "Accounts"
+    assert relate_operand["relationship"] == ["accounts"]
+    assert relate_operand["filter"]["operands"][0]["field"] == "id"
+    assert relate_operand["filter"]["operands"][0]["value"] == "a42333d4-c035-2f73-865c-64ee30906163"
+
+
 def test_crm_query_tool_invalid_filters_json():
     tools = _make_tools()
     tool = _get_tool(tools, "crm_query_tool")

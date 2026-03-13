@@ -262,6 +262,60 @@ def _try_parse_json(text: str) -> dict[str, Any] | None:
         return None
 
 
+def _extract_top_account_id_from_rag_observation(observation: Any) -> str | None:
+    items: list[Any]
+    if isinstance(observation, str):
+        try:
+            parsed = json.loads(observation)
+        except Exception:
+            parsed = None
+        items = parsed if isinstance(parsed, list) else []
+    elif isinstance(observation, list):
+        items = observation
+    else:
+        items = []
+
+    best_score = float("-inf")
+    best_id = ""
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        payload = item.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        record = payload.get("record")
+        record_id = ""
+        if isinstance(record, dict):
+            record_id = str(record.get("id") or "").strip()
+        if not record_id:
+            record_id = str(payload.get("record_id") or "").strip()
+        if not record_id:
+            continue
+        module_name = str(payload.get("module") or "").strip().lower()
+        if module_name and module_name not in {"accounts", "account"}:
+            continue
+        score_raw = item.get("score")
+        score = float(score_raw) if isinstance(score_raw, (int, float)) else 0.0
+        if score > best_score:
+            best_score = score
+            best_id = record_id
+    return best_id or None
+
+
+def _extract_rag_account_id_from_steps(steps: Any) -> str | None:
+    if not isinstance(steps, list):
+        return None
+    for step in reversed(steps):
+        if not isinstance(step, dict):
+            continue
+        if str(step.get("tool") or "").strip() != "rag_search_tool":
+            continue
+        account_id = _extract_top_account_id_from_rag_observation(step.get("observation"))
+        if account_id:
+            return account_id
+    return None
+
+
 def _looks_like_noise(text: str) -> bool:
     value = (text or "").strip()
     if not value:
@@ -343,7 +397,7 @@ def _normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, An
         if not isinstance(step, dict):
             continue
         tool_name = str(step.get("tool") or "").strip()
-        if tool_name not in {"crm_data_tool", "crm_search_tool"}:
+        if tool_name not in {"crm_data_tool", "crm_search_tool", "crm_query_tool"}:
             continue
 
         observation = step.get("observation")
@@ -359,7 +413,13 @@ def _normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, An
         cards = obs.get("cards")
         if isinstance(cards, list):
             normalized["cards"] = cards
-        tool_message = _to_user_message(str(obs.get("message_to_user") or "").strip())
+        tool_message = _to_user_message(
+            str(
+                obs.get("message_to_user")
+                or obs.get("summary")
+                or ""
+            ).strip()
+        )
         if tool_message:
             normalized["message_to_user"] = tool_message
         tool_status = str(obs.get("status") or "").strip()
@@ -783,7 +843,11 @@ async def _process_input_core(
                     for step in steps:
                         if not isinstance(step, dict):
                             continue
-                        if str(step.get("tool") or "").strip() in {"crm_data_tool", "crm_search_tool"}:
+                        if str(step.get("tool") or "").strip() in {
+                            "crm_data_tool",
+                            "crm_search_tool",
+                            "crm_query_tool",
+                        }:
                             read_tool_used = True
                             break
 
@@ -832,6 +896,82 @@ async def _process_input_core(
                                 ],
                             }
                             execution_mode = "deterministic_read_fallback"
+                    else:
+                        crm_query_tool = next(
+                            (tool for tool in tools if str(getattr(tool, "name", "")).strip() == "crm_query_tool"),
+                            None,
+                        )
+                        rag_search_tool = next(
+                            (tool for tool in tools if str(getattr(tool, "name", "")).strip() == "rag_search_tool"),
+                            None,
+                        )
+                        if crm_query_tool is not None and rag_search_tool is not None:
+                            account_id = _extract_rag_account_id_from_steps(steps)
+                            rag_obs: Any = None
+                            if not account_id:
+                                rag_raw = await rag_search_tool.ainvoke(
+                                    {"query": payload.input_text, "module": "accounts", "limit": 5}
+                                )
+                                try:
+                                    rag_obs = json.loads(str(rag_raw))
+                                except Exception:
+                                    rag_obs = None
+                                account_id = _extract_top_account_id_from_rag_observation(rag_obs)
+
+                            if account_id:
+                                filters_json = json.dumps(
+                                    [{"field": "account_id", "op": "eq", "value": account_id}],
+                                    ensure_ascii=False,
+                                )
+                                query_raw = await crm_query_tool.ainvoke(
+                                    {"module": "Contacts", "filters": filters_json, "limit": 50}
+                                )
+                                query_obs = _try_parse_json(str(query_raw)) or {}
+                                if isinstance(query_obs, dict) and query_obs:
+                                    summary = _to_user_message(
+                                        str(
+                                            query_obs.get("message_to_user")
+                                            or query_obs.get("summary")
+                                            or ""
+                                        )
+                                    )
+                                    fallback_steps: list[dict[str, Any]] = []
+                                    if rag_obs is not None:
+                                        fallback_steps.append(
+                                            {
+                                                "tool": "rag_search_tool",
+                                                "tool_input": {
+                                                    "query": payload.input_text,
+                                                    "module": "accounts",
+                                                    "limit": 5,
+                                                },
+                                                "observation": rag_obs,
+                                                "log": "deterministic_read_fallback",
+                                            }
+                                        )
+                                    fallback_steps.append(
+                                        {
+                                            "tool": "crm_query_tool",
+                                            "tool_input": {
+                                                "module": "Contacts",
+                                                "filters": filters_json,
+                                                "limit": 50,
+                                            },
+                                            "observation": query_obs,
+                                            "log": "deterministic_read_fallback",
+                                        }
+                                    )
+                                    agent_result = {
+                                        "status": str(query_obs.get("status") or "ok"),
+                                        "output": json.dumps(query_obs, ensure_ascii=False),
+                                        "message_to_user": summary
+                                        or _to_user_message(str(agent_result.get("message_to_user") or "")),
+                                        "cards": query_obs.get("cards")
+                                        if isinstance(query_obs.get("cards"), list)
+                                        else [],
+                                        "intermediate_steps": fallback_steps,
+                                    }
+                                    execution_mode = "deterministic_query_fallback"
         except Exception as exc:
             logger.exception(
                 "Agent execution failed tenant=%s user=%s chat=%s",
