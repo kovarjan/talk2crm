@@ -58,6 +58,27 @@ def test_normalize_agent_result_uses_crm_query_tool_summary() -> None:
     assert normalized.get("cards") == [{"id": "table-contacts"}]
 
 
+def test_normalize_agent_result_uses_my_meetings_tool_summary() -> None:
+    normalized = _normalize_agent_result_for_ui(
+        {
+            "output": "",
+            "intermediate_steps": [
+                {
+                    "tool": "my_meetings_tool",
+                    "observation": {
+                        "status": "ok",
+                        "summary": "• 13.03.2026 10:00 — Porada (Planned)",
+                        "cards": [{"id": "table-schuzky"}],
+                    },
+                }
+            ],
+        }
+    )
+    assert normalized.get("message_to_user") == "13.03.2026 10:00 — Porada (Planned)"
+    assert normalized.get("status") == "ok"
+    assert normalized.get("cards") == [{"id": "table-schuzky"}]
+
+
 def test_extract_top_account_id_from_rag_observation_prefers_highest_score() -> None:
     observation = [
         {

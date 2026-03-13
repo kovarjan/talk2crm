@@ -30,7 +30,7 @@ async def test_crm_query_tool_real_data():
     )
 
     # Extract the query tool (assuming it's the third one in the list)
-    query_tool = tools[2]
+    query_tool = tools[3]
 
     payload = {
         "module": "Contacts",

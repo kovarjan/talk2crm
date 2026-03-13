@@ -46,10 +46,10 @@ def _get_tool(tools, name):
     return next(t for t in tools if getattr(t, "name", "") == name)
 
 
-def test_build_tools_returns_three_tools():
+def test_build_tools_returns_expected_tools():
     tools = _make_tools()
     names = {getattr(t, "name", "") for t in tools}
-    assert names == {"crm_action_tool", "rag_search_tool", "crm_query_tool"}
+    assert names == {"crm_action_tool", "rag_search_tool", "my_meetings_tool", "crm_query_tool"}
 
 
 def test_crm_query_tool_crm_off():
@@ -151,3 +151,61 @@ def test_crm_query_tool_returns_ok_structure():
     assert "total" in result
     assert "summary" in result
     assert "cards" in result
+
+
+def test_my_meetings_tool_builds_login_user_filter_and_returns_table_cards():
+    class MeetingsClient(FakeCrmClient):
+        async def execute_module_action(self, module: str, action: str, data: dict[str, Any]) -> dict[str, Any]:
+            self.last_call = {"module": module, "action": action, "data": data}
+            return {
+                "records": [
+                    {
+                        "id": "11111111-2222-3333-4444-555555555555",
+                        "name": "Porada",
+                        "date_start": "2026-03-13 10:00:00",
+                        "status": "Planned",
+                        "location": "Brno",
+                    }
+                ]
+            }
+
+    client = MeetingsClient()
+    tools = _make_tools(crm_client=client)
+    tool = _get_tool(tools, "my_meetings_tool")
+    result = json.loads(
+        asyncio.run(
+            tool.ainvoke(
+                {"date_from": "2026-03-10", "date_to": "2026-03-20", "limit": 50}
+            )
+        )
+    )
+
+    assert client.last_call is not None
+    filt = client.last_call["data"]["filter"]
+    assert filt["operands"][0]["field"] == "assigned_user_id"
+    assert filt["operands"][0]["type"] == "eq"
+    assert filt["operands"][0]["value"] == "{%LOGIN_USER%}"
+    assert filt["operands"][1]["field"] == "date_start"
+    assert filt["operands"][1]["type"] == "moreThanInclude"
+    assert filt["operands"][1]["value"] == "2026-03-10"
+    assert filt["operands"][2]["field"] == "date_start"
+    assert filt["operands"][2]["type"] == "lessThanInclude"
+    assert filt["operands"][2]["value"] == "2026-03-20"
+    assert result["status"] == "ok"
+    assert result["total"] == 1
+    assert isinstance(result["cards"], list) and result["cards"]
+    assert result["cards"][0]["type"] == "table"
+
+
+def test_my_meetings_tool_rejects_invalid_timeframe():
+    tools = _make_tools()
+    tool = _get_tool(tools, "my_meetings_tool")
+    result = json.loads(
+        asyncio.run(
+            tool.ainvoke(
+                {"date_from": "2026-03-20", "date_to": "2026-03-10"}
+            )
+        )
+    )
+    assert result["status"] == "error"
+    assert "date_from must be <=" in result["message"]

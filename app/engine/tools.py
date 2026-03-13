@@ -37,6 +37,20 @@ def _safe_text(value: Any) -> str:
     return str(value).strip()
 
 
+_COMPANY_PREFIX_RE = re.compile(
+    r"^\s*(?:(?:z|ze|u|k|ke|v|ve)\s+)?(?:firma|firmy|firmu|firmě|firme)\s+",
+    re.IGNORECASE,
+)
+
+# CRM module - filtering throws out "firma Cemat" makes it only "Cemat"
+def _normalize_account_lookup_query(query: str) -> str:
+    raw = _safe_text(query)
+    if not raw:
+        return ""
+    cleaned = _COMPANY_PREFIX_RE.sub("", raw, count=1).strip(" \t,;:-")
+    return cleaned or raw
+
+
 def _infer_module_from_intent(input_text: str, requested_module: str) -> str:
     normalized = _normalize_text(input_text)
     module_norm = (requested_module or "").strip().lower()
@@ -1125,10 +1139,15 @@ def _merge_records_by_id(*record_sets: list[dict[str, Any]]) -> list[dict[str, A
     return merged
 
 
-def _meeting_cards(records: list[dict[str, Any]], total_count: int) -> list[dict[str, Any]]:
+def _meeting_cards(
+    records: list[dict[str, Any]],
+    total_count: int,
+    *,
+    force_table: bool = False,
+) -> list[dict[str, Any]]:
     if not records:
         return []
-    if total_count <= 4:
+    if total_count <= 4 and not force_table:
         cards = []
         for row in records:
             cards.append(
@@ -1341,6 +1360,47 @@ def _build_meetings_date_filter(range_start: datetime, range_end_exclusive: date
     }
 
 
+def _format_filter_datetime_boundary(value: str) -> str:
+    raw = _safe_text(value)
+    dt = _parse_datetime(raw)
+    if dt is None:
+        return ""
+    if re.search(r"\d{1,2}:\d{2}", raw):
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    return dt.strftime("%Y-%m-%d")
+
+
+def _build_login_user_meetings_window_filter(date_from: str, date_to: str) -> dict[str, Any]:
+    date_from_value = _format_filter_datetime_boundary(date_from)
+    date_to_value = _format_filter_datetime_boundary(date_to)
+    return {
+        "operator": "and",
+        "operands": [
+            {
+                "field": "assigned_user_id",
+                "type": "eq",
+                "value": "{%LOGIN_USER%}",
+            },
+            {
+                "field": "date_start",
+                "fieldModule": None,
+                "fieldRel": None,
+                "type": "moreThanInclude",
+                "value": date_from_value,
+                "relationField": None,
+            },
+            {
+                "field": "date_start",
+                "fieldModule": None,
+                "fieldRel": None,
+                "type": "lessThanInclude",
+                "value": date_to_value,
+                "relationField": None,
+            },
+        ],
+    }
+
+
 def _sort_records_by_datetime(records: list[dict[str, Any]], field_name: str) -> list[dict[str, Any]]:
     return sorted(
         records,
@@ -1516,9 +1576,15 @@ def build_tools(
                 result_payload = {"warning": "RAG unavailable", "results": []}
                 tcl.set_output(result_payload)
                 return json.dumps(result_payload, ensure_ascii=False)
-            wide_limit = max(10, int(limit or 5) * 4)
-            results = rag_service.search(tenant_id=tenant_id, query=query, limit=wide_limit)
             module_filter = _safe_text(module).lower()
+            account_lookup_query = (
+                _normalize_account_lookup_query(query)
+                if module_filter == "accounts"
+                else query
+            )
+
+            wide_limit = max(10, int(limit or 5) * 4)
+            results = rag_service.search(tenant_id=tenant_id, query=account_lookup_query, limit=wide_limit)
             if module_filter:
                 filtered: list[dict[str, Any]] = []
                 for item in results:
@@ -1537,7 +1603,7 @@ def build_tools(
                     rag_service=rag_service,
                     tenant_id=tenant_id,
                     module=module_filter,
-                    query=query,
+                    query=account_lookup_query,
                     limit=max(10, int(limit or 5) * 4),
                 )
                 results = _dedupe_rag_hits_by_record(results + lexical_hits, limit=max(10, int(limit or 5) * 4))
@@ -1546,7 +1612,7 @@ def build_tools(
                 if module_filter == "accounts":
                     wide_results = rag_service.search(
                         tenant_id=tenant_id,
-                        query=query,
+                        query=account_lookup_query,
                         limit=max(30, limit * 8),
                     )
                     contact_rows = _extract_rag_records(wide_results, module_hint="contacts")
@@ -1555,7 +1621,7 @@ def build_tools(
                         account_id, account_name = _contact_row_account_ref(row)
                         if not account_id or not account_name:
                             continue
-                        if _score_text_match(query, account_name) < 65:
+                        if _score_text_match(account_lookup_query, account_name) < 65:
                             continue
                         derived_accounts.append(
                             {
@@ -1565,7 +1631,7 @@ def build_tools(
                             }
                         )
                     picked = _select_account_candidates(
-                        company_name=query,
+                        company_name=account_lookup_query,
                         records=derived_accounts,
                         limit=limit,
                         min_name_score=65,
@@ -1590,8 +1656,8 @@ def build_tools(
                     # CRM-backed fallback for account names when Qdrant account payloads are sparse.
                     try:
                         query_variants: list[str] = []
-                        normalized_query = _normalize_text(query)
-                        for value in (query, normalized_query):
+                        normalized_query = _normalize_text(account_lookup_query)
+                        for value in (account_lookup_query, normalized_query):
                             candidate = _safe_text(value)
                             if candidate and candidate not in query_variants:
                                 query_variants.append(candidate)
@@ -1637,7 +1703,7 @@ def build_tools(
                                 row_name = _record_primary_name(row)
                                 if not row_id or not row_name:
                                     continue
-                                score = _score_lexical_fuzzy(query, row_name)
+                                score = _score_lexical_fuzzy(account_lookup_query, row_name)
                                 if score < 0.55:
                                     continue
                                 existing = crm_hits_by_id.get(row_id)
@@ -1769,6 +1835,106 @@ def build_tools(
             tcl.set_output({"result_count": len(results[: max(1, int(limit or 5))]), "module_filter": _safe_text(module).lower()})
             return json.dumps(results[: max(1, int(limit or 5))], ensure_ascii=False)
 
+    @tool("my_meetings_tool")
+    async def my_meetings_tool(
+        date_from: str,
+        date_to: str,
+        limit: int = 100,
+    ) -> str:
+        """
+        Returns current logged-in user's meetings in a date window.
+
+        date_from/date_to: timeframe boundaries (ISO date: YYYY-MM-DD).
+        Uses CRM filter with assigned_user_id = {%LOGIN_USER%}.
+
+        This tool is intended for:
+        - displaying "my meetings" in a period
+        - checking time-window conflicts before creating a new meeting
+        """
+        if settings.crm_mode.lower() == "off":
+            return json.dumps({"status": "crm-disabled", "message_to_user": "CRM je vypnuté."}, ensure_ascii=False)
+
+        from_boundary = _format_filter_datetime_boundary(date_from)
+        to_boundary = _format_filter_datetime_boundary(date_to)
+        if not from_boundary or not to_boundary:
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": "Invalid date_from/date_to. Use YYYY-MM-DD.",
+                    "cards": [],
+                },
+                ensure_ascii=False,
+            )
+
+        from_dt = _parse_datetime(from_boundary)
+        to_dt = _parse_datetime(to_boundary)
+        if from_dt is None or to_dt is None or from_dt > to_dt:
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": "Invalid timeframe: date_from must be <= date_to.",
+                    "cards": [],
+                },
+                ensure_ascii=False,
+            )
+
+        crm_filter = _build_login_user_meetings_window_filter(from_boundary, to_boundary)
+        payload = {
+            "limit": max(1, min(int(limit), 500)),
+            "offset": 0,
+            "filter": crm_filter,
+            "include_field_names": False,
+            "response_fields": [
+                "id",
+                "name",
+                "date_start",
+                "status",
+                "location",
+                "assigned_user_name",
+                "parent_name",
+            ],
+            "order": [{"field": "date_start", "sort": "ASC", "module": "Meetings"}],
+        }
+
+        async with ToolCallLogger(
+            "my_meetings_tool",
+            tenant_id,
+            user_id,
+            inputs={"date_from": date_from, "date_to": date_to, "limit": limit},
+        ) as tcl:
+            try:
+                raw = await crm_client.execute_module_action(
+                    module="Meetings",
+                    action="list",
+                    data=payload,
+                )
+            except Exception as exc:
+                error_payload = {"status": "error", "message": str(exc), "cards": []}
+                tcl.set_output(error_payload)
+                return json.dumps(error_payload, ensure_ascii=False)
+
+            records = _extract_records(raw)
+            total = len(records)
+            cards = _meeting_cards(records, total, force_table=True)
+
+            summary_lines: list[str] = []
+            for row in records[:15]:
+                summary_lines.append(
+                    f"• {_format_date(row.get('date_start'))} — {_record_name(row)} ({_safe_text(row.get('status'))})"
+                )
+
+            result = {
+                "status": "ok",
+                "module": "Meetings",
+                "date_from": from_boundary,
+                "date_to": to_boundary,
+                "total": total,
+                "summary": "\n".join(summary_lines) if summary_lines else "Žádné záznamy.",
+                "cards": cards,
+            }
+            tcl.set_output({"total": total, "module": "Meetings"})
+            return json.dumps(result, ensure_ascii=False)
+
     @tool("crm_query_tool")
     async def crm_query_tool(
         module: str,
@@ -1844,7 +2010,7 @@ def build_tools(
             )
             order = build_order(order_by)
 
-            print(f"Built CRM filter: {json.dumps(crm_filter, ensure_ascii=False)}")
+            # print(f"Built CRM filter: {json.dumps(crm_filter, ensure_ascii=False)}")
 
             data: dict = {
                 "limit": max(1, min(int(limit), 100)),
@@ -1862,7 +2028,7 @@ def build_tools(
                     data=data,
                 )
 
-                print(f"Raw CRM response: {json.dumps(raw, ensure_ascii=False)}")
+                # print(f"Raw CRM response: {json.dumps(raw, ensure_ascii=False)}")
             except Exception as exc:
                 error_payload = {"status": "error", "message": str(exc), "cards": []}
                 tcl.set_output(error_payload)
@@ -1870,8 +2036,8 @@ def build_tools(
 
             records = _extract_records(raw)
 
-            print(f"Extracted {len(records)} records from CRM response.")
-            print(f"First 10 records: {json.dumps(records[:10], ensure_ascii=False)}")
+            # print(f"Extracted {len(records)} records from CRM response.")
+            # print(f"First 10 records: {json.dumps(records[:10], ensure_ascii=False)}")
 
             cards: list[dict] = []
             module_lower = module.strip().lower()
@@ -1885,8 +2051,8 @@ def build_tools(
             else:
                 cards = _generic_cards(records, total)
 
-            print(f"Generated {len(cards)} cards for module '{module}'.")
-            print(f"First 5 cards: {json.dumps(cards[:5], ensure_ascii=False)}")
+            # print(f"Generated {len(cards)} cards for module '{module}'.")
+            # print(f"First 5 cards: {json.dumps(cards[:5], ensure_ascii=False)}")
 
             summary_lines = []
             for row in records[:10]:
@@ -1908,4 +2074,4 @@ def build_tools(
             tcl.set_output({"total": total, "module": module})
             return json.dumps(result, ensure_ascii=False)
 
-    return [crm_action_tool, rag_search_tool, crm_query_tool]
+    return [crm_action_tool, rag_search_tool, my_meetings_tool, crm_query_tool]
