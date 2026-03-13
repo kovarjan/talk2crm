@@ -112,7 +112,9 @@ ENV/
 env/
 env.bak/
 venv.bak/
-*INI.md
+/*INI.md
+/*DE.md
+/*TS.md
 
 # Spyder project settings
 .spyderproject
@@ -145,3 +147,6 @@ sugar_voice_bridge.db*
 
 cache/*
 /*.mp3
+
+# Git worktrees
+.worktrees/
