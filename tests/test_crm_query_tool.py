@@ -123,7 +123,7 @@ def test_crm_query_tool_invalid_filters_json():
     tools = _make_tools()
     tool = _get_tool(tools, "crm_query_tool")
     result = json.loads(asyncio.run(tool.ainvoke({"module": "Contacts", "filters": "not-valid-json"})))
-    assert result["status"] == "error"
+    assert result["status"] in {"error", "tool_validation_error"}
     assert "Invalid filters JSON" in result["message"]
 
 

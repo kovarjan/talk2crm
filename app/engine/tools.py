@@ -16,6 +16,16 @@ from app.services.crm_client import SugarClient
 from app.services.crm_write_service import CRMWriteService
 from app.engine.filter_builder import FilterSpec, build_filter, build_order
 from app.engine.tool_logger import ToolCallLogger
+from app.engine.tool_validator import (
+    CrmActionToolArgs,
+    CrmQueryToolArgs,
+    MyMeetingsToolArgs,
+    RagSearchToolArgs,
+    validate_crm_action_call,
+    validate_crm_query_call,
+    validate_my_meetings_call,
+    validate_rag_search_call,
+)
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -1498,7 +1508,7 @@ def build_tools(
         helpers=read_helpers,
     )
 
-    @tool("crm_action_tool")
+    @tool("crm_action_tool", args_schema=CrmActionToolArgs)
     async def crm_action_tool(module: str, action: str, data_json: str = "{}") -> str:
         """
         Create, update, or delete CRM records. Use ONLY for write operations.
@@ -1541,6 +1551,11 @@ def build_tools(
             "crm_action_tool", tenant_id, user_id,
             inputs={"module": module, "action": action, "data_json": data_json},
         ) as tcl:
+            validation_error = validate_crm_action_call(module=module, action=action, data_json=data_json)
+            if validation_error:
+                error_payload = {"status": "tool_validation_error", "message": validation_error}
+                tcl.set_output(error_payload)
+                return json.dumps(error_payload, ensure_ascii=False)
             try:
                 result = await write_service.execute_action(
                     module=module, action=action, data_json=data_json
@@ -1552,7 +1567,7 @@ def build_tools(
             tcl.set_output({"status": result.get("status"), "module": module, "action": action})
             return json.dumps(result, ensure_ascii=False)
 
-    @tool("rag_search_tool")
+    @tool("rag_search_tool", args_schema=RagSearchToolArgs)
     async def rag_search_tool(query: str, limit: int = 5, module: str = "") -> str:
         """
         Semantic vector search across tenant knowledge in Qdrant.
@@ -1572,6 +1587,11 @@ def build_tools(
             "rag_search_tool", tenant_id, user_id,
             inputs={"query": query, "limit": limit, "module": module},
         ) as tcl:
+            validation_error = validate_rag_search_call(query=query, limit=limit, module=module)
+            if validation_error:
+                error_payload = {"status": "tool_validation_error", "message": validation_error, "results": []}
+                tcl.set_output(error_payload)
+                return json.dumps(error_payload, ensure_ascii=False)
             if rag_service is None:
                 result_payload = {"warning": "RAG unavailable", "results": []}
                 tcl.set_output(result_payload)
@@ -1835,7 +1855,7 @@ def build_tools(
             tcl.set_output({"result_count": len(results[: max(1, int(limit or 5))]), "module_filter": _safe_text(module).lower()})
             return json.dumps(results[: max(1, int(limit or 5))], ensure_ascii=False)
 
-    @tool("my_meetings_tool")
+    @tool("my_meetings_tool", args_schema=MyMeetingsToolArgs)
     async def my_meetings_tool(
         date_from: str,
         date_to: str,
@@ -1853,6 +1873,13 @@ def build_tools(
         """
         if settings.crm_mode.lower() == "off":
             return json.dumps({"status": "crm-disabled", "message_to_user": "CRM je vypnuté."}, ensure_ascii=False)
+
+        validation_error = validate_my_meetings_call(date_from=date_from, date_to=date_to, limit=limit)
+        if validation_error:
+            return json.dumps(
+                {"status": "tool_validation_error", "message": validation_error, "cards": []},
+                ensure_ascii=False,
+            )
 
         from_boundary = _format_filter_datetime_boundary(date_from)
         to_boundary = _format_filter_datetime_boundary(date_to)
@@ -1935,7 +1962,7 @@ def build_tools(
             tcl.set_output({"total": total, "module": "Meetings"})
             return json.dumps(result, ensure_ascii=False)
 
-    @tool("crm_query_tool")
+    @tool("crm_query_tool", args_schema=CrmQueryToolArgs)
     async def crm_query_tool(
         module: str,
         search: str | None = None,
@@ -1992,6 +2019,18 @@ def build_tools(
                     "date_from": date_from, "date_to": date_to,
                     "order_by": order_by, "limit": limit},
         ) as tcl:
+            validation_error = validate_crm_query_call(
+                module=module,
+                filters=filters,
+                date_from=date_from,
+                date_to=date_to,
+                limit=limit,
+                order_by=order_by,
+            )
+            if validation_error:
+                error_payload = {"status": "tool_validation_error", "message": validation_error, "cards": []}
+                tcl.set_output(error_payload)
+                return json.dumps(error_payload, ensure_ascii=False)
             try:
                 parsed_filters = [FilterSpec(**f) for f in json.loads(filters or "[]")]
             except Exception as exc:

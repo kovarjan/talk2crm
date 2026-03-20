@@ -37,7 +37,7 @@ def get_agent_executor(tenant_id: str, tools: list) -> AgentExecutor:
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
         model=settings.llm_model,
-        temperature=settings.llm_temperature,
+        # temperature=settings.llm_temperature,
     )
     now = datetime.now()
     current_date = now.strftime("%Y-%m-%d %H:%M:%S")
