@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import unicodedata
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -13,108 +12,100 @@ if TYPE_CHECKING:
     from app.services.crm_client import SugarClient
 
 
-
-def _normalize_text(value: str) -> str:
-    lowered = (value or "").strip().lower()
-    unaccented = "".join(
+def _norm(text: str) -> str:
+    lowered = (text or "").strip().lower()
+    return "".join(
         c for c in unicodedata.normalize("NFD", lowered) if unicodedata.category(c) != "Mn"
     )
-    return re.sub(r"[^a-z0-9]+", " ", unaccented).strip()
 
 
+def _meetings_date_range(text: str) -> tuple[str, str] | None:
+    """Return (date_from, date_to) ISO strings if text is a meeting list query, else None."""
+    n = _norm(text)
 
-def _extract_records(value: Any) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    record_list_keys = {"records", "entry_list", "items"}
-
-    def is_record_candidate(item: dict[str, Any]) -> bool:
-        if "vname" in item and "type" in item and "name" in item and "id" not in item:
-            return False
-        return bool(str(item.get("id") or "").strip())
-
-    def walk(node: Any, parent_key: str = "") -> None:
-        if isinstance(node, list):
-            if parent_key in record_list_keys:
-                for item in node:
-                    if isinstance(item, dict) and is_record_candidate(item):
-                        records.append(item)
-            for item in node:
-                walk(item, parent_key="")
-            return
-
-        if not isinstance(node, dict):
-            return
-
-        for key, child in node.items():
-            walk(child, parent_key=key)
-
-    walk(value)
-
-    if not records and isinstance(value, dict):
-        if bool(str(value.get("id") or "").strip()):
-            records.append(value)
-
-    deduped: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in records:
-        rec_id = str(item.get("id") or "").strip()
-        if not rec_id or rec_id in seen:
-            continue
-        seen.add(rec_id)
-        deduped.append(item)
-    return deduped
-
-
-
-def _parse_datetime(value: str) -> datetime | None:
-    raw = str(value or "").strip()
-    if not raw:
+    # Must mention meetings
+    if not any(k in n for k in ("schuzk", "meeting", "schuzku")):
         return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(raw, fmt)
-        except ValueError:
-            continue
+
+    # Must be a query (not a create/update)
+    mutation = ("vytvor", "zaloz", "naplanuj", "pridej", "uprav", "zmen", "smaz")
+    if any(k in n for k in mutation):
+        return None
+
+    now = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if any(k in n for k in ("pristi tyd", "pristi tyde", "next week")):
+        days_to_monday = (7 - now.weekday()) % 7 or 7
+        start = now + timedelta(days=days_to_monday)
+        end = start + timedelta(days=6)
+    elif any(k in n for k in ("tento tyd", "tento tyde", "this week", "tento tyden")):
+        start = now - timedelta(days=now.weekday())
+        end = start + timedelta(days=6)
+    elif any(k in n for k in ("zitra", "tomorrow")):
+        start = now + timedelta(days=1)
+        end = start
+    elif any(k in n for k in ("dnes", "dnesni", "today")):
+        start = now
+        end = now
+    elif any(k in n for k in ("tento mesic", "this month")):
+        start = now.replace(day=1)
+        next_month = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        end = next_month - timedelta(days=1)
+    else:
+        # default: next 14 days
+        start = now
+        end = now + timedelta(days=14)
+
+    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+
+async def _handle_list_meetings(
+    date_from: str,
+    date_to: str,
+    crm_client: "SugarClient",
+    user_id: str,
+) -> dict[str, Any]:
+    from app.engine.tools import (
+        _build_login_user_meetings_window_filter,
+        _extract_records,
+        _format_date,
+        _meeting_cards,
+        _record_name,
+        _safe_text,
+    )
+
+    crm_filter = _build_login_user_meetings_window_filter(date_from, date_to)
+    payload = {
+        "limit": 100,
+        "offset": 0,
+        "filter": crm_filter,
+        "include_field_names": False,
+        "response_fields": ["id", "name", "date_start", "status", "location", "assigned_user_name", "parent_name"],
+        "order": [{"field": "date_start", "sort": "ASC", "module": "Meetings"}],
+    }
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00")).replace(tzinfo=None)
-    except Exception:
-        return None
+        raw = await crm_client.execute_module_action(module="Meetings", action="list", data=payload)
+    except Exception as exc:
+        return {"status": "error", "message": str(exc), "cards": [], "output": str(exc)}
 
-
-
-def _format_contact_name(item: dict[str, Any]) -> str:
-    first = str(item.get("first_name") or "").strip()
-    last = str(item.get("last_name") or "").strip()
-    full = f"{first} {last}".strip()
-    return full or str(item.get("name") or "(bez jména)").strip()
-
-
-def _build_meetings_week_filter(week_start: datetime, week_end: datetime) -> dict[str, Any]:
+    records = _extract_records(raw)
+    total = len(records)
+    cards = _meeting_cards(records, total, force_table=True)
+    summary_lines = [
+        f"• {_format_date(r.get('date_start'))} — {_record_name(r)} ({_safe_text(r.get('status'))})"
+        for r in records[:20]
+    ]
+    summary = "\n".join(summary_lines) if summary_lines else "Žádné schůzky v daném období."
     return {
-        "operator": "and",
-        "operands": [
-            {
-                "operator": "and",
-                "operands": [
-                    {
-                        "field": "date_start",
-                        "fieldModule": None,
-                        "fieldRel": None,
-                        "type": "moreThanInclude",
-                        "value": week_start.strftime("%Y-%m-%d"),
-                        "relationField": None,
-                    },
-                    {
-                        "field": "date_start",
-                        "fieldModule": None,
-                        "fieldRel": None,
-                        "type": "lessThanInclude",
-                        "value": (week_end - timedelta(days=1)).strftime("%Y-%m-%d"),
-                        "relationField": None,
-                    },
-                ],
-            }
-        ],
+        "status": "ok",
+        "module": "Meetings",
+        "date_from": date_from,
+        "date_to": date_to,
+        "total": total,
+        "summary": summary,
+        "message_to_user": summary,
+        "cards": cards,
+        "output": json.dumps({"status": "ok", "total": total, "summary": summary}, ensure_ascii=False),
     }
 
 
@@ -125,9 +116,19 @@ async def try_handle_quick_action(
     user_id: str,
     action_confirmation: bool,
 ) -> dict[str, Any] | None:
+    # Fast-path: meeting list queries
+    date_range = _meetings_date_range(input_text)
+    if date_range is not None:
+        date_from, date_to = date_range
+        return await _handle_list_meetings(date_from, date_to, crm_client, user_id)
+
+    # Fast-path: create_contact / create_meeting (NLU-parsed)
     parser = CommandParser()
     command = parser.parse(input_text)
     if command is None:
+        return None
+
+    if command.intent not in {"create_contact", "create_meeting"}:
         return None
 
     write_service = CRMWriteService(
@@ -139,108 +140,4 @@ async def try_handle_quick_action(
         rag_service=None,
         action_confirmation=action_confirmation,
     )
-
-    if command.intent in {"create_contact", "create_meeting"}:
-        return await write_service.execute_quick_command(command)
-
-    normalized = _normalize_text(input_text)
-
-    if command.intent == "latest_leads":
-        result = await crm_client.execute_module_action(
-            "Leads",
-            "list",
-            {"query": "", "max_results": 10},
-        )
-        leads = _extract_records(result)
-        if not leads:
-            return {
-                "status": "ok",
-                "output": json.dumps(result, ensure_ascii=False),
-                "message_to_user": "Nenašel jsem žádné zájemce.",
-            }
-
-        lines = ["Nejnovější zájemci:"]
-        for idx, lead in enumerate(leads[:10], start=1):
-            name = _format_contact_name(lead)
-            company = str(lead.get("account_name") or lead.get("company") or "").strip()
-            status = str(lead.get("status") or "").strip()
-            modified = str(lead.get("date_modified") or lead.get("date_entered") or "").strip()
-            detail = f"{idx}. {name}"
-            if company:
-                detail += f" ({company})"
-            if status:
-                detail += f" - {status}"
-            if modified:
-                detail += f" [{modified}]"
-            lines.append(detail)
-
-        return {
-            "status": "ok",
-            "output": json.dumps(result, ensure_ascii=False),
-            "message_to_user": "\n".join(lines),
-        }
-
-    if command.intent == "week_meetings":
-        now = datetime.now()
-        week_start = now - timedelta(days=now.weekday())
-        week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
-        week_end = week_start + timedelta(days=7)
-
-        result = await crm_client.execute_module_action(
-            "Meetings",
-            "list",
-            {
-                "limit": 500,
-                "offset": 0,
-                "filter": _build_meetings_week_filter(week_start, week_end),
-                "include_field_names": False,
-                "response_fields": [
-                    "id",
-                    "name",
-                    "date_start",
-                    "status",
-                    "location",
-                    "assigned_user_name",
-                    "parent_name",
-                ],
-                "order": [{"field": "date_start", "sort": "ASC", "module": "Meetings"}],
-            },
-        )
-        meetings = _extract_records(result)
-
-        selected: list[dict[str, Any]] = []
-        for item in meetings:
-            dt = _parse_datetime(str(item.get("date_start") or ""))
-            if dt is None or not (week_start <= dt < week_end):
-                continue
-            selected.append(item)
-
-        selected.sort(key=lambda row: _parse_datetime(str(row.get("date_start") or "")) or datetime.max)
-
-        if not selected:
-            return {
-                "status": "ok",
-                "output": json.dumps(result, ensure_ascii=False),
-                "message_to_user": "Na tento týden nemáte naplánované žádné schůzky.",
-            }
-
-        lines = ["Schůzky tento týden:"]
-        for idx, meeting in enumerate(selected[:15], start=1):
-            name = str(meeting.get("name") or "(bez názvu)").strip()
-            when = str(meeting.get("date_start") or "").strip()
-            status = str(meeting.get("status") or "").strip()
-            place = str(meeting.get("location") or "").strip()
-            detail = f"{idx}. {when} - {name}"
-            if status:
-                detail += f" ({status})"
-            if place:
-                detail += f" [{place}]"
-            lines.append(detail)
-
-        return {
-            "status": "ok",
-            "output": json.dumps(result, ensure_ascii=False),
-            "message_to_user": "\n".join(lines),
-        }
-
-    return None
+    return await write_service.execute_quick_command(command)

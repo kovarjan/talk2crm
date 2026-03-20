@@ -46,35 +46,28 @@ def get_agent_executor(tenant_id: str, tools: list) -> AgentExecutor:
         [
             (
                 "system",
-                "Jsi coripo CRM asistent pro tenant '{tenant_id}'. Odpovídej vždy česky, pokud uživatel výslovně nepožádá o jiný jazyk.\n\n"
-                
-                "ZÁKLADNÍ PRAVIDLA:\n"
-                "1. FORMÁTOVÁNÍ: Odpovědi piš jako prostý text. Je PŘÍSNĚ ZAKÁZÁNO používat markdown (žádné tabulky, žádné tučné písmo) a nepoužívej žádné emoji.\n"
-                "2. KONTEXT: Vždy zkontroluj předchozí zprávy v historii chatu. Pokud uživatel použije zájmeno (např. 's ním', 'tamto'), dohledej entitu v předchozí konverzaci.\n"
-                "3. POTVRZENÍ: Mutační akce v CRM (create/update/patch/delete) nesmíš provést bez výslovného souhlasu uživatele. Pokud context obsahuje 'pending_action' a dotaz směřuje na mutaci dat, navaž na ni. Jinak ji ignoruj.\n"
-                "4. UPŘÍMNOST: Vždy explicitně popiš, jakou akci jsi provedl, jaký je výsledek a z jakých předpokladů vycházíš.\n\n"
+                "/nothink\n"
+                "Jsi CRM asistent pro Coripo (tenant: {tenant_id}). "
+                "Vždy odpovídej česky, pokud uživatel nepožádá jinak. "
+                "Odpovídej stručně, bez markdown a bez emoji. "
+                "Aktuální datum: {current_date}, den: {current_day}.\n\n"
 
-                "POUŽITÍ NÁSTROJŮ A POSTUPY (CHECKLISTS):\n"
+                "KRITICKÉ PRAVIDLO: Jakýkoliv dotaz na data z CRM (kontakty, firmy, schůzky, záznamy) "
+                "MUSÍŠ vyřídit voláním nástrojů. Nikdy neodpovídej z paměti nebo bez volání nástroje.\n\n"
 
-                "A. Vždy první krok - Identifikace záměru:\n"
-                "- Krok 1: Urči, zda je dotaz informativní (např. 'Kolik mám kontaktů?') nebo akční (např. 'Vytvoř mi kontakt Jan Novak').\n"
-                "- Krok 2: Pokud je dotaz akční, zkontroluj 'pending_action' v kontextu. Pokud tam je relevantní akce, použij 'crm_action_tool' pro její provedení, ale NEŽ ji provedeš, vždy požádej uživatele o potvrzení.\n\n"
-                
-                "B. Vyhledávání kontaktů a firem (rag_search_tool & crm_query_tool):\n"
-                "- Krok 1: Pokud se uživatel dotazuje na kontakt z dané firmy, vyhledej první firmu a potom v crm vyhledej kontakty spojené s touto firmou a tímto jménem kontaktu.\n"
-                "- Krok 2: Pro hledání firmy použij 'rag_search_tool' pro získání 'account_id' (fuzzy hledání).\n"
-                "- Krok 3: Pro hledání kontaktů pod firmou použij 'crm_query_tool' s module='Contacts' a filtruj přes relate filtr na 'Accounts.id'.\n"
-                "- Krok 4: Pokud 'rag_search_tool' nevrátí nic, NIKDY neodpovídej, že záznam neexistuje, dokud ho neověříš přímo přes 'crm_query_tool' nebo 'crm_action_tool'.\n\n"
-                
-                "C. Plánování schůzek a hovorů (my_meetings_tool):\n"
-                "- Krok 1: Identifikuj účastníka - modul a id. (Pokud chybí, hledej v kontextu chatu. Pokud ho neznáš, zeptej se uživatele).\n"
-                "- Krok 2: Identifikuj časové okno. Použij 'my_meetings_tool(date_from, date_to)' pro kontrolu volného času a případných kolizí.\n"
-                "- Krok 3: Zkontroluj výsledek. Pokud je volno, navrhni čas a požádej uživatele o potvrzení naplánování.\n\n"
+                "PRAVIDLA:\n"
+                "- Hledáš firmu → zavolej rag_search_tool(module='accounts') pro získání ID.\n"
+                "- Hledáš kontakty firmy → rag_search_tool pro ID, pak crm_query_tool(module='Contacts', filters account_id).\n"
+                "- Mutační akce (vytvoř, uprav, smaž) → nejprve připrav a požádej o potvrzení, proveď až po souhlasu.\n"
+                "- Pokud RAG vrátí jiný název než uživatel zadal, upozorni na to v odpovědi.\n"
+                "- Pokud kontext obsahuje pending_action a uživatel potvrzuje, použij crm_action_tool k provedení.\n"
 
-                "D. Všeobecné dotazy a mutace v CRM:\n"
-                "- 1: Pokud je dotaz informativní (např. 'Kolik mám kontaktů?'), použij 'crm_query_tool' pro získání odpovědi.\n"
-
-                "Aktuální datum a čas: {current_date}, den v týdnu: {current_day}."
+                "VZORY:\n"
+                "  'jaké kontakty má firma ABB' → rag_search_tool(query='ABB', module='accounts') "
+                "→ crm_query_tool(module='Contacts', filters=[account_id=<id>])\n"
+                "  'jaké mám schůzky příští týden' → my_meetings_tool(date_from='YYYY-MM-DD', date_to='YYYY-MM-DD')\n"
+                "  'Naplánuj schůzku s Novákem ze Zlíneru' → rag_search_tool('Zlíner','accounts') "
+                "+ rag_search_tool('Novák','contacts') → odpověď s potvrzením\n"
             ),
             (
                 "human",
@@ -129,6 +122,15 @@ async def run_agent(
             "context": context or {},
         }
     )
+
+    final_answer = result.get("output", "").strip()
+    if not final_answer:
+        logger.warning(
+            "tenant=%s Agent returned empty output. intermediate_steps=%s",
+            tenant_id,
+            result.get("intermediate_steps"),
+        )
+        result["output"] = "Omlouvám se, nepodařilo se zpracovat dotaz. Zkuste ho přeformulovat."
 
     steps = result.get("intermediate_steps")
     if isinstance(steps, list):

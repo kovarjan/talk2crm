@@ -34,7 +34,8 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./talk2crm.db"
 
     llm_base_url: str = "http://localhost:11434/v1"
-    llm_model: str = "qwen3.5:latest"
+    llm_model: str = "qwen3.5"
+    llm_title_model: str = "llama3"
     llm_api_key: str = "EMPTY"
     llm_temperature: float = 0.1
     llm_context_window_tokens: int = 32768
