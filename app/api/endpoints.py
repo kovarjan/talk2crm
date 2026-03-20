@@ -52,6 +52,7 @@ from app.services.crm_client import SugarClient
 from app.services.tenant_manager import TenantManager
 from database.models import Chat, ChatMessage
 from database.session import get_db
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 
@@ -263,58 +264,6 @@ def _try_parse_json(text: str) -> dict[str, Any] | None:
         return None
 
 
-def _extract_top_account_id_from_rag_observation(observation: Any) -> str | None:
-    items: list[Any]
-    if isinstance(observation, str):
-        try:
-            parsed = json.loads(observation)
-        except Exception:
-            parsed = None
-        items = parsed if isinstance(parsed, list) else []
-    elif isinstance(observation, list):
-        items = observation
-    else:
-        items = []
-
-    best_score = float("-inf")
-    best_id = ""
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        payload = item.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        record = payload.get("record")
-        record_id = ""
-        if isinstance(record, dict):
-            record_id = str(record.get("id") or "").strip()
-        if not record_id:
-            record_id = str(payload.get("record_id") or "").strip()
-        if not record_id:
-            continue
-        module_name = str(payload.get("module") or "").strip().lower()
-        if module_name and module_name not in {"accounts", "account"}:
-            continue
-        score_raw = item.get("score")
-        score = float(score_raw) if isinstance(score_raw, (int, float)) else 0.0
-        if score > best_score:
-            best_score = score
-            best_id = record_id
-    return best_id or None
-
-
-def _extract_rag_account_id_from_steps(steps: Any) -> str | None:
-    if not isinstance(steps, list):
-        return None
-    for step in reversed(steps):
-        if not isinstance(step, dict):
-            continue
-        if str(step.get("tool") or "").strip() != "rag_search_tool":
-            continue
-        account_id = _extract_top_account_id_from_rag_observation(step.get("observation"))
-        if account_id:
-            return account_id
-    return None
 
 
 def _looks_like_noise(text: str) -> bool:
@@ -691,35 +640,44 @@ async def _generate_chat_name_with_llm(
         return _fallback_chat_name(history)
 
     settings = get_settings()
-    llm = ChatOpenAI(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        model=settings.llm_model,
-        temperature=0,
-    )
-    prompt = (
-        "Jsi asistent, který vytváří krátké názvy konverzací v češtině.\n"
-        "Pravidla:\n"
-        "- vrať pouze název (žádné vysvětlení)\n"
-        "- 2 až 6 slov\n"
-        "- max 80 znaků\n"
-        "- bez uvozovek a bez tečky na konci\n\n"
-        f"Konverzace:\n{transcript}\n\název:"
-    )
-    try:
-        response = await llm.ainvoke(prompt)
-        raw = response.content if hasattr(response, "content") else str(response)
-        if isinstance(raw, list):
-            raw = " ".join(str(part) for part in raw)
-        cleaned = _sanitize_chat_name(str(raw))
-        if cleaned:
-            return cleaned
-    except Exception:
-        logger.exception(
-            "Chat title generation failed tenant=%s user=%s",
-            tenant_id,
-            user_id,
+    messages = [
+        SystemMessage(content="/nothink"),
+        HumanMessage(
+            content=(
+                "Jsi asistent, který vytváří krátké názvy konverzací v češtině.\n"
+                "Pravidla:\n"
+                "- vrať pouze název (žádné vysvětlení)\n"
+                "- 2 až 6 slov\n"
+                "- max 80 znaků\n"
+                "- bez uvozovek a bez tečky na konci\n\n"
+                f"Konverzace:\n{transcript}\n\název:"
+            )
+        ),
+    ]
+    models_to_try = list(dict.fromkeys([settings.llm_title_model, settings.llm_model]))
+    for model_name in models_to_try:
+        llm = ChatOpenAI(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=model_name,
+            temperature=0,
+            max_tokens=200,
         )
+        try:
+            response = await llm.ainvoke(messages)
+            raw = response.content if hasattr(response, "content") else str(response)
+            if isinstance(raw, list):
+                raw = " ".join(str(part) for part in raw)
+            cleaned = _sanitize_chat_name(str(raw))
+            if cleaned:
+                return cleaned
+        except Exception:
+            logger.warning(
+                "Chat title generation failed with model=%s tenant=%s user=%s",
+                model_name,
+                tenant_id,
+                user_id,
+            )
 
     return _fallback_chat_name(history)
 
@@ -851,143 +809,6 @@ async def _process_input_core(
                     tools=tools,
                 )
                 agent_result = _normalize_agent_result_for_ui(agent_result)
-                if settings.read_service_v2_active and _is_read_only_data_query(payload.input_text):
-                    steps = agent_result.get("intermediate_steps")
-                    read_tool_used = False
-                    if isinstance(steps, list):
-                        for step in steps:
-                            if not isinstance(step, dict):
-                                continue
-                            if str(step.get("tool") or "").strip() in {
-                                "crm_data_tool",
-                                "crm_search_tool",
-                                "crm_query_tool",
-                                "my_meetings_tool",
-                            }:
-                                read_tool_used = True
-                                break
-
-                    needs_fallback = not read_tool_used
-                    if not needs_fallback:
-                        message_probe = _to_user_message(str(agent_result.get("message_to_user") or ""))
-                        needs_fallback = not message_probe
-                    if not needs_fallback:
-                        message_probe = _to_user_message(str(agent_result.get("message_to_user") or ""))
-                        if "Nerozuměla jsem spolehlivě požadavku" in message_probe:
-                            needs_fallback = True
-
-                    if needs_fallback:
-                        crm_data_tool = next(
-                            (tool for tool in tools if str(getattr(tool, "name", "")).strip() == "crm_data_tool"),
-                            None,
-                        )
-                        if crm_data_tool is not None:
-                            fallback_raw = await crm_data_tool.ainvoke(
-                                {
-                                    "query": payload.input_text,
-                                    "query_type": "auto",
-                                    "limit": 10,
-                                }
-                            )
-                            fallback_obs = _try_parse_json(str(fallback_raw)) or {}
-                            if isinstance(fallback_obs, dict) and fallback_obs:
-                                fallback_message = _to_user_message(str(fallback_obs.get("message_to_user") or ""))
-                                agent_result = {
-                                    "status": str(fallback_obs.get("status") or "ok"),
-                                    "output": json.dumps(fallback_obs, ensure_ascii=False),
-                                    "message_to_user": fallback_message
-                                    or _to_user_message(str(agent_result.get("message_to_user") or "")),
-                                    "cards": fallback_obs.get("cards") if isinstance(fallback_obs.get("cards"), list) else [],
-                                    "intermediate_steps": [
-                                        {
-                                            "tool": "crm_data_tool",
-                                            "tool_input": {
-                                                "query": payload.input_text,
-                                                "query_type": "auto",
-                                                "limit": 10,
-                                            },
-                                            "observation": fallback_obs,
-                                            "log": "deterministic_read_fallback",
-                                        }
-                                    ],
-                                }
-                                execution_mode = "deterministic_read_fallback"
-                        else:
-                            crm_query_tool = next(
-                                (tool for tool in tools if str(getattr(tool, "name", "")).strip() == "crm_query_tool"),
-                                None,
-                            )
-                            rag_search_tool = next(
-                                (tool for tool in tools if str(getattr(tool, "name", "")).strip() == "rag_search_tool"),
-                                None,
-                            )
-                            if crm_query_tool is not None and rag_search_tool is not None:
-                                account_id = _extract_rag_account_id_from_steps(steps)
-                                rag_obs: Any = None
-                                if not account_id:
-                                    rag_raw = await rag_search_tool.ainvoke(
-                                        {"query": payload.input_text, "module": "accounts", "limit": 5}
-                                    )
-                                    try:
-                                        rag_obs = json.loads(str(rag_raw))
-                                    except Exception:
-                                        rag_obs = None
-                                    account_id = _extract_top_account_id_from_rag_observation(rag_obs)
-
-                                if account_id:
-                                    filters_json = json.dumps(
-                                        [{"field": "account_id", "op": "eq", "value": account_id}],
-                                        ensure_ascii=False,
-                                    )
-                                    query_raw = await crm_query_tool.ainvoke(
-                                        {"module": "Contacts", "filters": filters_json, "limit": 50}
-                                    )
-                                    query_obs = _try_parse_json(str(query_raw)) or {}
-                                    if isinstance(query_obs, dict) and query_obs:
-                                        summary = _to_user_message(
-                                            str(
-                                                query_obs.get("message_to_user")
-                                                or query_obs.get("summary")
-                                                or ""
-                                            )
-                                        )
-                                        fallback_steps: list[dict[str, Any]] = []
-                                        if rag_obs is not None:
-                                            fallback_steps.append(
-                                                {
-                                                    "tool": "rag_search_tool",
-                                                    "tool_input": {
-                                                        "query": payload.input_text,
-                                                        "module": "accounts",
-                                                        "limit": 5,
-                                                    },
-                                                    "observation": rag_obs,
-                                                    "log": "deterministic_read_fallback",
-                                                }
-                                            )
-                                        fallback_steps.append(
-                                            {
-                                                "tool": "crm_query_tool",
-                                                "tool_input": {
-                                                    "module": "Contacts",
-                                                    "filters": filters_json,
-                                                    "limit": 50,
-                                                },
-                                                "observation": query_obs,
-                                                "log": "deterministic_read_fallback",
-                                            }
-                                        )
-                                        agent_result = {
-                                            "status": str(query_obs.get("status") or "ok"),
-                                            "output": json.dumps(query_obs, ensure_ascii=False),
-                                            "message_to_user": summary
-                                            or _to_user_message(str(agent_result.get("message_to_user") or "")),
-                                            "cards": query_obs.get("cards")
-                                            if isinstance(query_obs.get("cards"), list)
-                                            else [],
-                                            "intermediate_steps": fallback_steps,
-                                        }
-                                        execution_mode = "deterministic_query_fallback"
             except Exception as exc:
                 logger.exception(
                     "Agent execution failed tenant=%s user=%s chat=%s",

@@ -23,25 +23,6 @@ _CRM_ID_RE = re.compile(
     r"^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
 )
 _PLACEHOLDER_ID_RE = re.compile(r"^[A-Z_]+_ID$")
-_CZECH_PERSON_RE = re.compile(
-    (
-        r"\b(?:pan[ií]|panem|pan)\s+([^,.;:]+?)"
-        r"(?=\s+(?:z|ze|na|v|ve|o|ohledn[eě]|kv[uů]li|k|do|od|u)\b|$)"
-    ),
-    re.IGNORECASE,
-)
-_PERSON_WITH_PREPOSITION_RE = re.compile(
-    r"\b(?:s|se)\s+([^,.;:]+?)(?=\s+(?:z|ze|na|v|ve|o|ohledn[eě]|kv[uů]li|k|do|od|u)\b|$)",
-    re.IGNORECASE,
-)
-_COMPANY_RE = re.compile(
-    r"\b(?:firma|firmy|spole[cč]nost|company)\s+([^,.;:]+?)(?=\s+(?:na|v|ohledn[eě]|s|od|u)\b|$)",
-    re.IGNORECASE,
-)
-_TOPIC_RE = re.compile(
-    r"\b(?:ohledn[eě]|s\s+pozn[aá]mkou)\s+([^,.;:]+)",
-    re.IGNORECASE,
-)
 _TIME_RE = re.compile(r"\b(?P<hour>\d{1,2})[:.](?P<minute>\d{2})\b")
 
 
@@ -119,10 +100,6 @@ class ModuleAdjustmentEngine:
             contact_id = None
         if account_id and not self._is_valid_crm_id(account_id):
             account_id = None
-
-        text_contact_hint, text_account_hint = self._extract_text_hints(self.input_text)
-        contact_name = contact_name or text_contact_hint
-        account_name = account_name or text_account_hint
 
         if not account_id and account_name:
             account_candidate = await self._resolve_record_by_name(scope="accounts", name=account_name)
@@ -243,10 +220,6 @@ class ModuleAdjustmentEngine:
                 ctx_entities,
                 ["account", "account_name", "company", "company_name"],
             )
-
-        text_contact_hint, text_account_hint = self._extract_text_hints(self.input_text)
-        contact_name = contact_name or text_contact_hint
-        account_name = account_name or text_account_hint
 
         contact_candidate: dict[str, Any] | None = None
         account_candidate: dict[str, Any] | None = None
@@ -416,30 +389,6 @@ class ModuleAdjustmentEngine:
         return re.sub(r"[^a-z0-9]+", " ", unaccented).strip()
 
     @staticmethod
-    def _extract_text_hints(text: str) -> tuple[str | None, str | None]:
-        contact: str | None = None
-        account: str | None = None
-
-        person_match = _CZECH_PERSON_RE.search(text or "")
-        if person_match:
-            contact = person_match.group(1).strip()
-        else:
-            prep_match = _PERSON_WITH_PREPOSITION_RE.search(text or "")
-            if prep_match:
-                candidate = prep_match.group(1).strip()
-                candidate_norm = ModuleAdjustmentEngine._normalize_text(candidate)
-                if candidate_norm and not any(
-                    token in candidate_norm for token in ("firma", "firm", "spolecnost", "company")
-                ):
-                    contact = candidate
-
-        company_match = _COMPANY_RE.search(text or "")
-        if company_match:
-            account = company_match.group(1).strip()
-
-        return contact, account
-
-    @staticmethod
     def _extract_last_name(full_name: str | None) -> str | None:
         text = str(full_name or "").strip()
         if not text:
@@ -472,12 +421,6 @@ class ModuleAdjustmentEngine:
 
     @classmethod
     def _derive_topic(cls, fields: dict[str, Any], input_text: str) -> str:
-        match = _TOPIC_RE.search(input_text or "")
-        if match:
-            topic = match.group(1).strip().rstrip(".")
-            if topic:
-                return topic[0].upper() + topic[1:]
-
         for key in ("description", "note", "subject"):
             val = str(fields.get(key) or "").strip()
             if val:
