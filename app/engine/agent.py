@@ -89,10 +89,11 @@ PRAVIDLO: Vždy zavolej nástroj. Nikdy neodpovídej z paměti.
 
 DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
 1. rag_search_tool(query: str, module: str="", limit: int=5)
-   — hledání firem/kontaktů v RAG indexu. Použij pro získání account_id/contact_id.
+   — sémantické/fuzzy hledání v RAG indexu. Použij pro získání account_id/contact_id.
 
 2. crm_query_tool(module: str, filters: str="[]", search: str=null, limit: int=20)
-   — přesný dotaz do CRM. filters je JSON pole [{{"field":"...","op":"eq","value":"..."}}]
+   — přesný dotaz do CRM. Pro přesné lookupy jména osoby/firmy použij nejdřív search.
+     filters je JSON pole [{{"field":"...","op":"eq","value":"..."}}]
 
 3. my_meetings_tool(date_from: str, date_to: str, limit: int=100)
    — schůzky uživatele v období (ISO daty YYYY-MM-DD)
@@ -104,6 +105,7 @@ DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
 FORMÁT ODPOVĚDI:
 - Pokud chceš zavolat nástroj: <tool_call>{{"name": "jmeno_nastroje", "args": {{"param": "hodnota"}}}}</tool_call>
 - Pokud máš finální odpověď pro uživatele: <answer>Tvá odpověď česky</answer>
+- Pokud užvatel nezadá dostatečně přesný dotaz, doptej se na upřesnění.
 
 VZORY:
 Dotaz: "kontakty firmy Zlíner"
@@ -121,6 +123,10 @@ Krok 2 — vytvoř schůzku s contact_id z výsledku (data_json piš jako objekt
 → <tool_call>{{"name": "crm_action_tool", "args": {{"module": "Meetings", "action": "create", "data_json": {{"fields": {{"contact_name": "Libor Adamec", "contact_id": "abc-123", "date_start": "2026-04-08 09:00:00", "description": "..."}}}}}}}}}}</tool_call>
 Krok 3 — crm_action_tool vrátí {{"status":"confirmation_required"}}. Okamžitě:
 → <answer>Připraveno: schůzka s Liborem Adamcem v úterý 8.4. v 9:00. Potvrďte prosím provedení.</answer>
+
+Dotaz: "Naplánuj schůzku s Petrem na zítra"
+→ <tool_call>{{"name": "rag_search_tool", "args": {{"query": "Petr", "module": "contacts"}}}}</tool_call>
+Model: "Našel jsem 3 kontakty jménem Petr. Potřebuji upřesnit, o kterého Petera se jedná. Můžeš mi dát více informací, jako je název firmy, pozice, nebo jiné detaily?"
 """
 
 

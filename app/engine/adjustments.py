@@ -22,6 +22,9 @@ _UUID_RE = re.compile(
 _CRM_ID_RE = re.compile(
     r"^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
 )
+_CRM_SCOPED_ID_RE = re.compile(
+    r"^(?P<module>[A-Za-z]+)[-:/](?P<id>(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}))$"
+)
 _PLACEHOLDER_ID_RE = re.compile(r"^[A-Z_]+_ID$")
 _TIME_RE = re.compile(r"\b(?P<hour>\d{1,2})[:.](?P<minute>\d{2})\b")
 
@@ -94,12 +97,14 @@ class ModuleAdjustmentEngine:
         )
         self._drop_helper_fields(fields)
 
-        contact_id = self._first_nonempty(fields, ["contact_id", "related_contact_id", "invite_contact_id"])
-        account_id = self._first_nonempty(fields, ["account_id", "related_account_id", "company_id"])
-        if contact_id and not self._is_valid_crm_id(contact_id):
-            contact_id = None
-        if account_id and not self._is_valid_crm_id(account_id):
-            account_id = None
+        contact_id = self._canonicalize_related_id(
+            self._first_nonempty(fields, ["contact_id", "related_contact_id", "invite_contact_id"]),
+            expected_modules={"contacts", "contact"},
+        )
+        account_id = self._canonicalize_related_id(
+            self._first_nonempty(fields, ["account_id", "related_account_id", "company_id"]),
+            expected_modules={"accounts", "account"},
+        )
 
         if not account_id and account_name:
             account_candidate = await self._resolve_record_by_name(scope="accounts", name=account_name)
@@ -199,16 +204,28 @@ class ModuleAdjustmentEngine:
             ],
         )
 
-        if contact_id and not self._is_valid_crm_id(contact_id):
+        contact_id = self._canonicalize_related_id(
+            contact_id,
+            expected_modules={"contacts", "contact"},
+        )
+        account_id = self._canonicalize_related_id(
+            account_id,
+            expected_modules={"accounts", "account"},
+        )
+
+        if not contact_id:
             fields.pop("contact_id", None)
             fields.pop("related_contact_id", None)
             fields.pop("invite_contact_id", None)
-            contact_id = None
-        if account_id and not self._is_valid_crm_id(account_id):
+        else:
+            fields["contact_id"] = contact_id
+
+        if not account_id:
             fields.pop("account_id", None)
             fields.pop("related_account_id", None)
             fields.pop("company_id", None)
-            account_id = None
+        else:
+            fields["account_id"] = account_id
 
         ctx_entities = self.request_context.get("entities", {})
         if isinstance(ctx_entities, dict):
@@ -418,6 +435,31 @@ class ModuleAdjustmentEngine:
         if _PLACEHOLDER_ID_RE.match(text):
             return False
         return bool(_CRM_ID_RE.match(text))
+
+    @classmethod
+    def _canonicalize_related_id(
+        cls,
+        value: str | None,
+        *,
+        expected_modules: set[str] | None = None,
+    ) -> str | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if cls._is_valid_crm_id(text):
+            return text
+
+        scoped = _CRM_SCOPED_ID_RE.match(text)
+        if not scoped:
+            return None
+
+        module = str(scoped.group("module") or "").strip().lower()
+        record_id = str(scoped.group("id") or "").strip()
+        if expected_modules and module not in expected_modules:
+            return None
+        if not cls._is_valid_crm_id(record_id):
+            return None
+        return record_id
 
     @classmethod
     def _derive_topic(cls, fields: dict[str, Any], input_text: str) -> str:
@@ -633,10 +675,22 @@ class ModuleAdjustmentEngine:
                     row_id = str(row).strip()
                 if not row_id:
                     continue
-                if module in {"Contacts", "Leads"} and not ModuleAdjustmentEngine._is_valid_crm_id(
-                    row_id
-                ):
-                    continue
+                if module == "Contacts":
+                    canonical = ModuleAdjustmentEngine._canonicalize_related_id(
+                        row_id,
+                        expected_modules={"contacts", "contact"},
+                    )
+                    if not canonical:
+                        continue
+                    row_id = canonical
+                elif module == "Leads":
+                    canonical = ModuleAdjustmentEngine._canonicalize_related_id(
+                        row_id,
+                        expected_modules={"leads", "lead"},
+                    )
+                    if not canonical:
+                        continue
+                    row_id = canonical
                 out.append({"id": row_id})
             normalized[module] = out
         return normalized
@@ -646,8 +700,22 @@ class ModuleAdjustmentEngine:
         value = str(invitee_id).strip()
         if not value:
             return
-        if module in {"Contacts", "Leads"} and not ModuleAdjustmentEngine._is_valid_crm_id(value):
-            return
+        if module == "Contacts":
+            canonical = ModuleAdjustmentEngine._canonicalize_related_id(
+                value,
+                expected_modules={"contacts", "contact"},
+            )
+            if not canonical:
+                return
+            value = canonical
+        elif module == "Leads":
+            canonical = ModuleAdjustmentEngine._canonicalize_related_id(
+                value,
+                expected_modules={"leads", "lead"},
+            )
+            if not canonical:
+                return
+            value = canonical
         rows = invitees.setdefault(module, [])
         if any(str(row.get("id") or "").strip() == value for row in rows):
             return

@@ -183,6 +183,18 @@ class TenantRAGService:
                 distance=models.Distance.COSINE,
             ),
         )
+        try:
+            self.client.create_payload_index(
+                collection_name=collection_name,
+                field_name="text",
+                field_schema=models.TextIndexParams(
+                    type="text",
+                    tokenizer=models.TokenizerType.WORD,
+                    lowercase=True,
+                ),
+            )
+        except Exception:
+            logger.warning("Could not create full-text index on collection=%s", collection_name)
         self._ensured_collections.add(collection_name)
         logger.info("Created Qdrant collection name=%s", collection_name)
 
@@ -210,29 +222,67 @@ class TenantRAGService:
 
     def search(self, *, tenant_id: str, query: str, limit: int = 5) -> list[dict[str, Any]]:
         collection = self._tenant_collection(tenant_id)
+
+        # --- Text filter pass (keyword match on stored JSON text) ---
+        text_ids: set[str] = set()
+        text_results: list[dict[str, Any]] = []
+        try:
+            text_filter = models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="text",
+                        match=models.MatchText(text=query),
+                    )
+                ]
+            )
+            scroll_points, _ = self.client.scroll(
+                collection_name=collection,
+                scroll_filter=text_filter,
+                with_payload=True,
+                with_vectors=False,
+                limit=limit,
+            )
+            for point in scroll_points:
+                pid = str(getattr(point, "id", "") or "")
+                text_ids.add(pid)
+                text_results.append({"score": 1.0, "payload": point.payload})
+        except Exception:
+            pass  # full-text index may not exist on old collections
+
+        # --- Vector similarity pass ---
         query_vector = self.embedder.embed(query)
-        if hasattr(self.client, "search"):
-            points = self.client.search(
-                collection_name=collection,
-                query_vector=query_vector,
-                limit=limit,
-                with_payload=True,
-            )
-        else:
-            query_response = self.client.query_points(
-                collection_name=collection,
-                query=query_vector,
-                limit=limit,
-                with_payload=True,
-            )
-            points = query_response.points
-        return [
-            {
-                "score": point.score,
-                "payload": point.payload,
-            }
-            for point in points
-        ]
+        vector_limit = max(limit, limit * 2)  # fetch extra to fill after dedup
+        try:
+            if hasattr(self.client, "search"):
+                vec_points = self.client.search(
+                    collection_name=collection,
+                    query_vector=query_vector,
+                    limit=vector_limit,
+                    with_payload=True,
+                )
+            else:
+                vec_points = self.client.query_points(
+                    collection_name=collection,
+                    query=query_vector,
+                    limit=vector_limit,
+                    with_payload=True,
+                ).points
+        except Exception:
+            vec_points = []
+
+        # Merge: text matches first (exact keyword hits), then vector results for
+        # records not already included, up to the requested limit.
+        seen_ids = set(text_ids)
+        combined = list(text_results)
+        for point in vec_points:
+            pid = str(getattr(point, "id", "") or "")
+            if pid not in seen_ids:
+                seen_ids.add(pid)
+                combined.append({"score": point.score, "payload": point.payload})
+            if len(combined) >= limit:
+                break
+
+        return combined[:limit]
 
     def count(self, *, tenant_id: str, module: str | None = None) -> int:
         collection = self._tenant_collection(tenant_id)
