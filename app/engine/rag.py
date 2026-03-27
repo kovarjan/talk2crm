@@ -8,6 +8,7 @@ import warnings
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 from qdrant_client import QdrantClient, models
 
 from app.core.config import get_settings
@@ -38,6 +39,68 @@ class HashEmbedder:
         return [v / norm for v in acc]
 
 
+class OllamaEmbedder:
+    """Embedder backed by an OpenAI-compatible /embeddings endpoint (e.g. LiteLLM proxy).
+
+    Provides both a synchronous embed() for search paths and an async aembed()
+    for ingest paths, so callers don't need to be converted to async.
+    """
+
+    def __init__(self, *, base_url: str, model: str, size: int, api_key: str | None, fallback: HashEmbedder):
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.size = size
+        self._fallback = fallback
+        self._headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+    def _request_body(self, text: str) -> dict:
+        return {"model": self.model, "input": text}
+
+    def embed(self, text: str) -> list[float]:
+        """Synchronous embed — used by search paths that cannot be awaited."""
+        if not text:
+            return [0.0] * self.size
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    f"{self.base_url}/embeddings",
+                    json=self._request_body(text),
+                    headers=self._headers,
+                )
+            response.raise_for_status()
+            return response.json()["data"][0]["embedding"]
+        except Exception:
+            logger.warning(
+                "OllamaEmbedder sync request failed model=%s base_url=%s — using hash fallback",
+                self.model,
+                self.base_url,
+                exc_info=True,
+            )
+            return self._fallback.embed(text)
+
+    async def aembed(self, text: str) -> list[float]:
+        """Async embed — used by ingest paths for better throughput."""
+        if not text:
+            return [0.0] * self.size
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{self.base_url}/embeddings",
+                    json=self._request_body(text),
+                    headers=self._headers,
+                )
+            response.raise_for_status()
+            return response.json()["data"][0]["embedding"]
+        except Exception:
+            logger.warning(
+                "OllamaEmbedder async request failed model=%s base_url=%s — using hash fallback",
+                self.model,
+                self.base_url,
+                exc_info=True,
+            )
+            return self._fallback.embed(text)
+
+
 class TenantRAGService:
     def __init__(self):
         settings = get_settings()
@@ -45,7 +108,27 @@ class TenantRAGService:
         self.client = self._build_client_with_fallback()
         self.collection_prefix = settings.qdrant_collection
         self._ensured_collections: set[str] = set()
-        self.embedder = HashEmbedder(settings.rag_embedding_size)
+        self.embedder = self._build_embedder()
+
+    def _build_embedder(self) -> OllamaEmbedder | HashEmbedder:
+        base_url = (self.settings.rag_embedding_base_url or "").strip()
+        fallback = HashEmbedder(self.settings.rag_embedding_size)
+        if not base_url:
+            logger.info("Embedder: HashEmbedder (no rag_embedding_base_url configured)")
+            return fallback
+        embedder = OllamaEmbedder(
+            base_url=base_url,
+            model=self.settings.rag_embedding_model,
+            size=self.settings.rag_embedding_size,
+            api_key=self.settings.rag_embedding_api_key,
+            fallback=fallback,
+        )
+        logger.info(
+            "Embedder: %s at %s",
+            self.settings.rag_embedding_model,
+            base_url,
+        )
+        return embedder
 
     def _build_client_with_fallback(self) -> QdrantClient:
         try:
@@ -78,6 +161,19 @@ class TenantRAGService:
             return
         existing = {item.name for item in self.client.get_collections().collections}
         if collection_name in existing:
+            try:
+                info = self.client.get_collection(collection_name)
+                existing_size = info.config.params.vectors.size  # type: ignore[union-attr]
+                if existing_size != self.settings.rag_embedding_size:
+                    logger.warning(
+                        "Qdrant collection vector size mismatch — re-ingest required "
+                        "collection=%s existing_size=%s configured_size=%s",
+                        collection_name,
+                        existing_size,
+                        self.settings.rag_embedding_size,
+                    )
+            except Exception:
+                pass
             self._ensured_collections.add(collection_name)
             return
         self.client.create_collection(
@@ -89,6 +185,12 @@ class TenantRAGService:
         )
         self._ensured_collections.add(collection_name)
         logger.info("Created Qdrant collection name=%s", collection_name)
+
+    async def _aembed(self, text: str) -> list[float]:
+        """Async embed for ingest paths — uses aembed() on OllamaEmbedder, embed() on HashEmbedder."""
+        if isinstance(self.embedder, OllamaEmbedder):
+            return await self.embedder.aembed(text)
+        return self.embedder.embed(text)
 
     @staticmethod
     def _sanitize_collection_segment(value: str) -> str:
@@ -166,7 +268,7 @@ class TenantRAGService:
                 break
         return total
 
-    def ingest_records(self, *, tenant_id: str, module: str, records: list[dict[str, Any]]) -> int:
+    async def ingest_records(self, *, tenant_id: str, module: str, records: list[dict[str, Any]]) -> int:
         collection = self._tenant_collection(tenant_id)
         prepared: list[dict[str, Any]] = []
         for raw_record in records:
@@ -174,7 +276,7 @@ class TenantRAGService:
             record.pop("_record_hash", None)
             record_id = str(record.get("id") or uuid.uuid4())
             point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{tenant_id}:{module}:{record_id}"))
-            text = json.dumps(record, ensure_ascii=False, sort_keys=True)
+            text = self._clean_embed_text(json.dumps(record, ensure_ascii=False, sort_keys=True))
             prepared.append(
                 {
                     "record": record,
@@ -203,7 +305,7 @@ class TenantRAGService:
             points.append(
                 models.PointStruct(
                     id=item["point_id"],
-                    vector=self.embedder.embed(item["text"]),
+                    vector=await self._aembed(item["text"]),
                     payload={
                         "tenant_id": tenant_id,
                         "module": module,
@@ -236,6 +338,12 @@ class TenantRAGService:
             skipped_unchanged,
         )
         return inserted
+
+    @staticmethod
+    def _clean_embed_text(text: str) -> str:
+        """Normalise text before embedding — strip noisy URL tails that add no semantic value."""
+        # Shorten Teams meeting links to their origin; the full join URL is just noise.
+        return re.sub(r"https://teams\.microsoft\.com/[^\s\"']+", "teams.microsoft.com", text)
 
     @staticmethod
     def _record_hash(record: dict[str, Any]) -> str:
@@ -439,7 +547,7 @@ class TenantRAGService:
 
             inserted = 0
             if selected_records:
-                inserted = self.ingest_records(
+                inserted = await self.ingest_records(
                     tenant_id=tenant_id,
                     module=module,
                     records=selected_records,
@@ -486,4 +594,4 @@ class TenantRAGService:
                 module,
             )
             return 0
-        return self.ingest_records(tenant_id=tenant_id, module=module, records=records)
+        return await self.ingest_records(tenant_id=tenant_id, module=module, records=records)
