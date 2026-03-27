@@ -10,8 +10,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from unittest.mock import patch
+
+from app.core.config import get_settings
 from app.engine.adjustments import ModuleAdjustmentEngine
-from app.engine.quick_actions import try_handle_quick_action
+from app.engine.quick_actions import QuickActionResult, try_handle_quick_action
 from app.engine.tools import build_tools
 
 
@@ -74,8 +77,8 @@ class DummyCrmClient:
 
 
 
-def _outcome_from_quick(result: dict[str, Any]) -> str:
-    pending = result.get("pending_action") if isinstance(result.get("pending_action"), dict) else {}
+def _outcome_from_quick(result: QuickActionResult) -> str:
+    pending = result.data.get("pending_action") if isinstance(result.data.get("pending_action"), dict) else {}
     data = pending.get("data") if isinstance(pending.get("data"), dict) else {}
     fields = data.get("fields") if isinstance(data.get("fields"), dict) else {}
     return "resolved" if str(fields.get("parent_type") or "") == "Contacts" else "unresolved"
@@ -97,15 +100,17 @@ def test_resolution_outcome_parity_across_quick_adjustment_and_read_tool() -> No
     text = "naplánuj schůzku s Karlem vybíhalem z firmy zliner na středu ráno"
     client = DummyCrmClient()
 
-    quick_result = asyncio.run(
-        try_handle_quick_action(
-            input_text=text,
-            crm_client=client,  # type: ignore[arg-type]
-            user_id="28",
-            action_confirmation=False,
+    with patch.object(get_settings(), "quick_action_min_confidence", 0.0):
+        quick_result = asyncio.run(
+            try_handle_quick_action(
+                input_text=text,
+                crm_client=client,  # type: ignore[arg-type]
+                user_id="28",
+                action_confirmation=False,
+            )
         )
-    )
-    assert isinstance(quick_result, dict)
+    assert isinstance(quick_result, QuickActionResult)
+    assert not quick_result.should_fallback
 
     adjustment_engine = ModuleAdjustmentEngine(
         tenant_id="ai-local",

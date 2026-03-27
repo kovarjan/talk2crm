@@ -73,6 +73,12 @@ class Settings(BaseSettings):
     resolver_ambiguity_gap_threshold: float = 0.08
     resolver_strict_mutation_confirmation: bool = True
 
+    quick_action_enabled: bool = True
+    quick_action_fallback_on_no_candidates: bool = True
+    quick_action_fallback_on_ambiguous: bool = True
+    quick_action_fallback_on_exception: bool = True
+    quick_action_min_confidence: float = 1.0
+
     hmac_keys_json: str = Field(default="{}")
     hmac_max_skew_seconds: int = 300
 

@@ -10,7 +10,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.engine.quick_actions import try_handle_quick_action
+from unittest.mock import patch
+
+from app.core.config import get_settings
+from app.engine.quick_actions import QuickActionResult, try_handle_quick_action
 from app.engine.tools import build_tools
 
 
@@ -61,17 +64,19 @@ def _assert_pending_contract(pending: dict[str, Any]) -> None:
 def test_pending_action_contract_is_canonical_for_quick_action_and_tool() -> None:
     client = DummyCrmClient()
 
-    quick_result = asyncio.run(
-        try_handle_quick_action(
-            input_text="naplánuj schůzku s Karlem vybíhalem z firmy zliner na středu ráno",
-            crm_client=client,  # type: ignore[arg-type]
-            user_id="28",
-            action_confirmation=False,
+    with patch.object(get_settings(), "quick_action_min_confidence", 0.0):
+        quick_result = asyncio.run(
+            try_handle_quick_action(
+                input_text="naplánuj schůzku s Karlem vybíhalem z firmy zliner na středu ráno",
+                crm_client=client,  # type: ignore[arg-type]
+                user_id="28",
+                action_confirmation=False,
+            )
         )
-    )
-    assert isinstance(quick_result, dict)
-    assert quick_result.get("status") == "confirmation_required"
-    quick_pending = quick_result.get("pending_action") or {}
+    assert isinstance(quick_result, QuickActionResult)
+    assert not quick_result.should_fallback
+    assert quick_result.data.get("status") == "confirmation_required"
+    quick_pending = quick_result.data.get("pending_action") or {}
     _assert_pending_contract(quick_pending)
 
     tools = build_tools(

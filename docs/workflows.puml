@@ -1,0 +1,493 @@
+' ============================================================
+' DIAGRAM 1 — Main Request Processing Flow
+' ============================================================
+@startuml diagram_1_request_flow
+!theme plain
+skinparam defaultFontSize 12
+skinparam ArrowColor #555
+skinparam BackgroundColor #FAFAFA
+skinparam NoteBackgroundColor #FFFDE7
+skinparam NoteBorderColor #F9A825
+
+title [1] Main Request Processing Flow\nPOST /process-input/
+
+start
+
+:HTTP Request\n(input_text, chat_id, context, return_voice);
+
+partition "Auth & Tenant Resolution" {
+  :Extract headers\n(X-Tenant, X-User-Id, Authorization);
+  :TenantManager.get_credentials(tenant_id)\n-> decrypt crm_token;
+  :Init SugarClient + TenantRAGService;
+}
+
+partition "Chat & State Loading" {
+  :Load or create Chat (by chat_id);
+  :Load latest pending_action\nfrom last assistant ChatMessage;
+  note right
+    pending_action stored in
+    ChatMessage.metadata JSON
+  end note
+}
+
+partition "Execution Path Decision" {
+  if (pending_action exists?) then (yes)
+    if (confirm_action=true\nOR non-readonly query?) then (yes)
+      :merge_context_with_pending_action()\n(add entity hints to context);
+      :execution_mode = "pending_patch";
+      :try_patch_pending_action(input_text, pending_action)\n-> update slots from new input;
+    else (no)
+      :treat as new query;
+    endif
+  else (no)
+  endif
+
+  if (try_handle_quick_action(input_text)?) then (matched)
+    #LightGreen:QUICK ACTION PATH;
+    :CommandParser.parse(input_text)\n-> NormalizedCommand;
+    :CRMWriteService.execute_quick_command(command);
+    note right
+      Bypasses LLM entirely.
+      Czech regex patterns match
+      "create_contact", "create_meeting",
+      "latest_leads", "week_meetings"
+    end note
+    if (action_confirmation?) then (no)
+      :Build pending_action_envelope;
+      :Return confirmation_required response;
+      stop
+    else (yes)
+      :Execute CRM mutation;
+    endif
+  else (no match)
+    #LightBlue:AGENT PATH;
+    :run_agent(input_text, chat_history, tools, context);
+  endif
+}
+
+partition "Response Finalization" {
+  :Normalize result for UI\n(format cards, links, pending_action);
+  :Persist Chat + ChatMessage to DB;
+  if (return_voice?) then (yes)
+    :edge-tts voice synthesis;
+  endif
+  :Return HTTP Response;
+}
+
+stop
+@enduml
+
+
+' ============================================================
+' DIAGRAM 2 — LangChain Agent Execution Loop
+' ============================================================
+@startuml diagram_2_agent_loop
+!theme plain
+skinparam defaultFontSize 12
+skinparam ArrowColor #555
+skinparam BackgroundColor #FAFAFA
+skinparam NoteBackgroundColor #FFFDE7
+skinparam NoteBorderColor #F9A825
+
+title [2] LangChain Agent Execution Loop\napp/engine/agent.py -- run_agent()
+
+start
+
+:Build system prompt (Czech)\nwith date context (today/tomorrow/this_week/next_week);
+:Assemble messages:\n[SystemMessage, ...chat_history, HumanMessage(input)];
+
+note right
+  System prompt includes:
+  - Current date/time context
+  - Available tools list with examples
+  - "Always call a tool. Never answer from memory."
+end note
+
+:iteration = 0, empty_count = 0;
+
+while (iteration < 6?) is (continue)
+  :Chat.ainvoke(messages)\n-> AIMessage response;
+  :OllamaPayloadCallback logs\nfull payload to ollama_chat.log;
+
+  if (<tool_call>...</tool_call> found?) then (yes)
+    :Extract tool name + args JSON;
+    :Validate args via tool_validator;
+    if (valid?) then (yes)
+      :Lookup tool in tools_by_name dict;
+      :await tool_obj.ainvoke(args)\n-> observation string;
+      :Append AIMessage(tool_call) +\nHumanMessage(observation) to messages;
+      :Log LLM_STEP_TOOL_RESULT;
+      :iteration++;
+    else (no)
+      :Append validation error as observation;
+      :iteration++;
+    endif
+  elseif (<answer>...</answer> found?) then (yes)
+    :Extract final_answer;
+    break
+  elseif (plain text, no tags?) then (yes)
+    :Use as final_answer;
+    break
+  else (empty response)
+    :empty_count++;
+    if (empty_count < 2?) then (yes)
+      :Append push prompt:\n"Zavolej nyni prislusny nastroj...";
+    else (no)
+      break
+    endif
+  endif
+endwhile (max iterations reached)
+
+if (final_answer empty?) then (yes)
+  :Synthesize from last tool observation;
+endif
+
+:Return {output, intermediate_steps};
+note right
+  intermediate_steps = list of:
+  {tool, tool_input, observation}
+end note
+
+stop
+@enduml
+
+
+' ============================================================
+' DIAGRAM 3 — Available Tools
+' ============================================================
+@startuml diagram_3_tools
+!theme plain
+skinparam defaultFontSize 12
+skinparam ArrowColor #555
+skinparam BackgroundColor #FAFAFA
+skinparam NoteBackgroundColor #FFFDE7
+skinparam NoteBorderColor #F9A825
+skinparam rectangleBackgroundColor #F5F5F5
+skinparam rectangleBorderColor #AAAAAA
+
+title [3] Available Tools\napp/engine/tools.py -- build_tools()
+
+rectangle "crm_query_tool\n(read-only)" #LightCyan {
+  rectangle "Args: module, filters (JSON), search, limit\n-> SugarClient.execute_module_action()\nReturns: filtered/searched CRM records\nUse: list contacts, accounts, meetings" as CQT_body #LightCyan
+}
+
+rectangle "crm_action_tool\n(mutations)" #FFE0E0 {
+  rectangle "Args: module, action, data_json\n-> CRMWriteService.execute_action()\nReturns: result OR pending_action envelope\nUse: create/update/delete CRM records\nNote: triggers confirmation if not confirmed" as CAT_body #FFE0E0
+}
+
+rectangle "rag_search_tool\n(fuzzy search)" #E8F5E9 {
+  rectangle "Args: query, limit, module\n-> TenantRAGService.search()\n-> Qdrant vector similarity (cosine)\nReturns: ranked records with scores\nUse: fuzzy company/contact lookups" as RST_body #E8F5E9
+}
+
+rectangle "my_meetings_tool\n(calendar)" #FFF3E0 {
+  rectangle "Args: date_from, date_to, limit\n-> CRMReadService (meetings by user)\nReturns: user's meetings in date range\nUse: what meetings do I have this week?" as MMT_body #FFF3E0
+}
+@enduml
+
+
+' ============================================================
+' DIAGRAM 4 — CRM Write Service & Confirmation Flow
+' ============================================================
+@startuml diagram_4_write_service
+!theme plain
+skinparam defaultFontSize 12
+skinparam ArrowColor #555
+skinparam BackgroundColor #FAFAFA
+skinparam NoteBackgroundColor #FFFDE7
+skinparam NoteBorderColor #F9A825
+
+title [4] CRM Write Service & Confirmation Flow\napp/services/crm_write_service.py
+
+start
+
+:execute_action(module, action, data_json);
+
+:Parse data_json -> dict;
+:Infer effective_module from intent/context;
+
+partition "ModuleAdjustmentEngine" {
+  :Apply field defaults\n(e.g., duration, status);
+  :Resolve entity references\nvia EntityResolver;
+  :Build adjustments notes list;
+}
+
+if (mutation action?) then (yes)
+  if (action_confirmation = true?) then (confirmed)
+    #LightGreen:EXECUTE;
+    :SugarClient.execute_module_action()\n-> HTTP to Coripo API (HMAC signed);
+    if (success?) then (yes)
+      :TenantRAGService.ingest_from_crm()\n(update vector index);
+      :Return result + adjustments metadata;
+    else (error)
+      :Return error response;
+    endif
+  else (not confirmed)
+    #FFB300:HOLD FOR CONFIRMATION;
+    :build_pending_action_envelope();
+    note right
+      envelope = {
+        module, action, data,
+        adjustments, ambiguities,
+        requires_confirmation: true
+      }
+    end note
+    :Return {
+      status: "confirmation_required",
+      pending_action: envelope,
+      message: "Akce meni CRM data..."
+    };
+    note right
+      Stored in ChatMessage.metadata.
+      Executed on NEXT turn when
+      user confirms with confirm_action=true.
+    end note
+  endif
+else (read only)
+  :Pass through to CRMReadService;
+endif
+
+stop
+@enduml
+
+
+' ============================================================
+' DIAGRAM 5 — Entity Resolver Flow
+' ============================================================
+@startuml diagram_5_entity_resolver
+!theme plain
+skinparam defaultFontSize 12
+skinparam ArrowColor #555
+skinparam BackgroundColor #FAFAFA
+skinparam NoteBackgroundColor #FFFDE7
+skinparam NoteBorderColor #F9A825
+
+title [5] Entity Resolver Flow\napp/domain/entity_resolver.py
+
+start
+
+:resolve_record_by_name(scope, name, for_mutation);
+note right
+  scope: "contacts" or "accounts"
+  for_mutation: affects threshold used
+end note
+
+partition "Expand Name Variants" {
+  :expand_name_variants(name);
+  note right
+    Czech-aware expansion:
+    - Remove diacritics (Zliner -> Zliner)
+    - Tokenize + combinations (up to 16)
+    - Handle compound names
+  end note
+}
+
+partition "Search CRM" {
+  while (more variants?) is (yes)
+    :SugarClient.generic_search(variant, scope);
+    if (results empty?) then (yes)
+      :Fallback: execute_module_action(module, "list")\nfilter: name contains variant;
+    endif
+    :Collect all candidate records;
+  endwhile (done)
+}
+
+partition "Score Candidates" {
+  :Deduplicate by record_id\n(keep highest score per record);
+  note right
+    Scoring:
+    100 = exact match (normalized)
+     80 = substring match
+     60 * overlap_ratio = token overlap
+     85 max = SequenceMatcher >= 0.72
+  end note
+  :Sort by score descending;
+}
+
+partition "Resolution Decision" {
+  :top_score, second_score from top two;
+  :confidence = top_score / 100;
+  :gap = confidence - (second_score / 100);
+
+  if (for_mutation?) then (yes)
+    :threshold = mutation_confidence_threshold (0.70);
+  else (read)
+    :threshold = read_confidence_threshold (0.70);
+  endif
+
+  if (confidence >= threshold\nAND gap >= ambiguity_gap (0.08)?) then (yes)
+    #LightGreen:RESOLVED;
+    :Return EntityResolution(\n  status="resolved",\n  selected=top_record,\n  confidence=confidence\n);
+  else (no)
+    #FFB300:AMBIGUOUS;
+    :Return EntityResolution(\n  status="ambiguous",\n  candidates=top_5,\n  reason="low confidence or too close"\n);
+    note right
+      Ambiguous result triggers pending_action
+      with ambiguities list.
+      User must disambiguate before mutation.
+    end note
+  endif
+}
+
+stop
+@enduml
+
+
+' ============================================================
+' DIAGRAM 6 — Multi-Tenancy & Auth Flow
+' ============================================================
+@startuml diagram_6_multitenancy
+!theme plain
+skinparam defaultFontSize 12
+skinparam ArrowColor #555
+skinparam BackgroundColor #FAFAFA
+skinparam NoteBackgroundColor #FFFDE7
+skinparam NoteBorderColor #F9A825
+
+title [6] Multi-Tenancy & Auth Flow\napp/api/dependencies.py + app/services/tenant_manager.py
+
+start
+
+partition "Header Extraction" {
+  :Read X-Tenant-Id header;
+  :Read X-User-Id header;
+  :Read Authorization header (optional HMAC);
+}
+
+partition "Tenant Resolution" {
+  :TenantManager.get_credentials(tenant_id)\n(LRU cached);
+  :SQL: SELECT Tenant WHERE id=tenant_id AND active=true;
+  :decrypt_tenant_secret(crm_token_encrypted)\n-> Fernet symmetric decryption;
+
+  if (JSON blob?) then (yes)
+    :Parse: hmac_key_id, hmac_secret,\nsession_id, user_id;
+  elseif (UUID?) then (yes)
+    :Use as session_id\n(coripo_public mode);
+  elseif ("key:secret"?) then (yes)
+    :Split for HMAC auth;
+  else (plain string)
+    :Use as HMAC secret;
+  endif
+}
+
+partition "Scoped Initialization" {
+  :Init SugarClient(base_url, token, user_id)\n-> tenant-specific CRM HTTP client;
+  :Init TenantRAGService\n-> Qdrant collection: {prefix}_{tenant_id_sanitized};
+  :All DB queries filtered by tenant_id + user_id;
+  note right
+    Tenant isolation:
+    DB:  all queries scoped by tenant_id
+    CRM: separate credentials per tenant
+    RAG: separate Qdrant collection per tenant
+    Log: all ops tagged with tenant_id
+  end note
+}
+
+:Return TenantContext\n{tenant_id, user_id, crm_client, rag_service};
+
+stop
+@enduml
+
+
+' ============================================================
+' DIAGRAM 7 — Pending Action State Machine
+' ============================================================
+@startuml diagram_7_pending_action_states
+!theme plain
+skinparam defaultFontSize 12
+skinparam ArrowColor #555
+skinparam BackgroundColor #FAFAFA
+skinparam NoteBackgroundColor #FFFDE7
+skinparam NoteBorderColor #F9A825
+skinparam StateBackgroundColor #EEF
+skinparam StateBorderColor #669
+
+title [7] Pending Action Confirmation State Machine
+
+[*] --> Idle
+
+Idle --> Processing : User sends request
+
+Processing --> NoPending : No prior pending action in DB
+Processing --> HasPending : Load pending_action from DB
+
+NoPending --> Routing
+HasPending --> PatchFlow : confirm_action=true\nOR non-readonly query
+HasPending --> ReadFlow : Read-only query
+
+Routing --> QuickAction : Czech regex matches
+Routing --> AgentLoop : No quick action match
+
+QuickAction --> ConfirmRequired : Mutation without action_confirmation
+QuickAction --> Done : Read-only or confirmed
+
+AgentLoop --> ConfirmRequired : crm_action_tool called\nwithout confirmation
+AgentLoop --> Done : Read or confirmed mutation
+
+ConfirmRequired --> PendingSaved : Store envelope in\nChatMessage.metadata
+
+PendingSaved --> Idle : Await next user turn
+
+PatchFlow --> PatchApplied : try_patch_pending_action()\nupdate slots from new input
+PatchApplied --> Executed : execute_action(\naction_confirmation=true)
+Executed --> Done
+
+ReadFlow --> Done : Process read normally
+
+Done --> [*]
+
+note right of ConfirmRequired
+  pending_action envelope:
+  {module, action, data,
+  adjustments, ambiguities,
+  requires_confirmation: true}
+end note
+
+note right of PatchFlow
+  User may refine the pending
+  action by adding/changing
+  contact name, date, etc.
+end note
+@enduml
+
+
+' ============================================================
+' DIAGRAM 8 — RAG Search & Ingestion Flow
+' ============================================================
+@startuml diagram_8_rag
+!theme plain
+skinparam defaultFontSize 12
+skinparam ArrowColor #555
+skinparam BackgroundColor #FAFAFA
+skinparam NoteBackgroundColor #FFFDE7
+skinparam NoteBorderColor #F9A825
+
+title [8] RAG Search & Ingestion Flow\napp/engine/rag.py -- TenantRAGService
+
+partition "Search Flow" {
+  start
+  :rag_search_tool(query, limit, module);
+  :Get/create Qdrant collection\n"{prefix}_{sanitized_tenant_id}";
+  :HashEmbedder.embed(query)\n-> 384-dim deterministic vector;
+  note right
+    Dev: deterministic hash embedder.
+    Replace with real embedder in prod.
+  end note
+  :Qdrant.search_points(collection, vector, limit)\n-> cosine similarity ranking;
+  :Return [{payload: {module, record}, score}]\nsorted by score descending;
+  stop
+}
+
+partition "Ingestion Flow (triggered post-write)" {
+  start
+  :ingest_from_crm(tenant_id, crm_client, module);
+  :Fetch records from CRM module;
+  while (each record) is (next)
+    :point_id = hash(record_id + module);
+    :text = "{name} {description} {email} ...";
+    :vector = HashEmbedder.embed(text);
+    :Create Qdrant point {id, vector, payload};
+  endwhile (done)
+  :Batch upsert to Qdrant\n(batch_size=200);
+  stop
+}
+@enduml

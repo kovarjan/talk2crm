@@ -10,8 +10,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from unittest.mock import patch
+
+from app.core.config import get_settings
 from app.engine.adjustments import ModuleAdjustmentEngine
-from app.engine.quick_actions import try_handle_quick_action
+from app.engine.quick_actions import QuickActionResult, try_handle_quick_action
 
 
 class DummyCrmClient:
@@ -136,21 +139,23 @@ def test_name_variant_expansion_handles_instrumental_case() -> None:
 
 def test_quick_action_creates_confirmation_for_meeting_request() -> None:
     client = DummyCrmClient()
-    result = asyncio.run(
-        try_handle_quick_action(
-            input_text="Vytvoř schůzku s paní Mimrovou z firmy Panas na podnělí odpoledne",
-            crm_client=client,  # type: ignore[arg-type]
-            user_id="28",
-            action_confirmation=False,
+    with patch.object(get_settings(), "quick_action_min_confidence", 0.0):
+        result = asyncio.run(
+            try_handle_quick_action(
+                input_text="Vytvoř schůzku s paní Mimrovou z firmy Panas na podnělí odpoledne",
+                crm_client=client,  # type: ignore[arg-type]
+                user_id="28",
+                action_confirmation=False,
+            )
         )
-    )
 
-    assert isinstance(result, dict)
-    assert result.get("status") == "confirmation_required"
-    assert "Potvrďte prosím provedení" in str(result.get("message_to_user") or "")
-    assert "kontakt navázán" in str(result.get("message_to_user") or "").lower()
+    assert isinstance(result, QuickActionResult)
+    assert not result.should_fallback
+    assert result.data.get("status") == "confirmation_required"
+    assert "Potvrďte prosím provedení" in str(result.data.get("message_to_user") or "")
+    assert "kontakt navázán" in str(result.data.get("message_to_user") or "").lower()
 
-    pending = result.get("pending_action") or {}
+    pending = result.data.get("pending_action") or {}
     assert pending.get("module") == "Meetings"
     assert pending.get("action") == "create"
 
@@ -173,47 +178,51 @@ def test_quick_action_creates_confirmation_for_meeting_request() -> None:
 
 def test_quick_action_resolves_contact_from_non_title_phrase() -> None:
     client = DummyCrmClient()
-    result = asyncio.run(
-        try_handle_quick_action(
-            input_text="naplánuj schůzku s Karlem vybíhalem na středu ráno",
-            crm_client=client,  # type: ignore[arg-type]
-            user_id="28",
-            action_confirmation=False,
+    with patch.object(get_settings(), "quick_action_min_confidence", 0.0):
+        result = asyncio.run(
+            try_handle_quick_action(
+                input_text="naplánuj schůzku s Karlem vybíhalem na středu ráno",
+                crm_client=client,  # type: ignore[arg-type]
+                user_id="28",
+                action_confirmation=False,
+            )
         )
-    )
 
-    assert isinstance(result, dict)
-    assert result.get("status") == "confirmation_required"
+    assert isinstance(result, QuickActionResult)
+    assert not result.should_fallback
+    assert result.data.get("status") == "confirmation_required"
 
-    pending = result.get("pending_action") or {}
+    pending = result.data.get("pending_action") or {}
     data = pending.get("data") or {}
     fields = data.get("fields") or {}
-    assert "karl" in str(result.get("message_to_user") or "").lower()
+    assert "karl" in str(result.data.get("message_to_user") or "").lower()
 
     # For synthetic dummy dataset, fuzzy resolution picks the available contact.
     assert fields.get("parent_type") == "Contacts"
     assert fields.get("parent_id") == client.contact_id
     assert str(fields.get("contact_name") or "").strip()
-    assert "kontakt navázán" in str(result.get("message_to_user") or "").lower()
+    assert "kontakt navázán" in str(result.data.get("message_to_user") or "").lower()
 
 
 def test_quick_action_resolves_contact_when_phrase_contains_company_clause() -> None:
     client = DummyCrmClient()
-    result = asyncio.run(
-        try_handle_quick_action(
-            input_text="naplánuj schůzku s Karlem vybíhalem z firmy zliner na středu ráno",
-            crm_client=client,  # type: ignore[arg-type]
-            user_id="28",
-            action_confirmation=False,
+    with patch.object(get_settings(), "quick_action_min_confidence", 0.0):
+        result = asyncio.run(
+            try_handle_quick_action(
+                input_text="naplánuj schůzku s Karlem vybíhalem z firmy zliner na středu ráno",
+                crm_client=client,  # type: ignore[arg-type]
+                user_id="28",
+                action_confirmation=False,
+            )
         )
-    )
 
-    assert isinstance(result, dict)
-    assert result.get("status") == "confirmation_required"
-    assert "karlem vybíhalem" in str(result.get("message_to_user") or "").lower()
-    assert "kontakt navázán" in str(result.get("message_to_user") or "").lower()
+    assert isinstance(result, QuickActionResult)
+    assert not result.should_fallback
+    assert result.data.get("status") == "confirmation_required"
+    assert "karlem vybíhalem" in str(result.data.get("message_to_user") or "").lower()
+    assert "kontakt navázán" in str(result.data.get("message_to_user") or "").lower()
 
-    pending = result.get("pending_action") or {}
+    pending = result.data.get("pending_action") or {}
     assert isinstance(pending.get("adjustments"), list)
 
     data = pending.get("data") or {}
@@ -224,20 +233,22 @@ def test_quick_action_resolves_contact_when_phrase_contains_company_clause() -> 
 
 def test_quick_action_uses_fallback_list_lookup_when_generic_search_returns_empty() -> None:
     client = FallbackLookupCrmClient()
-    result = asyncio.run(
-        try_handle_quick_action(
-            input_text="naplánuj schůzku s Karlem vybíhalem z firmy zliner na středu ráno",
-            crm_client=client,  # type: ignore[arg-type]
-            user_id="28",
-            action_confirmation=False,
+    with patch.object(get_settings(), "quick_action_min_confidence", 0.0):
+        result = asyncio.run(
+            try_handle_quick_action(
+                input_text="naplánuj schůzku s Karlem vybíhalem z firmy zliner na středu ráno",
+                crm_client=client,  # type: ignore[arg-type]
+                user_id="28",
+                action_confirmation=False,
+            )
         )
-    )
 
-    assert isinstance(result, dict)
-    assert result.get("status") == "confirmation_required"
+    assert isinstance(result, QuickActionResult)
+    assert not result.should_fallback
+    assert result.data.get("status") == "confirmation_required"
     assert any(module == "Contacts" and action == "list" for module, action, _ in client.calls)
 
-    pending = result.get("pending_action") or {}
+    pending = result.data.get("pending_action") or {}
     data = pending.get("data") or {}
     fields = data.get("fields") or {}
     assert fields.get("parent_type") == "Contacts"
@@ -246,18 +257,22 @@ def test_quick_action_uses_fallback_list_lookup_when_generic_search_returns_empt
 
 def test_quick_action_hard_stops_when_contact_cannot_be_resolved() -> None:
     client = NoMatchCrmClient()
-    result = asyncio.run(
-        try_handle_quick_action(
-            input_text="naplánuj schůzku s Karlem vybíhalem z firmy zliner na středu ráno",
-            crm_client=client,  # type: ignore[arg-type]
-            user_id="28",
-            action_confirmation=False,
+    with patch.object(get_settings(), "quick_action_min_confidence", 0.0):
+        result = asyncio.run(
+            try_handle_quick_action(
+                input_text="naplánuj schůzku s Karlem vybíhalem z firmy zliner na středu ráno",
+                crm_client=client,  # type: ignore[arg-type]
+                user_id="28",
+                action_confirmation=False,
+            )
         )
-    )
 
-    assert isinstance(result, dict)
-    assert result.get("status") == "resolution_required"
-    assert "nepodařilo se mi spolehlivě dohledat kontakt" in str(result.get("message_to_user") or "").lower()
-    pending = result.get("pending_action") or {}
+    # With fallback-on-no-candidates enabled (default), the quick action signals
+    # fallback so the agent can handle unresolved entities more intelligently.
+    assert isinstance(result, QuickActionResult)
+    assert result.should_fallback
+    assert result.data.get("status") == "resolution_required"
+    assert "nepodařilo se mi spolehlivě dohledat kontakt" in str(result.data.get("message_to_user") or "").lower()
+    pending = result.data.get("pending_action") or {}
     assert pending.get("module") == "Meetings"
     assert pending.get("action") == "create"
