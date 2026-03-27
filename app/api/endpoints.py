@@ -1199,7 +1199,7 @@ async def process_audio(
     file: UploadFile = File(...),
     chat_id: str | None = Form(None),
     context: str | None = Form(None),
-    user_locale: str | None = Form("en"),
+    user_locale: str | None = Form("cs"),
     return_voice: bool = Form(False),
     x_chat_id: str | None = Header(default=None, alias="X-Chat-Id"),
     ctx: TenantContext = Depends(get_tenant_context),
