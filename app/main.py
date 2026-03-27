@@ -14,7 +14,17 @@ from database.session import init_db
 
 
 settings = get_settings()
-setup_logging(settings.debug)
+setup_logging(
+    settings.debug,
+    log_format=settings.log_format,
+    log_force_color=settings.log_force_color,
+    log_file_enabled=settings.log_file_enabled,
+    log_file_path=settings.log_file_path,
+    log_file_format=settings.log_file_format,
+    log_trace_enabled=settings.log_trace_enabled,
+    log_trace_max_chars=settings.log_trace_max_chars,
+    log_trace_history_messages=settings.log_trace_history_messages,
+)
 
 
 @asynccontextmanager

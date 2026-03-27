@@ -51,6 +51,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+GPU-only Python wheels are split out to `requirements.gpu.txt` and should be
+installed only on GPU hosts:
+
+```bash
+pip install -r requirements.gpu.txt
+```
+
 2. Configure environment:
 
 ```bash
@@ -60,7 +67,7 @@ cp .env.example .env
 3. Start API (local, without Docker):
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload --no-access-log
 ```
 
 Qdrant (required for `/rag/*` endpoints):
@@ -134,6 +141,8 @@ cp .env.example .env
 docker compose -f docker-compose.dev.yml up --build -d
 ```
 
+Dev defaults to CPU build (`INSTALL_GPU_DEPS=false`) so it skips large NVIDIA wheels.
+
 3. Open services:
 
 - API Swagger: `http://localhost:8011/swagger`
@@ -183,6 +192,9 @@ cp .env.production.example .env
 ```bash
 docker compose -f docker-compose.prod.yml up --build -d
 ```
+
+Production defaults to GPU build (`INSTALL_GPU_DEPS=true`).
+If your production host is CPU-only, set `INSTALL_GPU_DEPS=false` in `.env`.
 
 4. Stop production stack:
 
@@ -245,7 +257,20 @@ Optional machine-to-machine HMAC headers:
 
 ## Debugging & Transparency
 
-- Structured JSON logs with request id (`X-Request-Id`) and request latency.
+- Colorized human-readable CLI logs by default (`LOG_FORMAT=pretty`).
+- Force ANSI colors in container logs (`LOG_FORCE_COLOR=true`) so `docker logs -f` stays readable.
+- Per-request LLM trace includes:
+  - request payload
+  - effective context passed to the agent
+  - tool calls and tool outputs
+  - outcome/status and user-facing reply
+  - resources used (model, tools, RAG/CRM mode, latency)
+  - compact chat history snapshot
+- Optional file logging:
+  - `LOG_FILE_ENABLED=true`
+  - `LOG_FILE_PATH=./logs/talk2api2.log`
+  - `LOG_FILE_FORMAT=json` or `pretty`
+- Every request keeps request id (`X-Request-Id`) and latency in logs.
 - Tenant id and user id are kept explicit throughout route -> service -> tool -> agent flow.
 - Chat history persists user/assistant turns with metadata for replay/debug.
 - Tool outputs are captured into assistant message metadata.

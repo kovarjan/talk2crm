@@ -3,8 +3,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        INSTALL_GPU_DEPS: ${INSTALL_GPU_DEPS:-false}
+        PIP_TIMEOUT: ${PIP_TIMEOUT:-120}
+        PIP_RETRIES: ${PIP_RETRIES:-10}
     container_name: talk2api2-api
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8011 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8011 --reload --no-access-log
     env_file:
       - .env
     environment:

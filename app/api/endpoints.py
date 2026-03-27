@@ -4,10 +4,12 @@ import asyncio
 import json
 import re
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import unicodedata
 
 from fastapi import (
     APIRouter,
@@ -20,7 +22,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse
-from sqlalchemy import delete, select
+from sqlalchemy import case, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import OperationalError
 
@@ -39,8 +41,10 @@ from app.api.models import (
 )
 from app.core.audio import synthesize_to_file, transcribe
 from app.core.config import get_settings
-from app.core.logging import get_logger
+from app.core.logging import get_logger, log_llm_trace
+from app.domain.contracts import normalize_pending_action_envelope
 from app.engine.agent import run_agent
+from app.engine.pending_patch import try_patch_pending_action
 from app.engine.quick_actions import try_handle_quick_action
 from app.engine.rag import TenantRAGService
 from app.engine.tools import build_tools
@@ -48,6 +52,7 @@ from app.services.crm_client import SugarClient
 from app.services.tenant_manager import TenantManager
 from database.models import Chat, ChatMessage
 from database.session import get_db
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 
@@ -56,6 +61,15 @@ router = APIRouter()
 settings = get_settings()
 _rag_service_instance: TenantRAGService | None = None
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_MD_FENCE_RE = re.compile(r"```(?:\w+)?\s*([\s\S]*?)```", re.IGNORECASE)
+_MD_BOLD_RE = re.compile(r"\*\*(.*?)\*\*")
+_MD_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)")
+_MD_INLINE_CODE_RE = re.compile(r"`([^`]*)`")
+_LEADING_SYMBOL_RE = re.compile(r"^[\s\-\u2022>*]+")
+_EMOJI_RE = re.compile(
+    r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF]+",
+    flags=re.UNICODE,
+)
 _CHAT_TITLE_MAX_CHARS = 80
 _CHAT_TITLE_MAX_WORDS = 6
 
@@ -73,10 +87,18 @@ def get_rag_service() -> TenantRAGService | None:
 
 
 def _chat_message_to_model(message: ChatMessage) -> ChatMessageItem:
+    metadata = message.metadata_json or {}
+    if message.role == "assistant" and isinstance(metadata, dict):
+        cards = metadata.get("cards")
+        if not isinstance(cards, list):
+            agent_result = metadata.get("agent_result")
+            if isinstance(agent_result, dict) and isinstance(agent_result.get("cards"), list):
+                metadata = dict(metadata)
+                metadata["cards"] = agent_result["cards"]
     return ChatMessageItem(
         role=message.role,
         content=message.content,
-        metadata=message.metadata_json or {},
+        metadata=metadata,
         created_at=message.created_at,
     )
 
@@ -95,7 +117,15 @@ async def _load_messages(
             ChatMessage.tenant_id == tenant_id,
             ChatMessage.user_id == user_id,
         )
-        .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
+        .order_by(
+            ChatMessage.created_at.asc(),
+            case(
+                (ChatMessage.role == "user", 0),
+                (ChatMessage.role == "assistant", 1),
+                else_=2,
+            ).asc(),
+            ChatMessage.id.asc(),
+        )
     )
     result = await db.execute(stmt)
     return [_chat_message_to_model(item) for item in result.scalars().all()]
@@ -210,7 +240,16 @@ async def _synthesize_to_final_path(
 
 
 def _to_user_message(text: str) -> str:
-    cleaned = _THINK_TAG_RE.sub("", text or "").strip()
+    cleaned = _THINK_TAG_RE.sub("", text or "")
+    cleaned = _MD_FENCE_RE.sub(r"\1", cleaned)
+    cleaned = _MD_BOLD_RE.sub(r"\1", cleaned)
+    cleaned = _MD_ITALIC_RE.sub(r"\1", cleaned)
+    cleaned = _MD_INLINE_CODE_RE.sub(r"\1", cleaned)
+    cleaned = _EMOJI_RE.sub("", cleaned)
+    cleaned = "\n".join(_LEADING_SYMBOL_RE.sub("", line) for line in cleaned.splitlines())
+    cleaned = re.sub(r"\s+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = cleaned.strip()
     return cleaned or (text or "")
 
 
@@ -223,6 +262,8 @@ def _try_parse_json(text: str) -> dict[str, Any] | None:
         return value if isinstance(value, dict) else None
     except json.JSONDecodeError:
         return None
+
+
 
 
 def _looks_like_noise(text: str) -> bool:
@@ -259,14 +300,24 @@ def _normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, An
             continue
 
         status = str(obs.get("status") or "").strip().lower()
-        if status == "confirmation_required":
-            pending = obs.get("pending_action") if isinstance(obs.get("pending_action"), dict) else {}
-            module = str(pending.get("module") or "").strip()
+        if status in {"confirmation_required", "resolution_required"}:
+            pending_raw = obs.get("pending_action") if isinstance(obs.get("pending_action"), dict) else {}
+            pending = normalize_pending_action_envelope(pending_raw) or pending_raw
+            module = str(
+                pending.get("effective_module")
+                or pending.get("module")
+                or pending.get("requested_module")
+                or ""
+            ).strip()
             action = str(pending.get("action") or "").strip()
             data = pending.get("data") if isinstance(pending.get("data"), dict) else {}
             message = str(
                 obs.get("message")
-                or "Akce je připravena a čeká na vaše potvrzení."
+                or (
+                    "Akce je připravena a čeká na vaše potvrzení."
+                    if status == "confirmation_required"
+                    else "Pro pokračování potřebuji upřesnit cílový záznam."
+                )
             ).strip()
 
             command_payload = {
@@ -292,14 +343,50 @@ def _normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, An
                 normalized["output"] = message
             return normalized
 
+    for step in reversed(steps if isinstance(steps, list) else []):
+        if not isinstance(step, dict):
+            continue
+        tool_name = str(step.get("tool") or "").strip()
+        if tool_name not in {"crm_data_tool", "crm_search_tool", "crm_query_tool", "my_meetings_tool"}:
+            continue
+
+        observation = step.get("observation")
+        if isinstance(observation, dict):
+            obs = observation
+        elif isinstance(observation, str):
+            obs = _try_parse_json(observation) or {}
+        else:
+            obs = {}
+        if not obs:
+            continue
+
+        cards = obs.get("cards")
+        if isinstance(cards, list):
+            normalized["cards"] = cards
+        tool_message = _to_user_message(
+            str(
+                obs.get("message_to_user")
+                or obs.get("summary")
+                or ""
+            ).strip()
+        )
+        if tool_message:
+            normalized["message_to_user"] = tool_message
+        tool_status = str(obs.get("status") or "").strip()
+        if tool_status:
+            normalized["status"] = tool_status
+        if not str(normalized.get("output") or "").strip():
+            normalized["output"] = json.dumps(obs, ensure_ascii=False)
+        return normalized
+
     output_text = str(normalized.get("output") or "")
     parsed_output = _try_parse_json(output_text)
     if isinstance(parsed_output, dict) and parsed_output.get("message_to_user"):
-        normalized["message_to_user"] = str(parsed_output["message_to_user"])
+        normalized["message_to_user"] = _to_user_message(str(parsed_output["message_to_user"]))
         return normalized
 
     clean = _to_user_message(output_text)
-    if _looks_like_noise(clean):
+    if not clean or _looks_like_noise(clean):
         clean = (
             "Nerozuměla jsem spolehlivě požadavku. "
             "Upřesněte prosím akci, modul a čas (např. schůzka v úterý 9:30)."
@@ -314,7 +401,7 @@ def _extract_pending_action_from_agent_result(agent_result: dict[str, Any]) -> d
 
     direct_pending = agent_result.get("pending_action")
     if isinstance(direct_pending, dict):
-        return direct_pending
+        return normalize_pending_action_envelope(direct_pending) or direct_pending
 
     steps = agent_result.get("intermediate_steps")
     if not isinstance(steps, list):
@@ -334,8 +421,8 @@ def _extract_pending_action_from_agent_result(agent_result: dict[str, Any]) -> d
             continue
         status = str(obs.get("status") or "").strip().lower()
         pending = obs.get("pending_action")
-        if status == "confirmation_required" and isinstance(pending, dict):
-            return pending
+        if status in {"confirmation_required", "resolution_required"} and isinstance(pending, dict):
+            return normalize_pending_action_envelope(pending) or pending
     return None
 
 
@@ -412,6 +499,58 @@ def _merge_context_with_pending_action(
         merged["entities"] = entities
 
     return merged
+
+
+def _is_read_only_data_query(input_text: str) -> bool:
+    lowered = (input_text or "").strip().lower()
+    normalized = "".join(
+        char for char in unicodedata.normalize("NFD", lowered) if unicodedata.category(char) != "Mn"
+    )
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return False
+
+    mutation_tokens = (
+        "vytvor",
+        "zaloz",
+        "naplanuj",
+        "pridej",
+        "uprav",
+        "zmen",
+        "smaz",
+        "odstran",
+        "delete",
+        "update",
+        "create",
+        "patch",
+    )
+    if any(token in normalized for token in mutation_tokens):
+        return False
+
+    question_markers = (
+        "kdo ",
+        "jake ",
+        "jaky ",
+        "co ",
+        "kde ",
+        "kdy ",
+        "kolik ",
+        "?",
+    )
+    data_tokens = (
+        "schuzk",
+        "meeting",
+        "kontakt",
+        "contact",
+        "firma",
+        "spolecnost",
+        "account",
+        "zaznam",
+        "records",
+    )
+    return any(marker in normalized for marker in question_markers) and any(
+        token in normalized for token in data_tokens
+    )
 
 
 async def _load_latest_pending_action(
@@ -501,35 +640,44 @@ async def _generate_chat_name_with_llm(
         return _fallback_chat_name(history)
 
     settings = get_settings()
-    llm = ChatOpenAI(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        model=settings.llm_model,
-        temperature=0,
-    )
-    prompt = (
-        "Jsi asistent, který vytváří krátké názvy konverzací v češtině.\n"
-        "Pravidla:\n"
-        "- vrať pouze název (žádné vysvětlení)\n"
-        "- 2 až 6 slov\n"
-        "- max 80 znaků\n"
-        "- bez uvozovek a bez tečky na konci\n\n"
-        f"Konverzace:\n{transcript}\n\název:"
-    )
-    try:
-        response = await llm.ainvoke(prompt)
-        raw = response.content if hasattr(response, "content") else str(response)
-        if isinstance(raw, list):
-            raw = " ".join(str(part) for part in raw)
-        cleaned = _sanitize_chat_name(str(raw))
-        if cleaned:
-            return cleaned
-    except Exception:
-        logger.exception(
-            "Chat title generation failed tenant=%s user=%s",
-            tenant_id,
-            user_id,
+    messages = [
+        SystemMessage(content="/nothink"),
+        HumanMessage(
+            content=(
+                "Jsi asistent, který vytváří krátké názvy konverzací v češtině.\n"
+                "Pravidla:\n"
+                "- vrať pouze název (žádné vysvětlení)\n"
+                "- 2 až 6 slov\n"
+                "- max 80 znaků\n"
+                "- bez uvozovek a bez tečky na konci\n\n"
+                f"Konverzace:\n{transcript}\n\název:"
+            )
+        ),
+    ]
+    models_to_try = list(dict.fromkeys([settings.llm_title_model, settings.llm_model]))
+    for model_name in models_to_try:
+        llm = ChatOpenAI(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=model_name,
+            temperature=0,
+            max_tokens=200,
         )
+        try:
+            response = await llm.ainvoke(messages)
+            raw = response.content if hasattr(response, "content") else str(response)
+            if isinstance(raw, list):
+                raw = " ".join(str(part) for part in raw)
+            cleaned = _sanitize_chat_name(str(raw))
+            if cleaned:
+                return cleaned
+        except Exception:
+            logger.warning(
+                "Chat title generation failed with model=%s tenant=%s user=%s",
+                model_name,
+                tenant_id,
+                user_id,
+            )
 
     return _fallback_chat_name(history)
 
@@ -565,6 +713,7 @@ async def _process_input_core(
     payload: ProcessInputRequest,
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
+    started = time.perf_counter()
     tenant_id = ctx["tenant_id"]
     user_id = ctx["user_id"]
 
@@ -593,7 +742,15 @@ async def _process_input_core(
         tenant_id=tenant_id,
         user_id=user_id,
     )
-    effective_context = _merge_context_with_pending_action(payload.context, latest_pending_action)
+    incoming_context = dict(payload.context or {})
+    action_confirmation = bool(incoming_context.get("confirm_action", False))
+    should_merge_pending = bool(latest_pending_action) and (
+        action_confirmation or not _is_read_only_data_query(payload.input_text)
+    )
+    if should_merge_pending:
+        effective_context = _merge_context_with_pending_action(incoming_context, latest_pending_action)
+    else:
+        effective_context = incoming_context
     request_context = effective_context or None
 
     await _append_message(
@@ -606,62 +763,85 @@ async def _process_input_core(
     )
 
     action_confirmation = bool(effective_context.get("confirm_action", False))
+    execution_mode = "quick_action"
+    available_tools: list[str] = []
 
-    quick_result = await try_handle_quick_action(
-        input_text=payload.input_text,
-        crm_client=crm_client,
-        user_id=user_id,
-        action_confirmation=action_confirmation,
-    )
-    if quick_result is not None:
-        agent_result = quick_result
-    else:
-        tools = build_tools(
-            tenant_id=tenant_id,
-            user_id=user_id,
+    pending_for_patch = (
+        effective_context.get("pending_action") if isinstance(effective_context.get("pending_action"), dict) else None
+    ) or latest_pending_action
+    pending_patch_result = None
+    if isinstance(pending_for_patch, dict) and not action_confirmation:
+        pending_patch_result = try_patch_pending_action(
             input_text=payload.input_text,
-            request_context=request_context,
+            pending_action=pending_for_patch,
+        )
+
+    if pending_patch_result is not None:
+        execution_mode = "pending_patch"
+        agent_result = pending_patch_result
+    else:
+        quick_result = await try_handle_quick_action(
+            input_text=payload.input_text,
             crm_client=crm_client,
-            rag_service=rag_service,
+            user_id=user_id,
             action_confirmation=action_confirmation,
         )
-        try:
-            agent_result = await run_agent(
+        if quick_result is not None:
+            agent_result = quick_result
+        else:
+            execution_mode = "agent"
+            tools = build_tools(
                 tenant_id=tenant_id,
                 user_id=user_id,
                 input_text=payload.input_text,
-                context=request_context,
-                tools=tools,
+                request_context=request_context,
+                crm_client=crm_client,
+                rag_service=rag_service,
+                action_confirmation=action_confirmation,
             )
-            agent_result = _normalize_agent_result_for_ui(agent_result)
-        except Exception as exc:
-            logger.exception(
-                "Agent execution failed tenant=%s user=%s chat=%s",
-                tenant_id,
-                user_id,
-                chat.id,
-            )
-            agent_result = {
-                "output": (
-                    "Nastala chyba při provedení akce v CRM. "
-                    "Akce nebyla provedena. "
-                    "Zkontrolujte povinná pole a potvrďte akci znovu."
-                ),
-                "error": str(exc),
-                "status": "agent_error",
-                "message_to_user": (
-                    "Nastala chyba při provedení akce v CRM. "
-                    "Akce nebyla provedena. "
-                    "Zkontrolujte povinná pole a potvrďte akci znovu."
-                ),
-            }
+            available_tools = [str(getattr(tool, "name", "")) for tool in tools if getattr(tool, "name", None)]
+            try:
+                agent_result = await run_agent(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    input_text=payload.input_text,
+                    context=request_context,
+                    tools=tools,
+                )
+                agent_result = _normalize_agent_result_for_ui(agent_result)
+            except Exception as exc:
+                logger.exception(
+                    "Agent execution failed tenant=%s user=%s chat=%s",
+                    tenant_id,
+                    user_id,
+                    chat.id,
+                )
+                agent_result = {
+                    "output": (
+                        "Nastala chyba při provedení akce v CRM. "
+                        "Akce nebyla provedena. "
+                        "Zkontrolujte povinná pole a potvrďte akci znovu."
+                    ),
+                    "error": str(exc),
+                    "status": "agent_error",
+                    "message_to_user": (
+                        "Nastala chyba při provedení akce v CRM. "
+                        "Akce nebyla provedena. "
+                        "Zkontrolujte povinná pole a potvrďte akci znovu."
+                    ),
+                }
 
     assistant_raw_text = str(
         agent_result.get("message_to_user")
         or agent_result.get("output")
-        or agent_result
+        or ""
     )
     assistant_text = _to_user_message(assistant_raw_text)
+    if not assistant_text:
+        assistant_text = (
+            "Nerozuměla jsem spolehlivě požadavku. "
+            "Upřesněte prosím akci, modul a čas (např. schůzka v úterý 9:30)."
+        )
     await _append_message(
         db,
         chat=chat,
@@ -692,12 +872,55 @@ async def _process_input_core(
         background_tasks=background_tasks,
     )
 
+    chat_history_dump = [item.model_dump(mode="json") for item in history]
+    tool_calls = agent_result.get("intermediate_steps")
+    if not isinstance(tool_calls, list):
+        tool_calls = []
+    cards = agent_result.get("cards")
+    if not isinstance(cards, list):
+        cards = []
+    duration_ms = round((time.perf_counter() - started) * 1000, 2)
+    log_llm_trace(
+        logger,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        chat_id=chat.id,
+        request={
+            "input_text": payload.input_text,
+            "chat_id": payload.chat_id or chat.id,
+            "confirm_action": action_confirmation,
+            "return_voice": payload.return_voice,
+        },
+        context=request_context,
+        tool_calls=tool_calls,
+        outcome={
+            "status": str(agent_result.get("status") or "ok"),
+            "final_answer": assistant_text,
+            "message_to_user": assistant_text,
+            "output": agent_result.get("output"),
+            "error": agent_result.get("error"),
+        },
+        resources={
+            "execution_mode": execution_mode,
+            "llm_model": settings.llm_model,
+            "llm_base_url": settings.llm_base_url,
+            "crm_mode": settings.crm_mode,
+            "rag_available": rag_service is not None,
+            "available_tools": available_tools,
+            "return_voice": payload.return_voice,
+            "audio_generated": bool(file_id),
+            "duration_ms": duration_ms,
+        },
+        chat_history=chat_history_dump,
+    )
+
     return {
         "action_result": agent_result,
         "message_to_user": assistant_text,
         "chat_id": chat.id,
         "chat_name": chat.name,
-        "chat_history": [item.model_dump(mode="json") for item in history],
+        "chat_history": chat_history_dump,
+        "cards": cards,
         "audio_file_id": file_id,
         "audio_response_id": file_id,
         "audio_url": audio_url,

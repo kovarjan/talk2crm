@@ -112,7 +112,9 @@ ENV/
 env/
 env.bak/
 venv.bak/
-*INI.md
+/*INI.md
+/*DE.md
+/*TS.md
 
 .vscode/
 .idea/
@@ -148,3 +150,6 @@ sugar_voice_bridge.db*
 
 cache/*
 /*.mp3
+
+# Git worktrees
+.worktrees/
