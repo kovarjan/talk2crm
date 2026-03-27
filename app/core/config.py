@@ -43,7 +43,10 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str | None = None
     qdrant_collection: str = "tenant_knowledge"
-    rag_embedding_size: int = 384
+    rag_embedding_model: str = "qwen3-embedding:4b"
+    rag_embedding_base_url: str = "http://192.168.8.16:4000/v1"
+    rag_embedding_api_key: str | None = llm_api_key
+    rag_embedding_size: int = 2560
     rag_upsert_batch_size: int = 200
     qdrant_allow_local_fallback: bool = True
     qdrant_local_path: str = "./.qdrant_storage_local"

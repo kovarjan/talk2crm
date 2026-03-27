@@ -48,6 +48,36 @@ def _build_date_context(now: datetime) -> str:
     )
 
 
+def _parse_tool_call_json(raw: str) -> dict | None:
+    """Parse the JSON inside a <tool_call> block, using json_repair as fallback."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    try:
+        from json_repair import repair_json
+        repaired = repair_json(raw, return_objects=True)
+        if isinstance(repaired, dict):
+            return repaired
+    except Exception:
+        pass
+    return None
+
+
+def _sanitize_data_json_string(value: str) -> str:
+    """Best-effort repair of a data_json string the model passed pre-encoded."""
+    try:
+        json.loads(value)
+        return value
+    except json.JSONDecodeError:
+        pass
+    try:
+        from json_repair import repair_json
+        return repair_json(value)
+    except Exception:
+        return value
+
+
 def _build_system_prompt(tenant_id: str) -> str:
     now = datetime.now()
     date_ctx = _build_date_context(now)
@@ -59,7 +89,7 @@ PRAVIDLO: Vždy zavolej nástroj. Nikdy neodpovídej z paměti.
 
 DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
 1. rag_search_tool(query: str, module: str="", limit: int=5)
-   — hledání firem/kontaktů v RAG indexu. Použij pro získání account_id.
+   — hledání firem/kontaktů v RAG indexu. Použij pro získání account_id/contact_id.
 
 2. crm_query_tool(module: str, filters: str="[]", search: str=null, limit: int=20)
    — přesný dotaz do CRM. filters je JSON pole [{{"field":"...","op":"eq","value":"..."}}]
@@ -69,6 +99,7 @@ DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
 
 4. crm_action_tool(module: str, action: str, data_json: str="{{}}")
    — mutace: create/update/delete. Pouze po potvrzení uživatele.
+   POZOR: pokud vrátí {{"status": "confirmation_required"}}, OKAMŽITĚ dej <answer> s textem z "message_to_user". Nevolej žádný další nástroj.
 
 FORMÁT ODPOVĚDI:
 - Pokud chceš zavolat nástroj: <tool_call>{{"name": "jmeno_nastroje", "args": {{"param": "hodnota"}}}}</tool_call>
@@ -82,6 +113,14 @@ Po výsledku RAG (account_id=XYZ):
 
 Dotaz: "schůzky příští týden"
 → <tool_call>{{"name": "my_meetings_tool", "args": {{"date_from": "pristi_tyden_start", "date_to": "pristi_tyden_end"}}}}</tool_call>
+
+Dotaz: "naplánuj schůzku s Liborem Adamcem na úterý ráno"
+Krok 1 — najdi kontakt:
+→ <tool_call>{{"name": "rag_search_tool", "args": {{"query": "Libor Adamec", "module": "contacts"}}}}</tool_call>
+Krok 2 — vytvoř schůzku s contact_id z výsledku (data_json piš jako objekt, NE jako string):
+→ <tool_call>{{"name": "crm_action_tool", "args": {{"module": "Meetings", "action": "create", "data_json": {{"fields": {{"contact_name": "Libor Adamec", "contact_id": "abc-123", "date_start": "2026-04-08 09:00:00", "description": "..."}}}}}}}}}}</tool_call>
+Krok 3 — crm_action_tool vrátí {{"status":"confirmation_required"}}. Okamžitě:
+→ <answer>Připraveno: schůzka s Liborem Adamcem v úterý 8.4. v 9:00. Potvrďte prosím provedení.</answer>
 """
 
 
@@ -149,16 +188,23 @@ async def run_agent(
         tool_match = _TOOL_CALL_RE.search(content)
         if tool_match:
             raw_json = tool_match.group(1).strip()
-            try:
-                call = json.loads(raw_json)
-            except json.JSONDecodeError as exc:
-                logger.warning("tenant=%s Invalid tool_call JSON at iteration=%d: %s | raw=%s", tenant_id, iteration, exc, raw_json)
+            call = _parse_tool_call_json(raw_json)
+            if call is None:
+                logger.warning("tenant=%s Invalid tool_call JSON at iteration=%d | raw=%s", tenant_id, iteration, raw_json)
                 messages.append(AIMessage(content=content))
-                messages.append(HumanMessage(content=f"Chyba JSON v tool_call: {exc}. Oprav formát a zkus znovu."))
+                messages.append(HumanMessage(content="Chyba JSON v tool_call. Použij data_json jako objekt (ne string). Zkus znovu."))
                 continue
 
             t_name = str(call.get("name", ""))
             t_args = call.get("args", {}) or {}
+
+            # data_json must reach the tool as a JSON string.
+            # Models reliably produce a native object — serialize it.
+            # If the model passed a string, sanitize it (strip stray newlines, attempt repair).
+            if isinstance(t_args.get("data_json"), (dict, list)):
+                t_args["data_json"] = json.dumps(t_args["data_json"], ensure_ascii=False)
+            elif isinstance(t_args.get("data_json"), str):
+                t_args["data_json"] = _sanitize_data_json_string(t_args["data_json"])
 
             log_llm_step(logger, LLM_STEP_AGENT_ACTION, {"tool": t_name, "tool_input": t_args})
 
@@ -173,6 +219,18 @@ async def run_agent(
 
             log_llm_step(logger, LLM_STEP_TOOL_RESULT, {"tool": t_name, "observation": t_result})
             intermediate_steps.append({"tool": t_name, "tool_input": t_args, "observation": t_result, "log": None})
+
+            # Detect confirmation_required and force an immediate answer — no more tool calls.
+            try:
+                _obs = json.loads(t_result) if isinstance(t_result, str) else t_result
+            except Exception:
+                _obs = {}
+            if isinstance(_obs, dict) and _obs.get("status") == "confirmation_required":
+                _msg = str(_obs.get("message_to_user") or "Akce vyžaduje potvrzení uživatele.")
+                final_answer = _msg
+                messages.append(AIMessage(content=content))
+                messages.append(HumanMessage(content=f"Výsledek nástroje {t_name}:\n{t_result}"))
+                break
 
             messages.append(AIMessage(content=content))
             messages.append(HumanMessage(content=f"Výsledek nástroje {t_name}:\n{t_result}\n\nPokračuj: zavolej další nástroj nebo dej <answer>."))
