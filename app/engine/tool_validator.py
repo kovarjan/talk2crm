@@ -21,6 +21,7 @@ class CrmActionToolArgs(BaseModel):
     module: str
     action: str
     data_json: str = "{}"
+    record_id: str | None = None
 
 
 class RagSearchToolArgs(BaseModel):
@@ -188,4 +189,3 @@ def validate_crm_query_call(
         if direction not in {"asc", "desc"}:
             return "order_by direction must be asc or desc."
     return None
-

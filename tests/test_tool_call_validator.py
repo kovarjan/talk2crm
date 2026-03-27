@@ -103,3 +103,47 @@ def test_crm_action_tool_schema_rejects_unknown_fields() -> None:
                 }
             )
         )
+
+
+def test_crm_action_tool_accepts_record_id_alias_for_update() -> None:
+    tools = _make_tools()
+    tool = _get_tool(tools, "crm_action_tool")
+    record_id = "11111111-2222-3333-4444-555555555555"
+    result = json.loads(
+        asyncio.run(
+            tool.ainvoke(
+                {
+                    "module": "Contacts",
+                    "action": "update",
+                    "data_json": json.dumps({"fields": {"title": "Projektový manažer", "phone_work": ""}}),
+                    "record_id": record_id,
+                }
+            )
+        )
+    )
+    assert result.get("status") == "confirmation_required"
+    pending = result.get("pending_action") or {}
+    data = pending.get("data") or {}
+    assert data.get("id") == record_id
+
+
+def test_crm_action_tool_normalizes_scoped_record_id_alias_for_update() -> None:
+    tools = _make_tools()
+    tool = _get_tool(tools, "crm_action_tool")
+    record_id = "11111111-2222-3333-4444-555555555555"
+    result = json.loads(
+        asyncio.run(
+            tool.ainvoke(
+                {
+                    "module": "Contacts",
+                    "action": "update",
+                    "data_json": json.dumps({"fields": {"title": "Projektový manažer"}}),
+                    "record_id": f"Contacts-{record_id}",
+                }
+            )
+        )
+    )
+    assert result.get("status") == "confirmation_required"
+    pending = result.get("pending_action") or {}
+    data = pending.get("data") or {}
+    assert data.get("id") == record_id

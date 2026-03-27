@@ -31,6 +31,14 @@ _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
+_CRM_ID_RE = re.compile(
+    r"^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+    re.IGNORECASE,
+)
+_SCOPED_RECORD_ID_RE = re.compile(
+    r"^(?P<module>[A-Za-z]+)[-:/](?P<id>(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}))$",
+    re.IGNORECASE,
+)
 
 
 def _normalize_text(value: str) -> str:
@@ -45,6 +53,21 @@ def _safe_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _canonical_record_id(value: Any) -> str:
+    text = _safe_text(value)
+    if not text:
+        return ""
+    if _CRM_ID_RE.match(text):
+        return text
+
+    scoped = _SCOPED_RECORD_ID_RE.match(text)
+    if not scoped:
+        return text
+
+    candidate = _safe_text(scoped.group("id"))
+    return candidate if _CRM_ID_RE.match(candidate) else text
 
 
 def _name_sim(a: str, b: str) -> float:
@@ -1362,7 +1385,12 @@ def build_tools(
     )
 
     @tool("crm_action_tool", args_schema=CrmActionToolArgs)
-    async def crm_action_tool(module: str, action: str, data_json: str = "{}") -> str:
+    async def crm_action_tool(
+        module: str,
+        action: str,
+        data_json: str = "{}",
+        record_id: str | None = None,
+    ) -> str:
         """
         Provádí mutace v CRM: create, update, delete.
         Používej POUZE po explicitním potvrzení uživatele nebo pokud kontext obsahuje potvrzenou pending_action.
@@ -1374,16 +1402,33 @@ def build_tools(
 
         async with ToolCallLogger(
             "crm_action_tool", tenant_id, user_id,
-            inputs={"module": module, "action": action, "data_json": data_json},
+            inputs={"module": module, "action": action, "data_json": data_json, "record_id": record_id},
         ) as tcl:
-            validation_error = validate_crm_action_call(module=module, action=action, data_json=data_json)
+            data_json_value = data_json
+            record_id_value = _canonical_record_id(record_id)
+            if record_id_value:
+                try:
+                    parsed_payload = json.loads(_safe_text(data_json_value) or "{}")
+                    if isinstance(parsed_payload, dict):
+                        existing_id = _canonical_record_id(
+                            parsed_payload.get("id")
+                            or parsed_payload.get("record_id")
+                            or parsed_payload.get("recordId")
+                        )
+                        if not existing_id:
+                            parsed_payload["id"] = record_id_value
+                            data_json_value = json.dumps(parsed_payload, ensure_ascii=False)
+                except Exception:
+                    pass
+
+            validation_error = validate_crm_action_call(module=module, action=action, data_json=data_json_value)
             if validation_error:
                 error_payload = {"status": "tool_validation_error", "message": validation_error}
                 tcl.set_output(error_payload)
                 return json.dumps(error_payload, ensure_ascii=False)
             try:
                 result = await write_service.execute_action(
-                    module=module, action=action, data_json=data_json
+                    module=module, action=action, data_json=data_json_value
                 )
             except Exception as exc:
                 error_payload = {"status": "error", "message": str(exc)}

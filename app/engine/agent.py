@@ -100,6 +100,7 @@ DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
 
 4. crm_action_tool(module: str, action: str, data_json: str="{{}}")
    — mutace: create/update/delete. Pouze po potvrzení uživatele.
+   — pro update/delete vždy pošli cílové ID do data_json.id (record_id je jen kompatibilní fallback).
    POZOR: pokud vrátí {{"status": "confirmation_required"}}, OKAMŽITĚ dej <answer> s textem z "message_to_user". Nevolej žádný další nástroj.
 
 FORMÁT ODPOVĚDI:
