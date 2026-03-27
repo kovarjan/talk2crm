@@ -45,7 +45,7 @@ from app.core.logging import get_logger, log_llm_trace
 from app.domain.contracts import normalize_pending_action_envelope
 from app.engine.agent import run_agent
 from app.engine.pending_patch import try_patch_pending_action
-from app.engine.quick_actions import try_handle_quick_action
+from app.engine.quick_actions import QuickActionResult, try_handle_quick_action
 from app.engine.rag import TenantRAGService
 from app.engine.tools import build_tools
 from app.services.crm_client import SugarClient
@@ -780,14 +780,16 @@ async def _process_input_core(
         execution_mode = "pending_patch"
         agent_result = pending_patch_result
     else:
-        quick_result = await try_handle_quick_action(
-            input_text=payload.input_text,
-            crm_client=crm_client,
-            user_id=user_id,
-            action_confirmation=action_confirmation,
-        )
-        if quick_result is not None:
-            agent_result = quick_result
+        quick_result: QuickActionResult | None = None
+        if settings.quick_action_enabled:
+            quick_result = await try_handle_quick_action(
+                input_text=payload.input_text,
+                crm_client=crm_client,
+                user_id=user_id,
+                action_confirmation=action_confirmation,
+            )
+        if quick_result is not None and not quick_result.should_fallback:
+            agent_result = quick_result.data
         else:
             execution_mode = "agent"
             tools = build_tools(

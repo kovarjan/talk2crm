@@ -110,11 +110,17 @@ async def run_agent(
 
     tools_by_name: dict[str, Any] = {getattr(t, "name", ""): t for t in tools}
     system_prompt = _build_system_prompt(tenant_id)
-    human_text = (
-        f"Vstup: {input_text}\n"
-        f"Kontext: {json.dumps(context or {}, ensure_ascii=False)}\n"
-        f"User ID: {user_id}"
-    )
+    if context and context.get("module"):
+        human_text = (
+            f"Vstup: {input_text}\n"
+            f"Kontext: {json.dumps(context, ensure_ascii=False)}\n"
+            f"User ID: {user_id}"
+        )
+    else:
+        human_text = (
+            f"Vstup: {input_text}\n"
+            f"User ID: {user_id}"
+        )
 
     messages: list[Any] = [SystemMessage(content=system_prompt), HumanMessage(content=human_text)]
     intermediate_steps: list[dict[str, Any]] = []
