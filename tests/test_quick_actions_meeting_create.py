@@ -276,3 +276,38 @@ def test_quick_action_hard_stops_when_contact_cannot_be_resolved() -> None:
     pending = result.data.get("pending_action") or {}
     assert pending.get("module") == "Meetings"
     assert pending.get("action") == "create"
+
+
+def test_adjust_meeting_normalizes_card_style_contact_id_into_invitees() -> None:
+    client = DummyCrmClient()
+    engine = ModuleAdjustmentEngine(
+        tenant_id="ai-local",
+        user_id="28",
+        crm_client=client,  # type: ignore[arg-type]
+        input_text="Naplánuj schůzku s Liborem Adamcem",
+        request_context={},
+    )
+
+    raw_contact_id = f"Contacts-{client.contact_id}"
+    adjusted = asyncio.run(
+        engine.apply(
+            module="Meetings",
+            action="create",
+            data={
+                "fields": {
+                    "contact_id": raw_contact_id,
+                    "date_start": "2026-04-06 09:00:00",
+                    "description": "Adaptace napojení API Helios",
+                }
+            },
+        )
+    )
+
+    fields = (adjusted.data or {}).get("fields") or {}
+    assert fields.get("contact_id") == client.contact_id
+    assert fields.get("parent_type") == "Contacts"
+    assert fields.get("parent_id") == client.contact_id
+
+    invitees = (adjusted.data or {}).get("invitees") or {}
+    contacts = invitees.get("Contacts") or []
+    assert any(str(item.get("id") or "").strip() == client.contact_id for item in contacts)
