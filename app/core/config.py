@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     log_trace_history_messages: int = 10
     tool_call_logging: bool = False
 
-    database_url: str = "sqlite+aiosqlite:///./talk2crm.db"
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/talk2crm"
 
     llm_base_url: str = "http://localhost:11434/v1"
     llm_model: str = "qwen3.5"
@@ -100,6 +100,17 @@ class Settings(BaseSettings):
                 return json.loads(value)
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @field_validator("database_url")
+    @classmethod
+    def validate_database_url(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized.startswith("postgresql+asyncpg://"):
+            raise ValueError(
+                "DATABASE_URL must use PostgreSQL with asyncpg "
+                "(postgresql+asyncpg://...)"
+            )
+        return normalized
 
     @property
     def cache_audio_dir(self) -> Path:
