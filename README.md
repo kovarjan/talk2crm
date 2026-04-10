@@ -291,6 +291,7 @@ curl -X POST 'http://127.0.0.1:8011/rag/ingest/' \
   -H 'Content-Type: application/json' \
   -H 'X-Tenant: ai-local' \
   -H 'X-User-Id: 28' \
+  -H 'X-User-Name: jkovar' \
   --data '{
     "modules": ["Contacts"],
     "incremental": true,
@@ -299,6 +300,23 @@ curl -X POST 'http://127.0.0.1:8011/rag/ingest/' \
     "page_size": 200
   }'
 ```
+
+For Coripo numeric user IDs, include `X-User-Name` so HMAC user resolution stays deterministic.
+
+## Contacts Ingest Validation
+
+Compare CRM `Contacts` records against Qdrant `Contacts` payloads and detect missing vectors:
+
+```bash
+./scripts/validate_contacts_ingest.py \
+  --crm-path /Users/kovarjan/Sites/localhost/coripo/master_ai/rest_coripo \
+  --tenant-id ai-local \
+  --output-json out/contacts_ingest_validation.json \
+  --sample 20 \
+  --module Contacts
+```
+
+The script checks CRM (`/public/list/Contacts`) vs Qdrant (`tenant_knowledge__<tenant_id>` by default), prints missing/stale IDs, and always verifies contact `105004f2-f220-2bbb-2ca0-64e330763f18`.
 
 ### Run Qdrant docker:
 

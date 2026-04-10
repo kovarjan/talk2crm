@@ -54,6 +54,14 @@ class SugarClient:
             self._auth_config.get("hmac_key_id") or settings.coripo_hmac_key_id
         ).strip()
         self.coripo_hmac_secret = str(self._auth_config.get("hmac_secret") or "").strip()
+        if not self.coripo_hmac_secret:
+            fallback_secret = str(settings.hmac_keys.get(self.coripo_hmac_key_id) or "").strip()
+            if fallback_secret:
+                self.coripo_hmac_secret = fallback_secret
+                logger.warning(
+                    "SugarClient using HMAC secret fallback from HMAC_KEYS_JSON for key_id=%s",
+                    self.coripo_hmac_key_id,
+                )
         self.clean_response_default = bool(self._auth_config.get("clean_response", True))
         self._coripo_session_id = str(
             self._auth_config.get("session_id")
@@ -72,6 +80,11 @@ class SugarClient:
         elif self.token and not self.token.startswith("{") and not self.coripo_hmac_secret:
             # Plain token means HMAC secret for convenience.
             self.coripo_hmac_secret = self.token
+
+        # If HMAC credentials are available, prefer fresh /hmac-login SID over any
+        # preconfigured static session id to avoid stale/limited session scope.
+        if self._coripo_session_id and self._can_use_hmac():
+            self._coripo_session_id = None
 
     @staticmethod
     def _is_uuid(value: str | None) -> bool:
@@ -631,11 +644,23 @@ class SugarClient:
         include_fields: set[str] | None = None,
         include_field_names: bool = True,
     ) -> dict[str, Any]:
-        records = self._extract_records(raw)
+        source_records = raw.get("records")
+        if isinstance(source_records, list):
+            # Prefer canonical Coripo list payload shape when present. The generic
+            # recursive extractor can collapse rows in mixed payloads, which then
+            # breaks offset-based pagination for ingest callers.
+            records = [row for row in source_records if isinstance(row, dict)]
+            source_record_count = len(source_records)
+        else:
+            records = self._extract_records(raw)
+            source_record_count = len(records)
         if clean_records:
             records = self._clean_records(records, include_fields=include_fields)
 
-        output: dict[str, Any] = {"records": records}
+        output: dict[str, Any] = {
+            "records": records,
+            "source_record_count": source_record_count,
+        }
         if include_field_names:
             output["column_fields"] = self._extract_column_field_names(payload, raw)
             output["def_fields"] = self._extract_def_field_names(raw)

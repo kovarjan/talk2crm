@@ -1,0 +1,39 @@
+@startuml react_loop
+!theme plain
+skinparam defaultFontSize 12
+skinparam ArrowColor #555
+skinparam BackgroundColor #FAFAFA
+skinparam NoteBackgroundColor #FFFDE7
+skinparam NoteBorderColor #F9A825
+
+title ReAct Loop (Reason -> Act -> Observe)
+
+actor User
+participant "Agent LLM" as Agent
+participant "Tools (CRM / RAG / Calendar)" as Tools
+
+User -> Agent: User input
+activate Agent
+
+loop Until answer is complete (max iterations)
+  Agent -> Agent: Thought\n(what is missing?)
+
+  alt Needs external data/action
+    Agent -> Tools: Action\n(tool call + args)
+    activate Tools
+    Tools --> Agent: Observation\n(result / error / empty)
+    deactivate Tools
+    Agent -> Agent: Update scratchpad\nwith observation
+  else Enough context
+    Agent -> User: Final Answer
+  end
+end
+
+deactivate Agent
+
+' note over Agent
+' In this project, the loop is implemented in:
+' app/engine/agent.py -> run_agent()
+' end note
+
+@enduml

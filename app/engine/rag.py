@@ -568,13 +568,34 @@ class TenantRAGService:
                 action="list",
                 data={
                     "query": "",
+                    "q": "",
                     "offset": offset,
                     "max_results": current_size,
+                    # Keep order empty so Coripo applies its own stable ordering.
+                    # Passing module-qualified order can trigger ambiguous ORDER BY
+                    # in some CRM deployments.
+                    "order": [],
+                    "clean_records": False,
+                    "include_field_names": False,
                     "include_hash": True,
                     "hash_algorithm": "sha256",
                 },
             )
             records = self._extract_records(payload)
+            source_record_count = payload.get("source_record_count") if isinstance(payload, dict) else None
+            fetched_count = source_record_count if isinstance(source_record_count, int) else len(records)
+            if fetched_count < 0:
+                fetched_count = len(records)
+            if not records and isinstance(payload, dict) and str(payload.get("status") or "").lower() == "error":
+                reason = str(payload.get("reason") or payload.get("message") or "").strip()
+                logger.error(
+                    "CRM returned error response during ingest tenant=%s module=%s offset=%s reason=%s",
+                    tenant_id,
+                    module,
+                    offset,
+                    reason,
+                )
+                raise RuntimeError(f"CRM list error at offset {offset}: {reason or 'unknown reason'}")
             if not records:
                 break
 
@@ -595,6 +616,15 @@ class TenantRAGService:
                         continue
                     reached_existing = True
 
+            logger.info(
+                "CRM ingest page tenant=%s module=%s offset=%s fetched=%s selected=%s",
+                tenant_id,
+                module,
+                offset,
+                fetched_count,
+                len(selected_records),
+            )
+
             inserted = 0
             if selected_records:
                 inserted = await self.ingest_records(
@@ -610,9 +640,9 @@ class TenantRAGService:
                 break
 
             # Stop when backend returned a partial page.
-            if len(records) < current_size:
+            if fetched_count < current_size:
                 break
-            offset += len(records)
+            offset += fetched_count
 
         return total
 
@@ -626,22 +656,13 @@ class TenantRAGService:
         page_size: int = 500,
         incremental: bool = True,
     ) -> int:
-        if incremental or limit is not None or page_size != 500:
-            return await self.ingest_from_crm_paginated(
-                tenant_id=tenant_id,
-                crm_client=crm_client,
-                module=module,
-                limit=limit,
-                page_size=page_size,
-                incremental=incremental,
-            )
-        data = await crm_client.fetch_ai_ingest_dump(module)
-        records = self._extract_records(data)
-        if not records:
-            logger.warning(
-                "CRM ingest dump has unsupported shape tenant=%s module=%s",
-                tenant_id,
-                module,
-            )
-            return 0
-        return await self.ingest_records(tenant_id=tenant_id, module=module, records=records)
+        # Always use the paginated list path. The legacy bulk dump path has shown
+        # inconsistent visibility/limits on some Coripo deployments.
+        return await self.ingest_from_crm_paginated(
+            tenant_id=tenant_id,
+            crm_client=crm_client,
+            module=module,
+            limit=limit,
+            page_size=page_size,
+            incremental=incremental,
+        )
