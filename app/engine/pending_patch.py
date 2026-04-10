@@ -70,7 +70,7 @@ def _looks_like_pending_edit(input_text: str) -> bool:
     if _TIME_TOKEN_RE.search(input_text or ""):
         return True
     weekday_tokens = ("pondeli", "utery", "streda", "ctvrtek", "patek", "sobota", "nedele")
-    if any(token in normalized for token in weekday_tokens) and len(normalized.split()) <= 6:
+    if any(token in normalized for token in weekday_tokens):
         return True
     return False
 
