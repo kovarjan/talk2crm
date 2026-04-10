@@ -1,0 +1,192 @@
+@startuml talk2api2_project_map
+!theme plain
+skinparam defaultFontSize 12
+skinparam ArrowColor #4A5568
+skinparam BackgroundColor #FAFAFA
+skinparam packageStyle rectangle
+
+left to right direction
+
+title talk2api2 - Project Map
+
+actor "Client / FE" as Client
+
+rectangle "FastAPI App\napp/main.py" as App {
+  package "API Layer\napp/api" as API {
+    [dependencies.py\nTenantContext + HMAC verify] as Dep
+    [endpoints.py\nprocess-input/audio/search/rag/chats] as Endpoints
+    [models.py\nPydantic request/response] as ApiModels
+  }
+
+  package "Engine Layer\napp/engine" as Engine {
+    [agent.py\nLLM loop + <tool_call>/<answer>] as Agent
+    [tools.py\ncrm_action/rag_search/my_meetings/crm_query] as Tools
+    [quick_actions.py\nregex shortcut path] as Quick
+    [pending_patch.py\npatch pending_action from follow-up input] as PendingPatch
+    [adjustments.py\nmodule/date/entity normalization] as Adjustments
+    [rag.py\nTenantRAGService + embedding + Qdrant] as RagEngine
+  }
+
+  package "Domain + NLU\napp/domain + app/nlu" as Domain {
+    [entity_resolver.py] as EntityResolver
+    [temporal_resolver.py] as TemporalResolver
+    [contracts.py\npending_action envelope] as Contracts
+    [command_parser.py\nquick action parser] as Parser
+  }
+
+  package "Services\napp/services" as Services {
+    [tenant_manager.py\ncredentials + tenant access] as TenantMgr
+    [crm_client.py\nCoripo/Sugar API client] as CrmClient
+    [crm_write_service.py\nconfirmation + mutations] as WriteSvc
+    [crm_read_service.py\nstructured read/search] as ReadSvc
+  }
+
+  package "Core\napp/core" as Core {
+    [config.py\nsettings/env] as Config
+    [security.py\nHMAC + tenant secret crypto] as Security
+    [audio.py\nWhisper STT + edge-tts] as Audio
+    [logging.py] as Logging
+  }
+
+  package "Persistence\ndatabase" as DBLayer {
+    [session.py\nasync engine + init_db] as DbSession
+    [models.py\nTenant/Chat/ChatMessage] as DbModels
+  }
+}
+
+database "PostgreSQL / SQLite" as SQLDB
+cloud "SugarCRM / Coripo REST API" as CRM
+database "Qdrant\n(tenant collections)" as Qdrant
+cloud "LLM endpoint\n(OpenAI-compatible)" as LLM
+
+Client --> App : HTTP (X-Tenant, X-User-Id)\n/process-input, /process-audio, /search
+Dep --> Security
+Dep --> TenantMgr
+TenantMgr --> DbSession
+DbSession --> SQLDB
+DbModels --> SQLDB
+
+Endpoints --> Quick
+Quick --> Parser
+Quick --> WriteSvc
+
+Endpoints --> PendingPatch
+Endpoints --> Agent
+Agent --> Tools
+Agent --> LLM
+
+Tools --> WriteSvc
+Tools --> ReadSvc
+Tools --> CrmClient
+Tools --> RagEngine
+
+WriteSvc --> Adjustments
+Adjustments --> EntityResolver
+Adjustments --> TemporalResolver
+WriteSvc --> CrmClient
+WriteSvc --> RagEngine
+ReadSvc --> CrmClient
+ReadSvc --> RagEngine
+RagEngine --> Qdrant
+CrmClient --> CRM
+
+Endpoints --> Audio
+Endpoints --> DbSession
+
+note bottom of Endpoints
+Main conversation state is persisted in ChatMessage.metadata_json.
+Pending actions are carried between turns via this metadata.
+end note
+
+@enduml
+
+@startuml talk2api2_process_input_workflow
+!theme plain
+skinparam defaultFontSize 12
+skinparam ArrowColor #4A5568
+skinparam BackgroundColor #FAFAFA
+
+title talk2api2 - Runtime Workflow (POST /process-input/)
+
+actor Client
+participant "API /process-input" as API
+participant "get_tenant_context" as Ctx
+participant "TenantManager" as TM
+participant "DB\nChat/ChatMessage" as DB
+participant "SugarClient" as CRM
+participant "TenantRAGService" as RAG
+participant "pending_patch" as Patch
+participant "quick_actions" as QA
+participant "run_agent" as Agent
+participant "build_tools\ncrm_action/rag/my_meetings/crm_query" as Tools
+participant "CRMWriteService\n(+ ModuleAdjustmentEngine)" as WriteSvc
+participant "LLM" as LLM
+participant "Audio (edge-tts)" as TTS
+
+Client -> API: POST /process-input\ninput_text, chat_id?, context?, return_voice
+API -> Ctx: resolve tenant/user + optional HMAC verify
+Ctx -> TM: assert_user_access + get_credentials
+TM --> Ctx: tenant ok + decrypted CRM creds
+Ctx --> API: TenantContext
+
+API -> CRM: init with tenant creds + user_id
+API -> RAG: get or init singleton
+API -> DB: load/create chat + load latest pending_action
+API -> DB: append user message
+
+alt pending_action exists AND not confirm_action AND input looks like edit
+  API -> Patch: try_patch_pending_action(input_text, pending_action)
+  Patch --> API: confirmation_required (patched pending_action)
+  API -> API: execution_mode = pending_patch
+else no pending patch
+  alt quick action matched (create_contact/create_meeting)
+    API -> QA: try_handle_quick_action(...)
+    QA -> WriteSvc: execute_quick_command(...)
+    WriteSvc --> QA: confirmation_required | ok | resolution_required
+    QA --> API: quick result (or fallback)
+    API -> API: execution_mode = quick_action
+  else fallback to agent path
+    API -> Tools: build_tools(...)
+    API -> Agent: run_agent(input_text, context, tools)
+    loop up to 6 iterations
+      Agent -> LLM: prompt with tool instructions + date context
+      LLM --> Agent: <tool_call>... or <answer>...
+      alt tool call
+        Agent -> Tools: invoke selected tool
+        alt crm_action_tool
+          Tools -> WriteSvc: execute_action(module, action, data_json)
+          WriteSvc --> Tools: confirmation_required | crm error | success
+        else crm_query/my_meetings/rag_search
+          Tools -> CRM: list/get actions
+          Tools -> RAG: semantic search (when requested)
+        end
+        Tools --> Agent: observation JSON
+      else answer
+        Agent -> Agent: finalize output
+      end
+    end
+    Agent --> API: output + intermediate_steps
+    API -> API: normalize result for UI/cards/pending_action
+    API -> API: execution_mode = agent
+  end
+end
+
+API -> DB: append assistant message\n(metadata.agent_result, raw_output)
+API -> DB: load history + ensure chat name + commit
+
+alt return_voice = true
+  API -> TTS: background synthesize_to_file(assistant_text)
+  TTS --> API: audio file id/url
+end
+
+API --> Client: BaseResponse(success=true, response={\nmessage_to_user, action_result, cards, chat_history, audio_url?})
+
+note right of API
+/process-audio uses Whisper transcription first,
+then reuses the same _process_input_core flow.
+
+/rag/ingest can run sync or background and pulls CRM data
+through SugarClient into tenant-scoped Qdrant collection.
+end note
+
+@enduml

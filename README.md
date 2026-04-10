@@ -9,7 +9,7 @@ Multi-tenant FastAPI gateway for voice/text-to-action workflows against SugarCRM
 - Qdrant for tenant-scoped retrieval
 - faster-whisper for STT
 - edge-tts for TTS
-- SQLAlchemy + PostgreSQL/SQLite for tenant/chat state
+- SQLAlchemy + PostgreSQL for tenant/chat state
 
 ## Project Structure
 

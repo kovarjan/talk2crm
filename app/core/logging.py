@@ -462,7 +462,6 @@ def setup_logging(
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.WARNING)
     logging.getLogger("openai._base_client").setLevel(logging.WARNING)
-    logging.getLogger("aiosqlite").setLevel(logging.WARNING)
 
     # 2) Filter /ping and /health from access logs (uvicorn + api.access)
     health_filter = HealthcheckAccessFilter()
