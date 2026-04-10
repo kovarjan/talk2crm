@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     crm_mode: str = "on"
     crm_timeout_seconds: float = 25.0
     coripo_hmac_key_id: str = "acmark-ai"
+    coripo_test_token: str = ""
     engine_v2_enabled: bool = True
     resolver_v2_enabled: bool = True
     temporal_v2_enabled: bool = True

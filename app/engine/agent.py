@@ -108,6 +108,14 @@ FORMÁT ODPOVĚDI:
 - Pokud máš finální odpověď pro uživatele: <answer>Tvá odpověď česky</answer>
 - Pokud užvatel nezadá dostatečně přesný dotaz, doptej se na upřesnění.
 
+PRAVIDLA VÝBĚRU KONTAKTU/FIRMY:
+- Při výsledku z rag_search_tool vždy nejdřív posuď, zda jde o přesné shody, nebo jen podobné kandidáty.
+- Pokud najdeš více IDENTICKÝCH kontaktů (stejné celé jméno), automaticky vyber první záznam ve výsledcích a pokračuj bez doptávání.
+- Pokud najdeš více PODOBNÝCH kandidátů a není jasná 1 volba, doptej se a vypiš max 3 konkrétní možnosti.
+- U každé možnosti uveď dostupné rozlišující údaje: firma (account_name), pozice (title), město/adresa, telefon, email.
+- Nepiš obecné "upřesni prosím". Vždy dej konkrétní výběr možností, aby uživatel mohl odpovědět jednou větou.
+- Když uživatel upřesní firmu nebo město, preferuj výběr z už nalezených kandidátů.
+
 VZORY:
 Dotaz: "kontakty firmy Zlíner"
 → <tool_call>{{"name": "rag_search_tool", "args": {{"query": "Zlíner", "module": "accounts"}}}}</tool_call>
@@ -127,7 +135,15 @@ Krok 3 — crm_action_tool vrátí {{"status":"confirmation_required"}}. Okamži
 
 Dotaz: "Naplánuj schůzku s Petrem na zítra"
 → <tool_call>{{"name": "rag_search_tool", "args": {{"query": "Petr", "module": "contacts"}}}}</tool_call>
-Model: "Našel jsem 3 kontakty jménem Petr. Potřebuji upřesnit, o kterého Petera se jedná. Můžeš mi dát více informací, jako je název firmy, pozice, nebo jiné detaily?"
+Model: "Našel jsem více podobných kontaktů:
+1) Petr Novák — ABC s.r.o., obchodník, Brno, +420...
+2) Petr Novák — XYZ a.s., servisní technik, Praha, +420...
+Napiš prosím číslo možnosti nebo název firmy."
+
+Dotaz: "Naplánuj schůzku s Lucií Kovářovou na čtvrtek"
+→ <tool_call>{{"name": "rag_search_tool", "args": {{"query": "Lucie Kovářová", "module": "contacts"}}}}</tool_call>
+Po výsledku RAG jsou 2 identické kontakty se stejným jménem:
+Model interně vybere první kontakt ze seznamu a pokračuje vytvořením schůzky bez dalšího doptávání.
 """
 
 

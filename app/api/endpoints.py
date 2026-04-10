@@ -723,6 +723,7 @@ async def _process_input_core(
         credentials.crm_base_url,
         credentials.crm_token,
         user_id=user_id,
+        user_name=ctx["user_name"],
     )
     rag_service = get_rag_service()
 
@@ -938,6 +939,7 @@ async def _trigger_ingest(
     credentials_token: str,
     module: str,
     user_id: str | None = None,
+    user_name: str | None = None,
     record_limit: int | None = None,
     page_size: int | None = None,
     incremental: bool = True,
@@ -951,6 +953,7 @@ async def _trigger_ingest(
         credentials_base_url,
         credentials_token,
         user_id=user_id,
+        user_name=user_name,
     )
     try:
         ingested = await rag_service.ingest_from_crm(
@@ -1278,6 +1281,7 @@ async def search(
         credentials.crm_base_url,
         credentials.crm_token,
         user_id=ctx["user_id"],
+        user_name=ctx["user_name"],
     )
 
     query = payload.input_text.strip()
@@ -1343,6 +1347,7 @@ async def rag_ingest(
             credentials.crm_base_url,
             credentials.crm_token,
             user_id=ctx["user_id"],
+            user_name=ctx["user_name"],
         )
         record_limit = payload.record_limit
         page_size = payload.page_size or 500
@@ -1368,6 +1373,7 @@ async def rag_ingest(
         return BaseResponse(
             success=True,
             response={
+                "ingest_impl": "paginated_v3_orderless_erroraware",
                 "mode": "synchronous",
                 "tenant_id": ctx["tenant_id"],
                 "modules": results,
@@ -1386,6 +1392,7 @@ async def rag_ingest(
             credentials_token=credentials.crm_token,
             module=module,
             user_id=ctx["user_id"],
+            user_name=ctx["user_name"],
             record_limit=payload.record_limit,
             page_size=page_size,
             incremental=payload.incremental,
@@ -1393,6 +1400,7 @@ async def rag_ingest(
     return BaseResponse(
         success=True,
         response={
+            "ingest_impl": "paginated_v3_orderless_erroraware",
             "mode": "background",
             "tenant_id": ctx["tenant_id"],
             "scheduled_modules": modules,

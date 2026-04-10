@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import unicodedata
@@ -336,6 +337,98 @@ def _record_primary_name(record: dict[str, Any]) -> str:
     last = _safe_text(record.get("last_name") or record.get("LAST_NAME"))
     full = f"{first} {last}".strip()
     return full
+
+
+def _compact_rag_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    compact = dict(payload)
+    text = compact.get("text")
+    record = compact.get("record")
+    if isinstance(text, dict) and isinstance(record, dict) and text == record:
+        # Avoid returning the same record twice in payload under both "text" and "record".
+        compact.pop("text", None)
+    return compact
+
+
+def _rag_result_identity(item: dict[str, Any]) -> str:
+    payload = item.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    module_name = _safe_text(payload.get("module")).lower()
+    record = payload.get("record") if isinstance(payload.get("record"), dict) else {}
+    text = payload.get("text") if isinstance(payload.get("text"), dict) else {}
+    record_id = _canonical_record_id(
+        payload.get("record_id")
+        or record.get("id")
+        or text.get("id")
+    )
+    if record_id:
+        return f"id:{module_name}:{record_id.lower()}"
+
+    merged: dict[str, Any] = {}
+    if isinstance(text, dict):
+        merged.update(text)
+    if isinstance(record, dict):
+        merged.update(record)
+
+    primary_name = _normalize_text(_record_primary_name(merged))
+    company = _normalize_text(_safe_text(merged.get("account_name") or merged.get("company")))
+    city = _normalize_text(
+        _safe_text(merged.get("primary_address_city") or merged.get("billing_address_city"))
+    )
+    street = _normalize_text(
+        _safe_text(merged.get("primary_address_street") or merged.get("billing_address_street"))
+    )
+    phone = _safe_text(
+        merged.get("phone_work")
+        or merged.get("phone_mobile")
+        or merged.get("phone_office")
+        or merged.get("phone_home")
+    )
+    email = _normalize_text(_safe_text(merged.get("email1") or merged.get("email")))
+    fingerprint_parts = [module_name, primary_name, company, city, street, phone, email]
+    if any(fingerprint_parts[1:]):
+        return "shape:" + "|".join(fingerprint_parts)
+
+    try:
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        raw = _safe_text(payload)
+    return "raw:" + hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _rag_result_score(item: dict[str, Any]) -> float:
+    try:
+        return float(item.get("score") or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _dedupe_rag_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    index_by_identity: dict[str, int] = {}
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        candidate = dict(item)
+        payload = candidate.get("payload")
+        if isinstance(payload, dict):
+            candidate["payload"] = _compact_rag_payload(payload)
+        identity = _rag_result_identity(candidate)
+        if not identity:
+            try:
+                raw = json.dumps(candidate, ensure_ascii=False, sort_keys=True, default=str)
+            except Exception:
+                raw = _safe_text(candidate)
+            identity = "raw_item:" + hashlib.sha1(raw.encode("utf-8")).hexdigest()
+        if identity not in index_by_identity:
+            index_by_identity[identity] = len(deduped)
+            deduped.append(candidate)
+            continue
+
+        existing_index = index_by_identity[identity]
+        if _rag_result_score(candidate) > _rag_result_score(deduped[existing_index]):
+            deduped[existing_index] = candidate
+    return deduped
 
 
 def _expand_fuzzy_token_variants(token: str) -> set[str]:
@@ -1480,6 +1573,7 @@ def build_tools(
                     if payload_module == module_filter:
                         filtered.append(item)
                 results = filtered
+            results = _dedupe_rag_results(results)
     
             # Inject mismatch warning into first result when name diverges significantly.
             if results and query:
@@ -1496,9 +1590,10 @@ def build_tools(
                         f"POZOR: vrácený záznam '{top_name}' se výrazně liší od hledaného "
                         f"výrazu '{query}'. Ověř s uživatelem, zda jde o správný záznam."
                     )
-
-            tcl.set_output({"result_count": len(results[: max(1, int(limit or 5))]), "module_filter": _safe_text(module).lower()})
-            return json.dumps(results[: max(1, int(limit or 5))], ensure_ascii=False)
+            response_limit = max(1, int(limit or 5))
+            response_rows = results[:response_limit]
+            tcl.set_output({"result_count": len(response_rows), "module_filter": _safe_text(module).lower()})
+            return json.dumps(response_rows, ensure_ascii=False)
 
     @tool("my_meetings_tool", args_schema=MyMeetingsToolArgs)
     async def my_meetings_tool(
