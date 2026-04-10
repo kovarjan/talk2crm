@@ -79,3 +79,30 @@ def test_pending_patch_output_contains_serialized_payload() -> None:
     output = json.loads(str(result.get("output") or "{}"))
     assert output.get("action") == "create"
     assert output.get("module") == "Meetings"
+
+
+def test_pending_patch_detects_long_weekday_edit_phrase() -> None:
+    result = try_patch_pending_action(
+        input_text="až to další pondělí ne teď 12.",
+        pending_action={
+            "module": "Meetings",
+            "requested_module": "Meetings",
+            "effective_module": "Meetings",
+            "action": "create",
+            "data": {
+                "fields": {
+                    "date_start": "2026-04-12 09:00:00",
+                    "duration_hours": 1,
+                    "duration_minutes": 0,
+                }
+            },
+            "adjustments": [],
+            "ambiguities": [],
+            "requires_confirmation": True,
+        },
+        now=datetime(2026, 4, 10, 10, 0, 0),
+    )
+    assert isinstance(result, dict)
+    pending = result.get("pending_action") or {}
+    fields = (pending.get("data") or {}).get("fields") or {}
+    assert fields.get("date_start") == "2026-04-20 09:00:00"

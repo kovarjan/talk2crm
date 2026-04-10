@@ -285,6 +285,13 @@ def _looks_like_noise(text: str) -> bool:
 def _normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(agent_result or {})
     steps = normalized.get("intermediate_steps") or []
+    output_text = str(normalized.get("output") or "")
+    parsed_output = _try_parse_json(output_text)
+    if isinstance(parsed_output, dict):
+        output_message = _to_user_message(str(parsed_output.get("message_to_user") or "").strip())
+    else:
+        output_message = _to_user_message(output_text)
+    output_message_usable = bool(output_message) and not _looks_like_noise(output_message)
 
     for step in reversed(steps if isinstance(steps, list) else []):
         if not isinstance(step, dict):
@@ -370,7 +377,11 @@ def _normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, An
                 or ""
             ).strip()
         )
-        if tool_message:
+        # Keep the model's final natural-language answer when available.
+        # Tool summary is only a fallback.
+        if output_message_usable:
+            normalized["message_to_user"] = output_message
+        elif tool_message:
             normalized["message_to_user"] = tool_message
         tool_status = str(obs.get("status") or "").strip()
         if tool_status:
@@ -379,8 +390,6 @@ def _normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, An
             normalized["output"] = json.dumps(obs, ensure_ascii=False)
         return normalized
 
-    output_text = str(normalized.get("output") or "")
-    parsed_output = _try_parse_json(output_text)
     if isinstance(parsed_output, dict) and parsed_output.get("message_to_user"):
         normalized["message_to_user"] = _to_user_message(str(parsed_output["message_to_user"]))
         return normalized
@@ -803,6 +812,16 @@ async def _process_input_core(
                 action_confirmation=action_confirmation,
             )
             available_tools = [str(getattr(tool, "name", "")) for tool in tools if getattr(tool, "name", None)]
+            history_for_agent = await _load_messages(
+                db,
+                chat_id=chat.id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
+            recent_history_for_agent = [
+                {"role": item.role, "content": item.content}
+                for item in history_for_agent[-10:]
+            ]
             try:
                 agent_result = await run_agent(
                     tenant_id=tenant_id,
@@ -810,6 +829,7 @@ async def _process_input_core(
                     input_text=payload.input_text,
                     context=request_context,
                     tools=tools,
+                    chat_history=recent_history_for_agent,
                 )
                 agent_result = _normalize_agent_result_for_ui(agent_result)
             except Exception as exc:

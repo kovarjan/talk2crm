@@ -78,6 +78,25 @@ def _sanitize_data_json_string(value: str) -> str:
         return value
 
 
+def _format_recent_history(chat_history: list[dict[str, str]] | None, *, limit: int = 10) -> str:
+    if not chat_history:
+        return ""
+    lines: list[str] = []
+    for item in chat_history[-limit:]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        content = str(item.get("content") or "").strip().replace("\n", " ")
+        if not content:
+            continue
+        if len(content) > 500:
+            content = content[:500].rstrip() + "..."
+        if role not in {"user", "assistant", "system"}:
+            role = "user"
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
 def _build_system_prompt(tenant_id: str) -> str:
     now = datetime.now()
     date_ctx = _build_date_context(now)
@@ -86,6 +105,7 @@ Jsi CRM asistent (tenant: {tenant_id}). Odpovídej česky. Stručně, bez markdo
 Datum: {now.strftime("%Y-%m-%d")} ({now.strftime("%A")}). Rozsahy: {date_ctx}
 
 PRAVIDLO: Vždy zavolej nástroj. Nikdy neodpovídej z paměti.
+PRAVIDLO: Data do crm_action_tool musí vycházet pouze z aktuálního vstupu, KONVERZAČNÍ HISTORIE a výsledků nástrojů. Nikdy necopy-paste hodnoty z ukázek.
 
 DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
 1. rag_search_tool(query: str, module: str="", limit: int=5)
@@ -110,7 +130,7 @@ FORMÁT ODPOVĚDI:
 
 PRAVIDLA VÝBĚRU KONTAKTU/FIRMY:
 - Při výsledku z rag_search_tool vždy nejdřív posuď, zda jde o přesné shody, nebo jen podobné kandidáty.
-- Pokud najdeš více IDENTICKÝCH kontaktů (stejné celé jméno), automaticky vyber první záznam ve výsledcích a pokračuj bez doptávání.
+- Pokud najdeš více IDENTICKÝCH kontaktů (stejné celé jméno a firma), automaticky vyber první záznam ve výsledcích a pokračuj bez doptávání.
 - Pokud najdeš více PODOBNÝCH kandidátů a není jasná 1 volba, doptej se a vypiš max 3 konkrétní možnosti.
 - U každé možnosti uveď dostupné rozlišující údaje: firma (account_name), pozice (title), město/adresa, telefon, email.
 - Nepiš obecné "upřesni prosím". Vždy dej konkrétní výběr možností, aby uživatel mohl odpovědět jednou větou.
@@ -125,13 +145,13 @@ Po výsledku RAG (account_id=XYZ):
 Dotaz: "schůzky příští týden"
 → <tool_call>{{"name": "my_meetings_tool", "args": {{"date_from": "pristi_tyden_start", "date_to": "pristi_tyden_end"}}}}</tool_call>
 
-Dotaz: "naplánuj schůzku s Liborem Adamcem na úterý ráno"
+Dotaz: "naplánuj schůzku s [Jméno] na úterý ráno"
 Krok 1 — najdi kontakt:
-→ <tool_call>{{"name": "rag_search_tool", "args": {{"query": "Libor Adamec", "module": "contacts"}}}}</tool_call>
+→ <tool_call>{{"name": "rag_search_tool", "args": {{"query": "[Jméno]", "module": "contacts"}}}}</tool_call>
 Krok 2 — vytvoř schůzku s contact_id z výsledku (data_json piš jako objekt, NE jako string):
-→ <tool_call>{{"name": "crm_action_tool", "args": {{"module": "Meetings", "action": "create", "data_json": {{"fields": {{"contact_name": "Libor Adamec", "contact_id": "abc-123", "date_start": "2026-04-08 09:00:00", "description": "..."}}}}}}}}}}</tool_call>
+→ <tool_call>{{"name": "crm_action_tool", "args": {{"module": "Meetings", "action": "create", "data_json": {{"fields": {{"contact_name": "[Jméno z výsledku]", "contact_id": "[REAL_CONTACT_ID_Z_VYSLEDKU]", "date_start": "[REAL_DATETIME]", "description": "..."}}}}}}}}}}</tool_call>
 Krok 3 — crm_action_tool vrátí {{"status":"confirmation_required"}}. Okamžitě:
-→ <answer>Připraveno: schůzka s Liborem Adamcem v úterý 8.4. v 9:00. Potvrďte prosím provedení.</answer>
+→ <answer>Připraveno: schůzka je připravena. Potvrďte prosím provedení.</answer>
 
 Dotaz: "Naplánuj schůzku s Petrem na zítra"
 → <tool_call>{{"name": "rag_search_tool", "args": {{"query": "Petr", "module": "contacts"}}}}</tool_call>
@@ -154,8 +174,18 @@ async def run_agent(
     input_text: str,
     context: dict[str, Any] | None,
     tools: list,
+    chat_history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    log_llm_step(logger, LLM_STEP_USER_INPUT, {"input_text": input_text, "context": context or {}, "tool_count": len(tools)})
+    log_llm_step(
+        logger,
+        LLM_STEP_USER_INPUT,
+        {
+            "input_text": input_text,
+            "context": context or {},
+            "history_count": len(chat_history or []),
+            "tool_count": len(tools),
+        },
+    )
     log_llm_step(logger, LLM_STEP_AGENT_ACTION, {"event": "agent_execution_started"})
 
     settings = get_settings()
@@ -172,15 +202,18 @@ async def run_agent(
 
     tools_by_name: dict[str, Any] = {getattr(t, "name", ""): t for t in tools}
     system_prompt = _build_system_prompt(tenant_id)
+    history_block = _format_recent_history(chat_history)
     if context and context.get("module"):
         human_text = (
             f"Vstup: {input_text}\n"
             f"Kontext: {json.dumps(context, ensure_ascii=False)}\n"
+            f"KONVERZAČNÍ HISTORIE (nejnovější dole):\n{history_block or '(prázdná)'}\n"
             f"User ID: {user_id}"
         )
     else:
         human_text = (
             f"Vstup: {input_text}\n"
+            f"KONVERZAČNÍ HISTORIE (nejnovější dole):\n{history_block or '(prázdná)'}\n"
             f"User ID: {user_id}"
         )
 
@@ -249,7 +282,11 @@ async def run_agent(
             except Exception:
                 _obs = {}
             if isinstance(_obs, dict) and _obs.get("status") == "confirmation_required":
-                _msg = str(_obs.get("message_to_user") or "Akce vyžaduje potvrzení uživatele.")
+                _msg = str(
+                    _obs.get("message_to_user")
+                    or _obs.get("message")
+                    or "Akce vyžaduje potvrzení uživatele."
+                )
                 final_answer = _msg
                 messages.append(AIMessage(content=content))
                 messages.append(HumanMessage(content=f"Výsledek nástroje {t_name}:\n{t_result}"))
