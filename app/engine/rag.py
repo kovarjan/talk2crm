@@ -158,7 +158,15 @@ class TenantRAGService:
 
     def _ensure_collection(self, collection_name: str) -> None:
         if collection_name in self._ensured_collections:
-            return
+            try:
+                self.client.get_collection(collection_name)
+                return
+            except Exception:
+                logger.warning(
+                    "Qdrant collection cache was stale, recreating collection=%s",
+                    collection_name,
+                )
+                self._ensured_collections.discard(collection_name)
         existing = {item.name for item in self.client.get_collections().collections}
         if collection_name in existing:
             try:

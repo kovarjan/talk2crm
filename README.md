@@ -301,6 +301,22 @@ curl -X POST 'http://127.0.0.1:8011/rag/ingest/' \
   }'
 ```
 
+
+### Reimport all data for a module(s):
+```bash
+curl -X POST 'http://127.0.0.1:8011/rag/ingest/' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Tenant: ai-local' \
+  -H 'X-User-Id: 28' \
+  -H 'X-User-Name: jkovar' \
+  --data '{
+    "modules":["Contacts","Accounts","Meetings","Calls","Tasks","Notes","Opportunities","Leads","Users","Cases"],
+    "incremental":false,
+    "synchronous":true,
+    "page_size":500
+  }'
+```
+
 For Coripo numeric user IDs, include `X-User-Name` so HMAC user resolution stays deterministic.
 
 ## Contacts Ingest Validation

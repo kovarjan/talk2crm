@@ -215,6 +215,11 @@ def _build_runtime_defaults(args: argparse.Namespace) -> dict[str, str]:
     qdrant_url = _pick_first(args.qdrant_url, merged.get("QDRANT_URL"), "http://localhost:6333")
     if qdrant_url is None:
         raise ValidationError("Qdrant URL cannot be resolved")
+    qdrant_api_key = _pick_first(
+        args.qdrant_api_key,
+        merged.get("QDRANT_API_KEY"),
+        merged.get("QDRANT__SERVICE__API_KEY"),
+    )
 
     hmac_key_id = _pick_first(args.hmac_key_id, merged.get("CORIPO_HMAC_KEY_ID"), merged.get("AI_GATEWAY_HMAC_KEY_ID"), "acmark-ai")
     hmac_secret = _pick_first(args.hmac_secret, merged.get("CORIPO_TEST_TOKEN"), merged.get("AI_GATEWAY_HMAC_SECRET"), merged.get("CORIPO_TEST_HMAC_SECRET"))
@@ -231,6 +236,7 @@ def _build_runtime_defaults(args: argparse.Namespace) -> dict[str, str]:
     return {
         "crm_base_url": backend_url,
         "qdrant_url": qdrant_url.rstrip("/"),
+        "qdrant_api_key": qdrant_api_key or "",
         "hmac_key_id": hmac_key_id or "",
         "hmac_secret": hmac_secret or "",
         "user_id": user_id or "",
@@ -365,6 +371,7 @@ def _qdrant_records(
     *,
     module: str,
     qdrant_url: str,
+    qdrant_api_key: str,
     collection: str,
     page_size: int,
     max_records: int | None,
@@ -382,10 +389,15 @@ def _qdrant_records(
         if offset is not None:
             body["offset"] = offset
 
+        qdrant_headers = {"Accept": "application/json"}
+        if qdrant_api_key:
+            qdrant_headers["api-key"] = qdrant_api_key
+            qdrant_headers["Authorization"] = f"Bearer {qdrant_api_key}"
+
         payload = client.request_json(
             "POST",
             f"{qdrant_url}/collections/{parse.quote(collection, safe='')}/points/scroll",
-            headers={"Accept": "application/json"},
+            headers=qdrant_headers,
             body=body,
         )
         result = payload.get("result")
@@ -459,6 +471,7 @@ def main() -> int:
     parser.add_argument("--collection", default=None, help="Explicit Qdrant collection name")
     parser.add_argument("--collection-prefix", default=None, help="Qdrant collection prefix used with --tenant-id")
     parser.add_argument("--qdrant-url", default=None, help="Qdrant base URL")
+    parser.add_argument("--qdrant-api-key", default=None, help="Qdrant API key (or set QDRANT_API_KEY in env)")
 
     parser.add_argument("--crm-path", default=None, help="Path to rest_coripo (used to read .env defaults)")
     parser.add_argument("--crm-base-url", default=None, help="CRM public API base URL, e.g. http://localhost:2000/public")
@@ -500,6 +513,7 @@ def main() -> int:
     print(f"Module: {args.module}")
     print(f"CRM base URL: {defaults['crm_base_url']}")
     print(f"Qdrant URL: {defaults['qdrant_url']}")
+    print(f"Qdrant auth: {'api-key' if defaults['qdrant_api_key'] else 'none'}")
     print(f"Qdrant collection: {defaults['collection']}")
 
     crm_records = _crm_list_records(
@@ -519,6 +533,7 @@ def main() -> int:
         client,
         module=args.module,
         qdrant_url=defaults["qdrant_url"],
+        qdrant_api_key=defaults["qdrant_api_key"],
         collection=defaults["collection"],
         page_size=args.page_size,
         max_records=args.max_records,
