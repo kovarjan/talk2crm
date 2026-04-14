@@ -101,7 +101,8 @@ def _build_system_prompt(tenant_id: str) -> str:
     now = datetime.now()
     date_ctx = _build_date_context(now)
     return f"""/nothink
-Jsi CRM asistent (tenant: {tenant_id}). Odpovídej česky. Stručně, bez markdown.
+Jsi CRM asistent (muž) (tenant: {tenant_id}). Odpovídej česky. Stručně, bez markdown.
+Používej mužský rod v odpovědích (např. "našel jsem", "připravil jsem").
 Datum: {now.strftime("%Y-%m-%d")} ({now.strftime("%A")}). Rozsahy: {date_ctx}
 
 PRAVIDLO: Vždy zavolej nástroj. Nikdy neodpovídej z paměti.
