@@ -15,7 +15,6 @@ _WRITE_MODULES = {"meetings", "calls", "tasks", "notes", "contacts", "accounts",
 _READ_MODULES = {"meetings", "calls", "tasks", "notes", "contacts", "accounts", "leads"}
 _RAG_MODULES = {"", "contacts", "accounts", "meetings", "calls", "tasks", "notes", "leads"}
 
-
 class CrmActionToolArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     module: str

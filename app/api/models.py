@@ -35,6 +35,15 @@ class RagIngestRequest(BaseModel):
     incremental: bool = True
 
 
+class CrmRecordCreatedEventRequest(BaseModel):
+    chat_id: str
+    module: str = "Meetings"
+    record_id: str
+    record_name: str | None = None
+    user_message: str | None = None
+    source: str | None = "crm"
+
+
 class ChatMessageItem(BaseModel):
     role: str
     content: str

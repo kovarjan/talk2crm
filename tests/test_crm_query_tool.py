@@ -119,6 +119,22 @@ def test_crm_query_tool_contacts_account_id_translates_to_relation_filter():
     assert relate_operand["filter"]["operands"][0]["value"] == "a42333d4-c035-2f73-865c-64ee30906163"
 
 
+def test_crm_query_tool_meetings_account_id_translates_to_parent_filter():
+    client = FakeCrmClient()
+    tools = _make_tools(crm_client=client)
+    tool = _get_tool(tools, "crm_query_tool")
+    filters_json = json.dumps([{"field": "account_id", "op": "eq", "value": "a42333d4-c035-2f73-865c-64ee30906163"}])
+    result = json.loads(asyncio.run(tool.ainvoke({"module": "Meetings", "filters": filters_json})))
+    assert result["status"] == "ok"
+    assert client.last_call is not None
+    operand = client.last_call["data"]["filter"]["operands"][0]
+    assert operand["field"] == "parent_id"
+    assert operand["fieldModule"] == "Meetings"
+    assert operand["type"] == "eq"
+    assert operand["value"] == "a42333d4-c035-2f73-865c-64ee30906163"
+    assert operand["parent_type"] == "Accounts"
+
+
 def test_crm_query_tool_invalid_filters_json():
     tools = _make_tools()
     tool = _get_tool(tools, "crm_query_tool")

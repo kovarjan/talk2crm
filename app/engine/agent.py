@@ -107,6 +107,11 @@ Datum: {now.strftime("%Y-%m-%d")} ({now.strftime("%A")}). Rozsahy: {date_ctx}
 
 PRAVIDLO: Vždy zavolej nástroj. Nikdy neodpovídej z paměti.
 PRAVIDLO: Data do crm_action_tool musí vycházet pouze z aktuálního vstupu, KONVERZAČNÍ HISTORIE a výsledků nástrojů. Nikdy necopy-paste hodnoty z ukázek.
+PRAVIDLO PENDING AKCE: Kontext může obsahovat pending_action — návrh akce čekající na potvrzení.
+  Pokud pending_action.action == "create": záznam v CRM JEŠTĚ NEEXISTUJE, žádné CRM id není k dispozici.
+  Pro úpravu polí (datum, čas, popis, ...): zavolej crm_action_tool s action="create" a KOMPLETNÍMI poli — zkopíruj všechna pole z pending_action.data.fields a přepiš to, co uživatel mění.
+  NIKDY nevolej action="update"/"delete" na záznam s pending_action.action="create".
+  NIKDY nefiltruj Meetings/Calls podle contact_id — použij parametr search.
 
 DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
 1. rag_search_tool(query: str, module: str="", limit: int=5)
@@ -136,6 +141,10 @@ PRAVIDLA VÝBĚRU KONTAKTU/FIRMY:
 - U každé možnosti uveď dostupné rozlišující údaje: firma (account_name), pozice (title), město/adresa, telefon, email.
 - Nepiš obecné "upřesni prosím". Vždy dej konkrétní výběr možností, aby uživatel mohl odpovědět jednou větou.
 - Když uživatel upřesní firmu nebo město, preferuj výběr z už nalezených kandidátů.
+
+UI KONTEXTU: Kontext může obsahovat ui_focus_hint_cz a pole module/record/record_name/record_id z CRM obrazovky.
+  Ber to jako orientační nápovědu (co má uživatel pravděpodobně otevřené), NE jako závazný fakt.
+  Přednost má uživatelský vstup nebo výsledek nástroje před UI kontextem.
 
 VZORY:
 Dotaz: "kontakty firmy Zlíner"
@@ -204,10 +213,17 @@ async def run_agent(
     tools_by_name: dict[str, Any] = {getattr(t, "name", ""): t for t in tools}
     system_prompt = _build_system_prompt(tenant_id)
     history_block = _format_recent_history(chat_history)
-    if context and context.get("module"):
+    if context:
+        ui_focus_hint = str(context.get("ui_focus_hint_cz") or "").strip()
+        ui_focus_block = (
+            f"KONTEXT UI (nezávazná nápověda): {ui_focus_hint}\n"
+            if ui_focus_hint
+            else ""
+        )
         human_text = (
             f"Vstup: {input_text}\n"
-            f"Kontext: {json.dumps(context, ensure_ascii=False)}\n"
+            f"{ui_focus_block}"
+            f"Kontext (neautoritativní metadata): {json.dumps(context, ensure_ascii=False)}\n"
             f"KONVERZAČNÍ HISTORIE (nejnovější dole):\n{history_block or '(prázdná)'}\n"
             f"User ID: {user_id}"
         )

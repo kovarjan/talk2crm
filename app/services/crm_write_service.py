@@ -248,6 +248,24 @@ class CRMWriteService:
         )
         data = adjustment.data
 
+        # Ensure any contact resolved into fields is also present in invitees.
+        # The adjustment engine only does this for coripo_public mode; we guard
+        # it here unconditionally so the pending action always carries the full
+        # invitee list regardless of CRM mode.
+        if effective_module.lower() in {"meetings", "meeting", "calls", "call"}:
+            _fields = data.get("fields") if isinstance(data.get("fields"), dict) else {}
+            _contact_id = str(_fields.get("contact_id") or "").strip()
+            if _contact_id:
+                _invitees = data.get("invitees")
+                if not isinstance(_invitees, dict):
+                    _invitees = {"Users": [], "Contacts": [], "Leads": []}
+                    data["invitees"] = _invitees
+                _invitees.setdefault("Users", [])
+                _invitees.setdefault("Contacts", [])
+                _invitees.setdefault("Leads", [])
+                if not any(str(inv.get("id") or "") == _contact_id for inv in _invitees["Contacts"]):
+                    _invitees["Contacts"].append({"id": _contact_id})
+
         if normalized_action in mutating_actions and not self.action_confirmation:
             pending_action = build_pending_action_envelope(
                 module=module,

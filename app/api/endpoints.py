@@ -33,6 +33,7 @@ from app.api.models import (
     ChatHistoryResponse,
     ChatMessageItem,
     ChatReplaceRequest,
+    CrmRecordCreatedEventRequest,
     CreateChatResponse,
     ProcessInputRequest,
     RagIngestRequest,
@@ -562,6 +563,60 @@ def _is_read_only_data_query(input_text: str) -> bool:
     )
 
 
+def _canonical_module_name(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    canonical_map = {
+        "contacts": "Contacts",
+        "accounts": "Accounts",
+        "meetings": "Meetings",
+        "calls": "Calls",
+        "tasks": "Tasks",
+        "notes": "Notes",
+        "opportunities": "Opportunities",
+        "leads": "Leads",
+        "users": "Users",
+        "cases": "Cases",
+    }
+    return canonical_map.get(text.lower(), text)
+
+
+def _extract_crm_record_created_event(metadata: dict[str, Any] | None) -> dict[str, str] | None:
+    if not isinstance(metadata, dict):
+        return None
+
+    containers: list[dict[str, Any]] = [metadata]
+    agent_result = metadata.get("agent_result")
+    if isinstance(agent_result, dict):
+        containers.append(agent_result)
+
+    for container in containers:
+        raw_event = container.get("crm_sync_event")
+        if not isinstance(raw_event, dict):
+            continue
+        event_type = str(raw_event.get("type") or "").strip().lower()
+        if event_type and event_type != "record_created":
+            continue
+        module = _canonical_module_name(raw_event.get("module"))
+        record_id = str(raw_event.get("record_id") or "").strip()
+        if not module or not record_id:
+            continue
+        normalized_event: dict[str, str] = {
+            "type": "record_created",
+            "module": module,
+            "record_id": record_id,
+        }
+        record_name = str(raw_event.get("record_name") or "").strip()
+        if record_name:
+            normalized_event["record_name"] = record_name
+        source = str(raw_event.get("source") or "").strip()
+        if source:
+            normalized_event["source"] = source
+        return normalized_event
+    return None
+
+
 async def _load_latest_pending_action(
     db: AsyncSession,
     *,
@@ -589,6 +644,112 @@ async def _load_latest_pending_action(
     if not isinstance(agent_result, dict):
         return None
     return _extract_pending_action_from_agent_result(agent_result)
+
+
+async def _load_latest_crm_record_created_event(
+    db: AsyncSession,
+    *,
+    chat_id: str,
+    tenant_id: str,
+    user_id: str,
+) -> dict[str, str] | None:
+    stmt = (
+        select(ChatMessage)
+        .where(
+            ChatMessage.chat_id == chat_id,
+            ChatMessage.tenant_id == tenant_id,
+            ChatMessage.user_id == user_id,
+            ChatMessage.role == "assistant",
+        )
+        .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
+        .limit(30)
+    )
+    result = await db.execute(stmt)
+    messages = result.scalars().all()
+    for message in messages:
+        metadata = message.metadata_json if isinstance(message.metadata_json, dict) else {}
+        event = _extract_crm_record_created_event(metadata)
+        if event is not None:
+            return event
+    return None
+
+
+def _merge_context_with_created_record(
+    context: dict[str, Any] | None,
+    created_record_event: dict[str, str] | None,
+) -> dict[str, Any]:
+    merged = dict(context or {})
+    if not isinstance(created_record_event, dict):
+        return merged
+
+    module = _canonical_module_name(created_record_event.get("module"))
+    record_id = str(created_record_event.get("record_id") or "").strip()
+    record_name = str(created_record_event.get("record_name") or "").strip()
+
+    if module and not str(merged.get("module") or "").strip():
+        merged["module"] = module
+    if module and not str(merged.get("record_module") or "").strip():
+        merged["record_module"] = module
+    if record_id and not str(merged.get("record") or "").strip():
+        merged["record"] = record_id
+    if record_id and not str(merged.get("record_id") or "").strip():
+        merged["record_id"] = record_id
+    if record_name and not str(merged.get("record_name") or "").strip():
+        merged["record_name"] = record_name
+
+    entities_raw = merged.get("entities")
+    entities = dict(entities_raw) if isinstance(entities_raw, dict) else {}
+    module_lower = module.lower()
+    if module_lower == "meetings" and record_id and not str(entities.get("meeting_id") or "").strip():
+        entities["meeting_id"] = record_id
+    if module_lower == "calls" and record_id and not str(entities.get("call_id") or "").strip():
+        entities["call_id"] = record_id
+    if entities:
+        merged["entities"] = entities
+
+    return merged
+
+
+def _build_soft_ui_focus_hint(context: dict[str, Any] | None) -> str | None:
+    if not isinstance(context, dict):
+        return None
+
+    module = _canonical_module_name(
+        context.get("record_module")
+        or context.get("module")
+    )
+    record_name = str(context.get("record_name") or "").strip()
+    record_id = str(context.get("record_id") or context.get("record") or "").strip()
+    if not module and not record_name and not record_id:
+        return None
+
+    module_label_map = {
+        "meetings": "schůzky",
+        "calls": "hovoru",
+        "contacts": "kontaktu",
+        "accounts": "firmy",
+        "tasks": "úkolu",
+        "notes": "poznámky",
+    }
+    module_label = module_label_map.get(module.lower(), "záznamu") if module else "záznamu"
+
+    parts: list[str] = [f"Uživatel má v CRM právě otevřen DetailView {module_label}."]
+    if record_name:
+        parts.append(f"Název: '{record_name}'.")
+    if record_id:
+        parts.append(f"ID: {record_id}.")
+    parts.append("Ber to jako orientační kontext (nápovědu), ne jako závazný fakt.")
+    return " ".join(parts)
+
+
+def _with_soft_ui_focus_hint(context: dict[str, Any] | None) -> dict[str, Any]:
+    merged = dict(context or {})
+    if str(merged.get("ui_focus_hint_cz") or "").strip():
+        return merged
+    hint = _build_soft_ui_focus_hint(merged)
+    if hint:
+        merged["ui_focus_hint_cz"] = hint
+    return merged
 
 
 def _history_for_title_prompt(history: list[ChatMessageItem]) -> str:
@@ -753,6 +914,18 @@ async def _process_input_core(
         user_id=user_id,
     )
     incoming_context = dict(payload.context or {})
+    latest_created_record = await _load_latest_crm_record_created_event(
+        db,
+        chat_id=chat.id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
+    incoming_module = _canonical_module_name(incoming_context.get("module"))
+    created_module = _canonical_module_name(
+        latest_created_record.get("module") if isinstance(latest_created_record, dict) else ""
+    )
+    if latest_created_record and (not incoming_module or incoming_module.lower() == created_module.lower()):
+        incoming_context = _merge_context_with_created_record(incoming_context, latest_created_record)
     action_confirmation = bool(incoming_context.get("confirm_action", False))
     should_merge_pending = bool(latest_pending_action) and (
         action_confirmation or not _is_read_only_data_query(payload.input_text)
@@ -761,6 +934,7 @@ async def _process_input_core(
         effective_context = _merge_context_with_pending_action(incoming_context, latest_pending_action)
     else:
         effective_context = incoming_context
+    effective_context = _with_soft_ui_focus_hint(effective_context)
     request_context = effective_context or None
 
     await _append_message(
@@ -1214,6 +1388,127 @@ async def process_input(
         )
 
     return BaseResponse(success=True, response=response)
+
+
+@router.post("/crm/events/record-created/", response_model=BaseResponse)
+async def crm_record_created_event(
+    payload: CrmRecordCreatedEventRequest,
+    ctx: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db),
+) -> BaseResponse:
+    record_id = str(payload.record_id or "").strip()
+    if not record_id:
+        raise HTTPException(status_code=400, detail="record_id is required")
+    module = _canonical_module_name(payload.module)
+    if not module:
+        raise HTTPException(status_code=400, detail="module is required")
+
+    chat = await _get_chat_or_404(
+        db,
+        chat_id=payload.chat_id,
+        tenant_id=ctx["tenant_id"],
+        user_id=ctx["user_id"],
+    )
+    latest_event = await _load_latest_crm_record_created_event(
+        db,
+        chat_id=chat.id,
+        tenant_id=ctx["tenant_id"],
+        user_id=ctx["user_id"],
+    )
+    if (
+        latest_event
+        and latest_event.get("module", "").lower() == module.lower()
+        and latest_event.get("record_id") == record_id
+    ):
+        return BaseResponse(
+            success=True,
+            response={
+                "chat_id": chat.id,
+                "module": module,
+                "record_id": record_id,
+                "record_name": payload.record_name,
+                "deduplicated": True,
+                "pending_action_cleared": False,
+            },
+        )
+
+    latest_pending_action = await _load_latest_pending_action(
+        db,
+        chat_id=chat.id,
+        tenant_id=ctx["tenant_id"],
+        user_id=ctx["user_id"],
+    )
+    pending_action = str(
+        (latest_pending_action or {}).get("action") if isinstance(latest_pending_action, dict) else ""
+    ).strip().lower()
+    pending_module = _canonical_module_name(
+        (latest_pending_action or {}).get("effective_module")
+        or (latest_pending_action or {}).get("module")
+        if isinstance(latest_pending_action, dict)
+        else ""
+    )
+    pending_create_resolved = pending_action == "create" and (
+        not pending_module or pending_module.lower() == module.lower()
+    )
+
+    message = (payload.user_message or "").strip()
+    record_name = str(payload.record_name or "").strip()
+    if not message:
+        if record_name:
+            message = (
+                f"Potvrzeno z CRM: záznam '{record_name}' ({module}) byl vytvořen. "
+                f"CRM ID: {record_id}."
+            )
+        else:
+            message = f"Potvrzeno z CRM: záznam v modulu {module} byl vytvořen. CRM ID: {record_id}."
+        if pending_create_resolved:
+            message += " Další úpravy provedu přímo nad tímto CRM ID."
+
+    source = str(payload.source or "crm").strip() or "crm"
+    crm_sync_event: dict[str, Any] = {
+        "type": "record_created",
+        "module": module,
+        "record_id": record_id,
+        "source": source,
+    }
+    if record_name:
+        crm_sync_event["record_name"] = record_name
+
+    metadata: dict[str, Any] = {
+        "crm_sync_event": crm_sync_event,
+        "agent_result": {
+            "status": "crm_sync_record_created",
+            "message_to_user": message,
+            "output": message,
+            "crm_sync_event": crm_sync_event,
+        },
+    }
+    if isinstance(latest_pending_action, dict):
+        metadata["resolved_pending_action"] = latest_pending_action
+
+    await _append_message(
+        db,
+        chat=chat,
+        tenant_id=ctx["tenant_id"],
+        user_id=ctx["user_id"],
+        role="assistant",
+        content=message,
+        metadata=metadata,
+    )
+    await db.commit()
+
+    return BaseResponse(
+        success=True,
+        response={
+            "chat_id": chat.id,
+            "module": module,
+            "record_id": record_id,
+            "record_name": record_name or None,
+            "source": source,
+            "pending_action_cleared": pending_create_resolved,
+            "deduplicated": False,
+        },
+    )
 
 
 @router.post("/process-audio/", response_model=BaseResponse)
