@@ -20,9 +20,11 @@ from app.engine.tool_logger import ToolCallLogger
 from app.engine.tool_validator import (
     CrmActionToolArgs,
     CrmQueryToolArgs,
+    GetCompanyOverviewToolArgs,
     MyMeetingsToolArgs,
     RagSearchToolArgs,
     validate_crm_action_call,
+    validate_get_company_overview_call,
     validate_crm_query_call,
     validate_my_meetings_call,
     validate_rag_search_call,
@@ -1349,35 +1351,42 @@ def _format_filter_datetime_boundary(value: str) -> str:
     return dt.strftime("%Y-%m-%d")
 
 
-def _build_login_user_meetings_window_filter(date_from: str, date_to: str) -> dict[str, Any]:
-    date_from_value = _format_filter_datetime_boundary(date_from)
-    date_to_value = _format_filter_datetime_boundary(date_to)
-    return {
-        "operator": "and",
-        "operands": [
-            {
-                "field": "assigned_user_id",
-                "type": "eq",
-                "value": "{%LOGIN_USER%}",
-            },
+def _build_login_user_meetings_window_filter(
+    date_from: str | None,
+    date_to: str | None,
+) -> dict[str, Any]:
+    operands: list[dict[str, Any]] = [
+        {
+            "field": "assigned_user_id",
+            "type": "eq",
+            "value": "{%LOGIN_USER%}",
+        }
+    ]
+
+    if date_from:
+        operands.append(
             {
                 "field": "date_start",
                 "fieldModule": None,
                 "fieldRel": None,
                 "type": "moreThanInclude",
-                "value": date_from_value,
+                "value": date_from,
                 "relationField": None,
-            },
+            }
+        )
+    if date_to:
+        operands.append(
             {
                 "field": "date_start",
                 "fieldModule": None,
                 "fieldRel": None,
                 "type": "lessThanInclude",
-                "value": date_to_value,
+                "value": date_to,
                 "relationField": None,
-            },
-        ],
-    }
+            }
+        )
+
+    return {"operator": "and", "operands": operands}
 
 
 def _sort_records_by_datetime(records: list[dict[str, Any]], field_name: str) -> list[dict[str, Any]]:
@@ -1597,19 +1606,20 @@ def build_tools(
 
     @tool("my_meetings_tool", args_schema=MyMeetingsToolArgs)
     async def my_meetings_tool(
-        date_from: str,
-        date_to: str,
+        date_from: str | None = None,
+        date_to: str | None = None,
         limit: int = 100,
     ) -> str:
         """
-        Returns current logged-in user's meetings in a date window.
+        Returns current logged-in user's meetings.
 
-        date_from/date_to: timeframe boundaries (ISO date: YYYY-MM-DD).
+        date_from/date_to: optional timeframe boundaries (ISO date: YYYY-MM-DD).
         Uses CRM filter with assigned_user_id = {%LOGIN_USER%}.
 
         This tool is intended for:
         - displaying "my meetings" in a period
         - checking time-window conflicts before creating a new meeting
+        - listing latest meetings with just a limit (without forcing a date range)
         """
         if settings.crm_mode.lower() == "off":
             return json.dumps({"status": "crm-disabled", "message_to_user": "CRM je vypnuté."}, ensure_ascii=False)
@@ -1621,31 +1631,45 @@ def build_tools(
                 ensure_ascii=False,
             )
 
-        from_boundary = _format_filter_datetime_boundary(date_from)
-        to_boundary = _format_filter_datetime_boundary(date_to)
-        if not from_boundary or not to_boundary:
+        from_boundary = _format_filter_datetime_boundary(date_from) if date_from else ""
+        to_boundary = _format_filter_datetime_boundary(date_to) if date_to else ""
+
+        if date_from and not from_boundary:
             return json.dumps(
                 {
                     "status": "error",
-                    "message": "Invalid date_from/date_to. Use YYYY-MM-DD.",
+                    "message": "Invalid date_from. Use YYYY-MM-DD.",
+                    "cards": [],
+                },
+                ensure_ascii=False,
+            )
+        if date_to and not to_boundary:
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": "Invalid date_to. Use YYYY-MM-DD.",
                     "cards": [],
                 },
                 ensure_ascii=False,
             )
 
-        from_dt = _parse_datetime(from_boundary)
-        to_dt = _parse_datetime(to_boundary)
-        if from_dt is None or to_dt is None or from_dt > to_dt:
-            return json.dumps(
-                {
-                    "status": "error",
-                    "message": "Invalid timeframe: date_from must be <= date_to.",
-                    "cards": [],
-                },
-                ensure_ascii=False,
-            )
+        if from_boundary and to_boundary:
+            from_dt = _parse_datetime(from_boundary)
+            to_dt = _parse_datetime(to_boundary)
+            if from_dt is None or to_dt is None or from_dt > to_dt:
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "message": "Invalid timeframe: date_from must be <= date_to.",
+                        "cards": [],
+                    },
+                    ensure_ascii=False,
+                )
 
-        crm_filter = _build_login_user_meetings_window_filter(from_boundary, to_boundary)
+        crm_filter = _build_login_user_meetings_window_filter(
+            from_boundary or None,
+            to_boundary or None,
+        )
         payload = {
             "limit": max(1, min(int(limit), 500)),
             "offset": 0,
@@ -1660,14 +1684,14 @@ def build_tools(
                 "assigned_user_name",
                 "parent_name",
             ],
-            "order": [{"field": "date_start", "sort": "ASC", "module": "Meetings"}],
+            "order": [{"field": "date_start", "sort": "DESC", "module": "Meetings"}],
         }
 
         async with ToolCallLogger(
             "my_meetings_tool",
             tenant_id,
             user_id,
-            inputs={"date_from": date_from, "date_to": date_to, "limit": limit},
+            inputs={"date_from": from_boundary or None, "date_to": to_boundary or None, "limit": limit},
         ) as tcl:
             try:
                 raw = await crm_client.execute_module_action(
@@ -1693,8 +1717,8 @@ def build_tools(
             result = {
                 "status": "ok",
                 "module": "Meetings",
-                "date_from": from_boundary,
-                "date_to": to_boundary,
+                "date_from": from_boundary or None,
+                "date_to": to_boundary or None,
                 "total": total,
                 "summary": "\n".join(summary_lines) if summary_lines else "Žádné záznamy.",
                 "cards": cards,
@@ -1761,7 +1785,7 @@ def build_tools(
             # print(f"Built CRM filter: {json.dumps(crm_filter, ensure_ascii=False)}")
 
             data: dict = {
-                "limit": max(1, min(int(limit), 100)),
+                "limit": max(1, min(int(limit), 500)),
                 "offset": 0,
                 "filter": crm_filter,
                 "include_field_names": False,
@@ -1822,4 +1846,54 @@ def build_tools(
             tcl.set_output({"total": total, "module": module})
             return json.dumps(result, ensure_ascii=False)
 
-    return [crm_action_tool, rag_search_tool, my_meetings_tool, crm_query_tool]
+    @tool("get_company_overview", args_schema=GetCompanyOverviewToolArgs)
+    async def get_company_overview(account_id: str) -> str:
+        """
+        Vrátí kompaktní AI detail firmy (Accounts) včetně souvisejících záznamů ze subpanelů.
+        Aktivity a každý related subpanel vrací ve výchozím stavu max 10 nejnovějších záznamů.
+        Měna částek je v response uvedena v default_currency.iso4217 (platí i pro pole amount_usdollar).
+        Parametr: account_id (CRM ID firmy).
+        """
+        if settings.crm_mode.lower() == "off":
+            return json.dumps(
+                {"status": "crm-disabled", "message_to_user": "CRM je vypnuté."},
+                ensure_ascii=False,
+            )
+
+        async with ToolCallLogger(
+            "get_company_overview",
+            tenant_id,
+            user_id,
+            inputs={"account_id": account_id},
+        ) as tcl:
+            validation_error = validate_get_company_overview_call(account_id=account_id)
+            if validation_error:
+                error_payload = {"status": "tool_validation_error", "message": validation_error}
+                tcl.set_output(error_payload)
+                return json.dumps(error_payload, ensure_ascii=False)
+
+            try:
+                result = await crm_client.execute_module_action(
+                    module="Accounts",
+                    action="company_overview",
+                    data={"id": account_id},
+                )
+            except Exception as exc:
+                error_payload = {"status": "error", "message": str(exc)}
+                tcl.set_output(error_payload)
+                return json.dumps(error_payload, ensure_ascii=False)
+
+            if isinstance(result, dict):
+                tcl.set_output(
+                    {
+                        "module": result.get("module") or "Accounts",
+                        "related_modules": len(result.get("related_records") or {}),
+                    }
+                )
+                return json.dumps(result, ensure_ascii=False)
+
+            wrapped = {"status": "ok", "module": "Accounts", "data": result}
+            tcl.set_output({"module": "Accounts", "related_modules": 0})
+            return json.dumps(wrapped, ensure_ascii=False)
+
+    return [crm_action_tool, rag_search_tool, my_meetings_tool, crm_query_tool, get_company_overview]

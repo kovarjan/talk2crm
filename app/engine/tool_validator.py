@@ -32,8 +32,8 @@ class RagSearchToolArgs(BaseModel):
 
 class MyMeetingsToolArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    date_from: str
-    date_to: str
+    date_from: str | None = None
+    date_to: str | None = None
     limit: int = 100
 
 
@@ -46,6 +46,11 @@ class CrmQueryToolArgs(BaseModel):
     date_to: str | None = None
     order_by: str | None = None
     limit: int = 20
+
+
+class GetCompanyOverviewToolArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    account_id: str
 
 
 def _safe_text(value: Any) -> str:
@@ -140,10 +145,10 @@ def validate_rag_search_call(*, query: str, limit: int, module: str) -> str | No
     return None
 
 
-def validate_my_meetings_call(*, date_from: str, date_to: str, limit: int) -> str | None:
-    if not _DATE_RE.match(_safe_text(date_from)):
+def validate_my_meetings_call(*, date_from: str | None, date_to: str | None, limit: int) -> str | None:
+    if date_from and not _DATE_RE.match(_safe_text(date_from)):
         return "date_from must be in YYYY-MM-DD format."
-    if not _DATE_RE.match(_safe_text(date_to)):
+    if date_to and not _DATE_RE.match(_safe_text(date_to)):
         return "date_to must be in YYYY-MM-DD format."
     if int(limit) < 1 or int(limit) > 500:
         return "Limit must be between 1 and 500."
@@ -187,4 +192,10 @@ def validate_crm_query_call(
         direction = parts[1].strip().lower()
         if direction not in {"asc", "desc"}:
             return "order_by direction must be asc or desc."
+    return None
+
+
+def validate_get_company_overview_call(*, account_id: str) -> str | None:
+    if not _is_valid_crm_id(account_id):
+        return "account_id must be a valid CRM record id."
     return None

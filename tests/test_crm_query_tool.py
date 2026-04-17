@@ -49,7 +49,13 @@ def _get_tool(tools, name):
 def test_build_tools_returns_expected_tools():
     tools = _make_tools()
     names = {getattr(t, "name", "") for t in tools}
-    assert names == {"crm_action_tool", "rag_search_tool", "my_meetings_tool", "crm_query_tool"}
+    assert names == {
+        "crm_action_tool",
+        "rag_search_tool",
+        "my_meetings_tool",
+        "crm_query_tool",
+        "get_company_overview",
+    }
 
 
 def test_crm_query_tool_crm_off():
@@ -57,6 +63,48 @@ def test_crm_query_tool_crm_off():
     tool = _get_tool(tools, "crm_query_tool")
     result = json.loads(asyncio.run(tool.ainvoke({"module": "Contacts"})))
     assert result["status"] == "crm-disabled"
+
+
+def test_get_company_overview_crm_off():
+    tools = _make_tools(crm_mode="off")
+    tool = _get_tool(tools, "get_company_overview")
+    result = json.loads(asyncio.run(tool.ainvoke({"account_id": "7d956317-c1ba-0118-1c91-61545f91b878"})))
+    assert result["status"] == "crm-disabled"
+
+
+def test_get_company_overview_invalid_account_id():
+    tools = _make_tools()
+    tool = _get_tool(tools, "get_company_overview")
+    result = json.loads(asyncio.run(tool.ainvoke({"account_id": "not-a-crm-id"})))
+    assert result["status"] == "tool_validation_error"
+    assert "account_id must be a valid CRM record id" in result["message"]
+
+
+def test_get_company_overview_calls_company_overview_action():
+    class OverviewClient(FakeCrmClient):
+        async def execute_module_action(self, module: str, action: str, data: dict[str, Any]) -> dict[str, Any]:
+            self.last_call = {"module": module, "action": action, "data": data}
+            return {
+                "module": "Accounts",
+                "record": {"id": data["id"], "name": "Test Account"},
+                "activities_summary": {"calls": "1"},
+                "activities": {"calls": "1"},
+                "related_records": {"Contacts": [{"id": "abc", "name": "Jane Doe"}]},
+            }
+
+    client = OverviewClient()
+    tools = _make_tools(crm_client=client)
+    tool = _get_tool(tools, "get_company_overview")
+    account_id = "7d956317-c1ba-0118-1c91-61545f91b878"
+    result = json.loads(asyncio.run(tool.ainvoke({"account_id": account_id})))
+
+    assert client.last_call == {
+        "module": "Accounts",
+        "action": "company_overview",
+        "data": {"id": account_id},
+    }
+    assert result["module"] == "Accounts"
+    assert result["record"]["id"] == account_id
 
 
 def test_crm_query_tool_search_produces_cont_filter():
@@ -143,12 +191,12 @@ def test_crm_query_tool_invalid_filters_json():
     assert "Invalid filters JSON" in result["message"]
 
 
-def test_crm_query_tool_limit_capped_at_100():
+def test_crm_query_tool_limit_capped_at_500():
     client = FakeCrmClient()
     tools = _make_tools(crm_client=client)
     tool = _get_tool(tools, "crm_query_tool")
     asyncio.run(tool.ainvoke({"module": "Contacts", "limit": 500}))
-    assert client.last_call["data"]["limit"] == 100
+    assert client.last_call["data"]["limit"] == 500
 
 
 def test_crm_query_tool_order_by():
@@ -211,6 +259,29 @@ def test_my_meetings_tool_builds_login_user_filter_and_returns_table_cards():
     assert result["total"] == 1
     assert isinstance(result["cards"], list) and result["cards"]
     assert result["cards"][0]["type"] == "table"
+
+
+def test_my_meetings_tool_without_date_range_uses_only_login_filter():
+    class MeetingsClient(FakeCrmClient):
+        async def execute_module_action(self, module: str, action: str, data: dict[str, Any]) -> dict[str, Any]:
+            self.last_call = {"module": module, "action": action, "data": data}
+            return {"records": []}
+
+    client = MeetingsClient()
+    tools = _make_tools(crm_client=client)
+    tool = _get_tool(tools, "my_meetings_tool")
+    result = json.loads(asyncio.run(tool.ainvoke({"limit": 500})))
+
+    assert client.last_call is not None
+    filt = client.last_call["data"]["filter"]
+    assert len(filt["operands"]) == 1
+    assert filt["operands"][0]["field"] == "assigned_user_id"
+    assert filt["operands"][0]["type"] == "eq"
+    assert filt["operands"][0]["value"] == "{%LOGIN_USER%}"
+    assert client.last_call["data"]["limit"] == 500
+    assert result["status"] == "ok"
+    assert result["date_from"] is None
+    assert result["date_to"] is None
 
 
 def test_my_meetings_tool_rejects_invalid_timeframe():
