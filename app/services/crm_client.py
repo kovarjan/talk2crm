@@ -827,6 +827,26 @@ class SugarClient:
             )
             return {"status": "ok", "id": record_id}
 
+        if normalized_action == "company_overview":
+            record_id = str(data.get("id") or "").strip()
+            if not record_id:
+                raise ValueError("company_overview action requires 'id' in data")
+            raw = await self._coripo_request(
+                "POST",
+                f"detail/{module_name}/{record_id}",
+                json_body={"AiRequest": True},
+                require_sid=True,
+            )
+            message = raw.get("message")
+            if isinstance(message, dict):
+                payload = message.get("data")
+                if isinstance(payload, dict):
+                    return payload
+            data_payload = raw.get("data")
+            if isinstance(data_payload, dict):
+                return data_payload
+            return raw
+
         if normalized_action in {"get", "read", "detail"}:
             record_id = str(data.get("id") or "").strip()
             if not record_id:
