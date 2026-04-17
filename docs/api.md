@@ -38,6 +38,12 @@ Optional HMAC headers (machine-to-machine use):
   - multipart: `file`, optional `chat_id`/`X-Chat-Id`, optional `context`, locale, `return_voice`
   - transcribes audio then reuses same pipeline behavior
 
+### CRM sync callbacks
+- `POST /crm/events/record-created/`
+  - body: `chat_id`, `module`, `record_id`, optional `record_name`, optional `user_message`, optional `source`
+  - use case: CRM confirms user created a pending record outside talk2api2 (for example pending Meeting)
+  - effect: app appends assistant history event with CRM ID and clears pending-create flow for next turn
+
 ### Search
 - `POST /search/`
   - body uses `input_text` as query and optional `scope` (`contacts|accounts|meetings`)
@@ -59,3 +65,4 @@ Optional HMAC headers (machine-to-machine use):
 - Pipeline response is always wrapped with `success` and `response` object.
 - For executable CRM actions, app attempts CRM call unless already fetched data is present.
 - If CRM mode is `off`, CRM execution returns `None` and command response is still returned.
+- Latest CRM sync event (`record-created`) is used as contextual hint (`record`, `record_module`) when module matches, so follow-up edits can target known CRM ID.

@@ -670,7 +670,14 @@ class ModuleAdjustmentEngine:
             out: list[dict[str, str]] = []
             for row in raw:
                 if isinstance(row, dict):
-                    row_id = str(row.get("id") or "").strip()
+                    # Accept alternate key names the LLM may use
+                    row_id = str(
+                        row.get("id")
+                        or row.get("contact_id")
+                        or row.get("user_id")
+                        or row.get("lead_id")
+                        or ""
+                    ).strip()
                 else:
                     row_id = str(row).strip()
                 if not row_id:

@@ -85,6 +85,28 @@ def test_build_filter_contacts_account_id_uses_relation_filter():
     assert relate_operand["filter"]["operands"][0]["value"] == "a42333d4-c035-2f73-865c-64ee30906163"
 
 
+def test_build_filter_meetings_account_id_uses_parent_id_and_parent_type():
+    specs = [FilterSpec(field="account_id", op="eq", value="a42333d4-c035-2f73-865c-64ee30906163")]
+    f = build_filter(module="Meetings", filters=specs)
+    operand = f["operands"][0]
+    assert operand["field"] == "parent_id"
+    assert operand["fieldModule"] == "Meetings"
+    assert operand["type"] == "eq"
+    assert operand["value"] == "a42333d4-c035-2f73-865c-64ee30906163"
+    assert operand["parent_type"] == "Accounts"
+
+
+def test_build_filter_meetings_account_id_with_name_falls_back_to_parent_name():
+    specs = [FilterSpec(field="account_id", op="eq", value="365.bank")]
+    f = build_filter(module="Meetings", filters=specs)
+    operand = f["operands"][0]
+    assert operand["field"] == "parent_name"
+    assert operand["fieldModule"] == "Meetings"
+    assert operand["type"] == "cont"
+    assert operand["value"] == "365.bank"
+    assert operand["parent_type"] == "Accounts"
+
+
 def test_build_order_asc():
     result = build_order("date_start:asc")
     assert result == [{"field": "date_start", "sort": "ASC", "module": None}]

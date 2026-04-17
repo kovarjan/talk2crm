@@ -4,7 +4,7 @@ import copy
 import json
 import re
 import unicodedata
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from app.domain.contracts import build_pending_action_envelope, normalize_pending_action_envelope
@@ -13,6 +13,7 @@ from app.presentation.cards import parse_datetime
 _TIME_TOKEN_RE = re.compile(r"\b(?P<hour>\d{1,2})[:.](?P<minute>\d{2})\b")
 _HOURS_RE = re.compile(r"\b(?:na\s+)?(?P<hours>\d{1,2})\s*(?:h|hod|hodin|hodiny)\b", re.IGNORECASE)
 _MINUTES_RE = re.compile(r"\b(?:na\s+)?(?P<minutes>\d{1,3})\s*(?:m|min|minut|minuty)\b", re.IGNORECASE)
+_DESCRIPTION_RE = re.compile(r"\bpopis\s+(.+)", re.IGNORECASE | re.DOTALL)
 
 
 def _normalize_text(value: str) -> str:
@@ -64,13 +65,11 @@ def _looks_like_pending_edit(input_text: str) -> bool:
         "misto",
         "bez",
         "na ",
+        "popis ",
     )
     if any(token in normalized for token in edit_tokens):
         return True
     if _TIME_TOKEN_RE.search(input_text or ""):
-        return True
-    weekday_tokens = ("pondeli", "utery", "streda", "ctvrtek", "patek", "sobota", "nedele")
-    if any(token in normalized for token in weekday_tokens):
         return True
     return False
 
@@ -87,21 +86,18 @@ def _extract_duration_patch(input_text: str) -> tuple[int, int] | None:
     return None
 
 
-def _weekday_from_text(input_text: str) -> int | None:
-    normalized = _normalize_text(input_text)
-    mapping = {
-        "pondeli": 0,
-        "utery": 1,
-        "streda": 2,
-        "ctvrtek": 3,
-        "patek": 4,
-        "sobota": 5,
-        "nedele": 6,
-    }
-    for token, day in mapping.items():
-        if token in normalized:
-            return day
-    return None
+# _weekday_from_text is intentionally disabled.
+# Day-of-week resolution from phrases like "na úterý v pondělí nemůžu" is
+# ambiguous when multiple weekdays are present; the LLM receives the current
+# date in its system prompt and resolves relative weekdays correctly on its own.
+# def _weekday_from_text(input_text: str) -> int | None:
+#     normalized = _normalize_text(input_text)
+#     mapping = {"pondeli": 0, "utery": 1, "streda": 2, "ctvrtek": 3,
+#                "patek": 4, "sobota": 5, "nedele": 6}
+#     for token, day in mapping.items():
+#         if token in normalized:
+#             return day
+#     return None
 
 
 def _resolve_datetime_patch(*, input_text: str, current_value: str, now: datetime | None) -> str | None:
@@ -109,7 +105,6 @@ def _resolve_datetime_patch(*, input_text: str, current_value: str, now: datetim
     anchor = current_dt or now or datetime.now()
 
     time_match = _TIME_TOKEN_RE.search(input_text or "")
-    weekday_hint = _weekday_from_text(input_text)
     normalized = _normalize_text(input_text)
     explicit_time = time_match is not None
     part_of_day = False
@@ -129,15 +124,12 @@ def _resolve_datetime_patch(*, input_text: str, current_value: str, now: datetim
         hour, minute = 8, 0
         part_of_day = True
 
-    has_hint = weekday_hint is not None or explicit_time or part_of_day
-    if not has_hint:
+    # Only patch when there is an explicit time signal; weekday/day changes are
+    # handled by the LLM which knows the current date from its system prompt.
+    if not explicit_time and not part_of_day:
         return None
 
-    target = anchor
-    if weekday_hint is not None:
-        delta = (weekday_hint - anchor.weekday()) % 7
-        target = anchor + timedelta(days=delta)
-    target = target.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    target = anchor.replace(hour=hour, minute=minute, second=0, microsecond=0)
     return target.strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -239,6 +231,14 @@ def try_patch_pending_action(
                 fields["duration_minutes"] = new_minutes
                 changed = True
                 notes.append(f"Patched pending duration -> {new_hours}h {new_minutes}m")
+
+    desc_match = _DESCRIPTION_RE.search(input_text or "")
+    if desc_match:
+        new_desc = desc_match.group(1).strip().rstrip(".")
+        if new_desc and new_desc != str(fields.get("description") or "").strip():
+            fields["description"] = new_desc
+            changed = True
+            notes.append(f"Patched pending description -> {new_desc[:60]}")
 
     if not changed:
         return None
