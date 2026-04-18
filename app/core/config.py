@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     llm_api_key: str = "EMPTY"
     llm_temperature: float = 0.1
     llm_context_window_tokens: int = 32768
+    llm_system_prompt_prefix: str = "/nothink"
 
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str | None = None

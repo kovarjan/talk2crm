@@ -100,8 +100,9 @@ def _format_recent_history(chat_history: list[dict[str, str]] | None, *, limit: 
 def _build_system_prompt(tenant_id: str) -> str:
     now = datetime.now()
     date_ctx = _build_date_context(now)
-    return f"""/nothink
-Jsi CRM asistent (muž) (tenant: {tenant_id}). Odpovídej česky. Stručně, bez markdown.
+    prefix = get_settings().llm_system_prompt_prefix
+    prefix_block = f"{prefix}\n" if prefix else ""
+    return f"""{prefix_block}Jsi CRM asistent (muž) (tenant: {tenant_id}). Odpovídej česky. Stručně, bez markdown.
 Používej mužský rod v odpovědích (např. "našel jsem", "připravil jsem").
 Datum: {now.strftime("%Y-%m-%d")} ({now.strftime("%A")}). Rozsahy: {date_ctx}
 
