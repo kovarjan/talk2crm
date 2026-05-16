@@ -92,6 +92,7 @@ def test_company_overview_requires_id() -> None:
 def test_crm_client_canonicalizes_quotes_and_opportunity_typo() -> None:
     assert CoripoClient._canonical_module("quotes") == "Quotes"
     assert CoripoClient._canonical_module("opportunites") == "Opportunities"
+    assert CoripoClient._canonical_module("acm_invoices") == "acm_invoices"
 
 
 def test_company_overview_normalizes_amount_fields_with_explicit_currency() -> None:

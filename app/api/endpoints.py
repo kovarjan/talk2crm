@@ -599,6 +599,7 @@ def _canonical_module_name(value: str | None) -> str:
         "cases": "Cases",
         "quotes": "Quotes",
         "opportunites": "Opportunities",
+        "acm_invoices": "acm_invoices",
     }
     return canonical_map.get(text.lower(), text)
 
@@ -1205,6 +1206,7 @@ def _normalize_ingest_modules(modules: list[str] | None) -> list[str]:
         "cases": "Cases",
         "quotes": "Quotes",
         "opportunites": "Opportunities",
+        "acm_invoices": "acm_invoices",
     }
     normalized: list[str] = []
     seen: set[str] = set()
@@ -1773,6 +1775,7 @@ async def rag_status(
             "cases": "Cases",
             "quotes": "Quotes",
             "opportunites": "Opportunities",
+            "acm_invoices": "acm_invoices",
         }
         normalized_module = canonical_map.get(trimmed.lower(), trimmed) if trimmed else None
     count = rag_service.count(tenant_id=ctx["tenant_id"], module=normalized_module)
