@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 import uuid
 import warnings
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from typing import Any
 
 import httpx
@@ -13,10 +15,48 @@ from qdrant_client import QdrantClient, models
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.services.crm_client import SugarClient
+from app.services.crm_client import CoripoClient
 
 
 logger = get_logger(__name__)
+
+_MODULE_PRIORITY: dict[str, int] = {"Accounts": 0, "Contacts": 1, "Meetings": 2}
+DEFAULT_ENTITY_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "call",
+        "domluv",
+        "do",
+        "kontakt",
+        "kontaktem",
+        "meeting",
+        "na",
+        "naplanuj",
+        "naplanovat",
+        "pani",
+        "pan",
+        "panem",
+        "pristi",
+        "schuzka",
+        "schuzku",
+        "s",
+        "se",
+        "tyden",
+        "utery",
+        "u",
+        "v",
+        "ve",
+        "vytvor",
+        "zitra",
+    }
+)
+_ENTITY_TYPE_MODULES: dict[str, list[str]] = {
+    "contact": ["Contacts"],
+    "contacts": ["Contacts"],
+    "account": ["Accounts"],
+    "accounts": ["Accounts"],
+    "any": ["Contacts", "Accounts"],
+}
+_TEXT_INDEX_FIELDS: tuple[str, ...] = ("text", "text_ascii", "name", "name_ascii")
 
 
 class HashEmbedder:
@@ -109,6 +149,17 @@ class TenantRAGService:
         self.collection_prefix = settings.qdrant_collection
         self._ensured_collections: set[str] = set()
         self.embedder = self._build_embedder()
+        self.entity_stopwords = self._build_entity_stopwords(settings.rag_entity_stopwords_extra)
+        self.entity_min_score = float(settings.rag_entity_min_score)
+
+    @classmethod
+    def _build_entity_stopwords(cls, extra_stopwords: str | None = None) -> frozenset[str]:
+        extra = {
+            cls._normalize_search_text(token)
+            for token in re.split(r"[,;\s]+", str(extra_stopwords or ""))
+            if token.strip()
+        }
+        return frozenset(DEFAULT_ENTITY_STOPWORDS | {token for token in extra if token})
 
     def _build_embedder(self) -> OllamaEmbedder | HashEmbedder:
         base_url = (self.settings.rag_embedding_base_url or "").strip()
@@ -156,6 +207,35 @@ class TenantRAGService:
             )
             return QdrantClient(path=self.settings.qdrant_local_path)
 
+    def _ensure_payload_indexes(self, collection_name: str, *, log_warnings: bool) -> None:
+        for field_name in _TEXT_INDEX_FIELDS:
+            try:
+                self.client.create_payload_index(
+                    collection_name=collection_name,
+                    field_name=field_name,
+                    field_schema=models.TextIndexParams(
+                        type="text",
+                        tokenizer=models.TokenizerType.WORD,
+                        lowercase=True,
+                    ),
+                )
+            except Exception:
+                if log_warnings:
+                    logger.warning(
+                        "Could not create text index field=%s collection=%s",
+                        field_name,
+                        collection_name,
+                    )
+        try:
+            self.client.create_payload_index(
+                collection_name=collection_name,
+                field_name="module",
+                field_schema=models.KeywordIndexParams(type=models.PayloadSchemaType.KEYWORD),
+            )
+        except Exception:
+            if log_warnings:
+                logger.warning("Could not create module index on collection=%s", collection_name)
+
     def _ensure_collection(self, collection_name: str) -> None:
         if collection_name in self._ensured_collections:
             try:
@@ -182,6 +262,7 @@ class TenantRAGService:
                     )
             except Exception:
                 pass
+            self._ensure_payload_indexes(collection_name, log_warnings=False)
             self._ensured_collections.add(collection_name)
             return
         self.client.create_collection(
@@ -191,18 +272,7 @@ class TenantRAGService:
                 distance=models.Distance.COSINE,
             ),
         )
-        try:
-            self.client.create_payload_index(
-                collection_name=collection_name,
-                field_name="text",
-                field_schema=models.TextIndexParams(
-                    type="text",
-                    tokenizer=models.TokenizerType.WORD,
-                    lowercase=True,
-                ),
-            )
-        except Exception:
-            logger.warning("Could not create full-text index on collection=%s", collection_name)
+        self._ensure_payload_indexes(collection_name, log_warnings=True)
         self._ensured_collections.add(collection_name)
         logger.info("Created Qdrant collection name=%s", collection_name)
 
@@ -228,69 +298,249 @@ class TenantRAGService:
         self._ensure_collection(candidate)
         return candidate
 
-    def search(self, *, tenant_id: str, query: str, limit: int = 5) -> list[dict[str, Any]]:
-        collection = self._tenant_collection(tenant_id)
+    @classmethod
+    def _canonical_modules(cls, modules: list[str] | tuple[str, ...] | set[str] | None) -> list[str]:
+        if not modules:
+            return []
+        aliases = {
+            "account": "Accounts",
+            "accounts": "Accounts",
+            "call": "Calls",
+            "calls": "Calls",
+            "contact": "Contacts",
+            "contacts": "Contacts",
+            "lead": "Leads",
+            "leads": "Leads",
+            "meeting": "Meetings",
+            "meetings": "Meetings",
+            "note": "Notes",
+            "notes": "Notes",
+            "task": "Tasks",
+            "tasks": "Tasks",
+        }
+        canonical: list[str] = []
+        for module in modules:
+            mapped = aliases.get(str(module or "").strip().lower())
+            if mapped and mapped not in canonical:
+                canonical.append(mapped)
+        return canonical
 
-        # --- Text filter pass (keyword match on stored JSON text) ---
+    @classmethod
+    def _module_conditions(cls, modules: list[str] | tuple[str, ...] | set[str] | None) -> list[models.FieldCondition]:
+        canonical = cls._canonical_modules(modules)
+        if not canonical:
+            return []
+        return [
+            models.FieldCondition(
+                key="module",
+                match=models.MatchAny(any=canonical),
+            )
+        ]
+
+    @classmethod
+    def _text_filter(
+        cls,
+        *,
+        field_name: str,
+        query: str,
+        modules: list[str] | tuple[str, ...] | set[str] | None,
+    ) -> models.Filter:
+        return models.Filter(
+            must=[
+                *cls._module_conditions(modules),
+                models.FieldCondition(
+                    key=field_name,
+                    match=models.MatchText(text=query),
+                ),
+            ]
+        )
+
+    @classmethod
+    def _module_filter(
+        cls,
+        modules: list[str] | tuple[str, ...] | set[str] | None,
+    ) -> models.Filter | None:
+        conditions = cls._module_conditions(modules)
+        if not conditions:
+            return None
+        return models.Filter(must=conditions)
+
+    def search(
+        self,
+        *,
+        tenant_id: str,
+        query: str,
+        limit: int = 5,
+        modules: list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        collection = self._tenant_collection(tenant_id)
+        limit = max(1, int(limit or 5))
+
+        # --- Text filter pass (prefer entity name fields, then full JSON text) ---
         text_ids: set[str] = set()
         text_results: list[dict[str, Any]] = []
-        try:
-            text_filter = models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="text",
-                        match=models.MatchText(text=query),
-                    )
+        text_limit = max(50, limit * 10)
+        query_ascii = self._strip_diacritics(query)
+        text_passes: list[tuple[str, str, str]] = [
+            ("name", query, "name"),
+            ("text", query, "text"),
+        ]
+        if query_ascii == query.lower() and query_ascii:
+            text_passes.extend(
+                [
+                    ("name_ascii", query_ascii, "name_ascii"),
+                    ("text_ascii", query_ascii, "text_ascii"),
                 ]
             )
-            scroll_points, _ = self.client.scroll(
-                collection_name=collection,
-                scroll_filter=text_filter,
-                with_payload=True,
-                with_vectors=False,
-                limit=limit,
-            )
-            for point in scroll_points:
-                pid = str(getattr(point, "id", "") or "")
-                text_ids.add(pid)
-                text_results.append({"score": 1.0, "payload": point.payload})
-        except Exception:
-            pass  # full-text index may not exist on old collections
+
+        for field_name, text_query, match_type in text_passes:
+            try:
+                scroll_points, _ = self.client.scroll(
+                    collection_name=collection,
+                    scroll_filter=self._text_filter(
+                        field_name=field_name,
+                        query=text_query,
+                        modules=modules,
+                    ),
+                    with_payload=True,
+                    with_vectors=False,
+                    limit=text_limit,
+                )
+                for point in scroll_points:
+                    pid = str(getattr(point, "id", "") or "")
+                    if pid not in text_ids:
+                        text_ids.add(pid)
+                        text_results.append(
+                            {
+                                "score": 0.0,
+                                "match_type": match_type,
+                                "payload": point.payload,
+                            }
+                        )
+            except Exception:
+                pass  # full-text index may not exist on old collections
+        text_results = self._sort_text_results(text_results, query)
 
         # --- Vector similarity pass ---
         query_vector = self.embedder.embed(query)
         vector_limit = max(limit, limit * 2)  # fetch extra to fill after dedup
+        vector_filter = self._module_filter(modules)
         try:
             if hasattr(self.client, "search"):
+                search_kwargs: dict[str, Any] = {
+                    "collection_name": collection,
+                    "query_vector": query_vector,
+                    "limit": vector_limit,
+                    "with_payload": True,
+                }
+                if vector_filter is not None:
+                    search_kwargs["query_filter"] = vector_filter
                 vec_points = self.client.search(
-                    collection_name=collection,
-                    query_vector=query_vector,
-                    limit=vector_limit,
-                    with_payload=True,
+                    **search_kwargs,
                 )
             else:
+                query_kwargs: dict[str, Any] = {
+                    "collection_name": collection,
+                    "query": query_vector,
+                    "limit": vector_limit,
+                    "with_payload": True,
+                }
+                if vector_filter is not None:
+                    query_kwargs["query_filter"] = vector_filter
                 vec_points = self.client.query_points(
-                    collection_name=collection,
-                    query=query_vector,
-                    limit=vector_limit,
-                    with_payload=True,
+                    **query_kwargs,
                 ).points
         except Exception:
-            vec_points = []
+            try:
+                if hasattr(self.client, "search"):
+                    vec_points = self.client.search(
+                        collection_name=collection,
+                        query_vector=query_vector,
+                        limit=vector_limit,
+                        with_payload=True,
+                    )
+                else:
+                    vec_points = self.client.query_points(
+                        collection_name=collection,
+                        query=query_vector,
+                        limit=vector_limit,
+                        with_payload=True,
+                    ).points
+            except Exception:
+                vec_points = []
 
-        # Merge: text matches first (exact keyword hits), then vector results for
-        # records not already included, up to the requested limit.
+        if modules:
+            allowed_modules = set(self._canonical_modules(modules))
+            filtered_vec_points = []
+            for point in vec_points:
+                payload = getattr(point, "payload", None) or {}
+                if str(payload.get("module") or "") in allowed_modules:
+                    filtered_vec_points.append(point)
+            vec_points = filtered_vec_points
+
+        # Merge: text matches first, then vector results for records not already
+        # included, up to the requested limit.
         seen_ids = set(text_ids)
         combined = list(text_results)
         for point in vec_points:
             pid = str(getattr(point, "id", "") or "")
             if pid not in seen_ids:
                 seen_ids.add(pid)
-                combined.append({"score": point.score, "payload": point.payload})
+                combined.append({"score": point.score, "match_type": "vector", "payload": point.payload})
             if len(combined) >= limit:
                 break
 
         return combined[:limit]
+
+    def search_entities(
+        self,
+        *,
+        tenant_id: str,
+        query: str,
+        entity_type: str = "any",
+        limit: int = 5,
+        min_score: float | None = None,
+    ) -> list[dict[str, Any]]:
+        modules = _ENTITY_TYPE_MODULES.get(str(entity_type or "any").strip().lower(), _ENTITY_TYPE_MODULES["any"])
+        min_score = self.entity_min_score if min_score is None else float(min_score)
+        clean_query = self._clean_entity_query(query, stopwords=self.entity_stopwords) or self._normalize_search_text(query)
+        if not clean_query:
+            return []
+
+        candidates_by_id: dict[str, dict[str, Any]] = {}
+        candidate_limit = max(30, int(limit or 5) * 10)
+        for candidate_query in self._entity_query_variants(clean_query):
+            for item in self.search(
+                tenant_id=tenant_id,
+                query=candidate_query,
+                limit=candidate_limit,
+                modules=modules,
+            ):
+                payload = item.get("payload") or {}
+                if str(payload.get("module") or "") not in modules:
+                    continue
+                pid = str(payload.get("record_id") or "")
+                if not pid:
+                    continue
+                score, debug = self._score_entity_result_with_debug(
+                    item,
+                    clean_query,
+                    preferred_modules=modules,
+                )
+                enriched = dict(item)
+                enriched["_entity_score"] = score
+                enriched["_match_debug"] = debug
+                current = candidates_by_id.get(pid)
+                if current is None or score > float(current.get("_entity_score") or 0.0):
+                    candidates_by_id[pid] = enriched
+
+        scored = [
+            item
+            for item in candidates_by_id.values()
+            if float(item.get("_entity_score") or 0.0) >= min_score
+        ]
+        scored = self._sort_entity_results(scored, clean_query, preferred_modules=modules)
+        return scored[: max(1, int(limit or 5))]
 
     def count(self, *, tenant_id: str, module: str | None = None) -> int:
         collection = self._tenant_collection(tenant_id)
@@ -335,11 +585,13 @@ class TenantRAGService:
             record_id = str(record.get("id") or uuid.uuid4())
             point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{tenant_id}:{module}:{record_id}"))
             text = self._clean_embed_text(json.dumps(record, ensure_ascii=False, sort_keys=True))
+            name = self._record_search_name(record)
             prepared.append(
                 {
                     "record": record,
                     "record_id": record_id,
                     "point_id": point_id,
+                    "name": name,
                     "text": text,
                     "modified_at": self._record_modified_at(record),
                     "record_hash": self._record_hash(raw_record),
@@ -374,7 +626,10 @@ class TenantRAGService:
                             if item["modified_at"] is not None
                             else None
                         ),
+                        "name": item["name"],
+                        "name_ascii": self._strip_diacritics(item["name"]),
                         "text": item["text"],
+                        "text_ascii": self._strip_diacritics(item["text"]),
                         "record": item["record"],
                     },
                 )
@@ -402,6 +657,256 @@ class TenantRAGService:
         """Normalise text before embedding — strip noisy URL tails that add no semantic value."""
         # Shorten Teams meeting links to their origin; the full join URL is just noise.
         return re.sub(r"https://teams\.microsoft\.com/[^\s\"']+", "teams.microsoft.com", text)
+
+    @staticmethod
+    def _strip_diacritics(text: str) -> str:
+        """Return ASCII-folded lowercase copy — used for diacritics-tolerant text index."""
+        return unicodedata.normalize("NFD", text).encode("ascii", "ignore").decode("ascii").lower()
+
+    @classmethod
+    def _normalize_search_text(cls, text: str) -> str:
+        folded = cls._strip_diacritics(text)
+        return re.sub(r"[^a-z0-9]+", " ", folded).strip()
+
+    @classmethod
+    def _clean_entity_query(
+        cls,
+        query: str,
+        *,
+        stopwords: frozenset[str] | set[str] | None = None,
+    ) -> str:
+        normalized = cls._normalize_search_text(query)
+        tokens = re.findall(r"[a-z0-9]+", normalized)
+        active_stopwords = stopwords or DEFAULT_ENTITY_STOPWORDS
+        kept = [token for token in tokens if token not in active_stopwords and len(token) > 1]
+        return " ".join(kept)
+
+    @staticmethod
+    def _record_search_name(record: dict[str, Any]) -> str:
+        name = str(record.get("name") or "").strip()
+        if name:
+            return name
+
+        first = str(record.get("first_name") or "").strip()
+        last = str(record.get("last_name") or "").strip()
+        full_name = f"{first} {last}".strip()
+        if full_name:
+            return full_name
+
+        return str(record.get("account_name") or record.get("company") or "").strip()
+
+    @staticmethod
+    def _expand_fuzzy_token_variants(token: str) -> set[str]:
+        variants = {token}
+        suffixes = (
+            "skym",
+            "skem",
+            "ovou",
+            "ove",
+            "ova",
+            "ovi",
+            "ych",
+            "ich",
+            "ho",
+            "mu",
+            "ou",
+            "em",
+            "am",
+            "um",
+            "om",
+            "m",
+            "a",
+            "u",
+            "e",
+            "y",
+            "i",
+        )
+        for suffix in suffixes:
+            if len(token) <= len(suffix) + 2:
+                continue
+            if token.endswith(suffix):
+                variants.add(token[: -len(suffix)])
+        return {item for item in variants if item}
+
+    @classmethod
+    def _fuzzy_tokens(cls, value: str) -> set[str]:
+        normalized = cls._normalize_search_text(value)
+        if not normalized:
+            return set()
+        expanded: set[str] = set()
+        for token in normalized.split():
+            expanded.update(cls._expand_fuzzy_token_variants(token))
+        return expanded
+
+    @classmethod
+    def _entity_query_variants(cls, query: str) -> list[str]:
+        normalized = cls._normalize_search_text(query)
+        if not normalized:
+            return []
+        variants = {normalized}
+        tokens = [token for token in normalized.split() if token]
+        fuzzy_tokens: list[str] = []
+        for token in tokens:
+            token_variants = cls._expand_fuzzy_token_variants(token)
+            variants.update(token_variants)
+            fuzzy_tokens.append(sorted(token_variants, key=len, reverse=True)[0])
+        if fuzzy_tokens:
+            variants.add(" ".join(fuzzy_tokens))
+        return sorted(variants, key=lambda item: (item != normalized, -len(item), item))
+
+    @classmethod
+    def _score_lexical_fuzzy(cls, query: str, candidate: str) -> float:
+        q = cls._normalize_search_text(query)
+        c = cls._normalize_search_text(candidate)
+        if not q or not c:
+            return 0.0
+        if q == c:
+            return 1.0
+        if q in c:
+            return 0.96
+        if c in q:
+            return 0.85
+
+        q_tokens = cls._fuzzy_tokens(q)
+        c_tokens = cls._fuzzy_tokens(c)
+        if not q_tokens or not c_tokens:
+            return 0.0
+
+        overlap = len(q_tokens & c_tokens) / max(1, len(q_tokens))
+        ratio = SequenceMatcher(None, q, c).ratio()
+        score = max(overlap * 0.95, ratio * 0.75)
+        if overlap >= 0.66 and ratio >= 0.55:
+            score = max(score, 0.82)
+        return min(1.0, score)
+
+    @classmethod
+    def _score_entity_result(
+        cls,
+        result: dict[str, Any],
+        query: str,
+        *,
+        preferred_modules: list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> float:
+        score, _ = cls._score_entity_result_with_debug(
+            result,
+            query,
+            preferred_modules=preferred_modules,
+        )
+        return score
+
+    @classmethod
+    def _score_entity_result_with_debug(
+        cls,
+        result: dict[str, Any],
+        query: str,
+        *,
+        preferred_modules: list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> tuple[float, dict[str, Any]]:
+        payload = result.get("payload") or {}
+        record = payload.get("record") or {}
+        module = str(payload.get("module") or "")
+        name = str(
+            payload.get("name")
+            or cls._record_search_name(record if isinstance(record, dict) else {})
+            or ""
+        )
+        text = str(payload.get("text_ascii") or payload.get("text") or "")
+
+        query_norm = cls._normalize_search_text(query)
+        name_norm = cls._normalize_search_text(name)
+        if not query_norm or not name_norm:
+            return 0.0, {
+                "clean_query": query_norm,
+                "name": name,
+                "name_norm": name_norm,
+                "module": module,
+                "match_type": result.get("match_type", ""),
+            }
+
+        score = 0.0
+        canonical_modules = cls._canonical_modules(preferred_modules)
+        module_bonus = 0.0
+        if canonical_modules:
+            module_bonus = 20.0 if module in canonical_modules else -20.0
+            score += module_bonus
+
+        exact_bonus = 0.0
+        if query_norm == name_norm:
+            exact_bonus = 100.0
+        elif query_norm in name_norm:
+            exact_bonus = 90.0
+        elif name_norm in query_norm:
+            exact_bonus = 75.0
+        score += exact_bonus
+
+        name_fuzzy = cls._score_lexical_fuzzy(query_norm, name_norm)
+        fuzzy_bonus = name_fuzzy * 90.0
+        score += fuzzy_bonus
+
+        q_tokens = cls._fuzzy_tokens(query_norm)
+        name_tokens = cls._fuzzy_tokens(name_norm)
+        token_overlap = 0.0
+        if q_tokens and name_tokens:
+            token_overlap = len(q_tokens & name_tokens) / len(q_tokens)
+            score += token_overlap * 70.0
+
+        text_fuzzy = cls._score_lexical_fuzzy(query_norm, text)
+        text_bonus = text_fuzzy * 10.0
+        vector_bonus = min(float(result.get("score") or 0.0), 1.0) * 5.0
+        score += text_bonus
+        score += vector_bonus
+        debug = {
+            "clean_query": query_norm,
+            "name": name,
+            "name_norm": name_norm,
+            "module": module,
+            "module_bonus": round(module_bonus, 4),
+            "exact_bonus": round(exact_bonus, 4),
+            "name_fuzzy": round(name_fuzzy, 4),
+            "fuzzy_bonus": round(fuzzy_bonus, 4),
+            "token_overlap": round(token_overlap, 4),
+            "text_fuzzy": round(text_fuzzy, 4),
+            "text_bonus": round(text_bonus, 4),
+            "vector_bonus": round(vector_bonus, 4),
+            "match_type": result.get("match_type", ""),
+            "score": round(score, 4),
+        }
+        return score, debug
+
+    @classmethod
+    def _sort_entity_results(
+        cls,
+        results: list[dict[str, Any]],
+        query: str,
+        *,
+        preferred_modules: list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        def sort_key(result: dict[str, Any]) -> tuple[float, str]:
+            score = float(
+                result.get("_entity_score")
+                or cls._score_entity_result(result, query, preferred_modules=preferred_modules)
+            )
+            payload = result.get("payload") or {}
+            name = str(payload.get("name") or ((payload.get("record") or {}).get("name") or ""))
+            return (score, name)
+
+        return sorted(results, key=sort_key, reverse=True)
+
+    @staticmethod
+    def _sort_text_results(results: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+        """Re-rank text-filter hits: entity records before meetings, name matches before body matches."""
+        query_tokens = TenantRAGService._fuzzy_tokens(query)
+
+        def sort_key(result: dict[str, Any]) -> tuple[int, int]:
+            payload = result.get("payload") or {}
+            module = payload.get("module", "")
+            record = payload.get("record") or {}
+            name = str(payload.get("name") or record.get("name") or "")
+            name_tokens = TenantRAGService._fuzzy_tokens(name)
+            name_match = 0 if query_tokens & name_tokens else 1
+            return (_MODULE_PRIORITY.get(module, 99), name_match)
+
+        return sorted(results, key=sort_key)
 
     @staticmethod
     def _record_hash(record: dict[str, Any]) -> str:
@@ -441,7 +946,13 @@ class TenantRAGService:
                 point_id = str(getattr(point, "id", "") or "")
                 payload = getattr(point, "payload", None) or {}
                 record_hash = str(payload.get("record_hash") or "")
-                if point_id and record_hash:
+                # Keep unchanged-skip only for records that already carry all required
+                # derived payload fields added by newer schemas.
+                has_required_payload = all(
+                    key in payload
+                    for key in ("text_ascii", "name", "name_ascii")
+                )
+                if point_id and record_hash and has_required_payload:
                     existing[point_id] = record_hash
         return existing
 
@@ -451,7 +962,7 @@ class TenantRAGService:
         if not raw:
             return None
 
-        # Normalize common Sugar/Coripo formats to timezone-aware UTC.
+        # Normalize common Coripo formats to timezone-aware UTC.
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
             try:
                 parsed = datetime.strptime(raw, fmt)
@@ -546,7 +1057,7 @@ class TenantRAGService:
         self,
         *,
         tenant_id: str,
-        crm_client: SugarClient,
+        crm_client: CoripoClient,
         module: str,
         limit: int | None = None,
         page_size: int = 500,
@@ -658,7 +1169,7 @@ class TenantRAGService:
         self,
         *,
         tenant_id: str,
-        crm_client: SugarClient,
+        crm_client: CoripoClient,
         module: str,
         limit: int | None = None,
         page_size: int = 500,

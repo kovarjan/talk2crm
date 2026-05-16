@@ -12,11 +12,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.services.crm_client import SugarClient
+from app.services.crm_client import CoripoClient
 
 
 def test_company_overview_uses_detail_post_and_unwraps_message_data() -> None:
-    client = SugarClient(
+    client = CoripoClient(
         base_url="http://localhost:2000/public",
         token="11111111-2222-3333-4444-555555555555",
     )
@@ -24,7 +24,7 @@ def test_company_overview_uses_detail_post_and_unwraps_message_data() -> None:
     captured: dict[str, Any] = {}
 
     async def fake_coripo_request(
-        self: SugarClient,
+        self: CoripoClient,
         method: str,
         path: str,
         *,
@@ -74,7 +74,7 @@ def test_company_overview_uses_detail_post_and_unwraps_message_data() -> None:
 
 
 def test_company_overview_requires_id() -> None:
-    client = SugarClient(
+    client = CoripoClient(
         base_url="http://localhost:2000/public",
         token="11111111-2222-3333-4444-555555555555",
     )

@@ -41,7 +41,7 @@ Optional HMAC headers (machine-to-machine use):
 ### CRM sync callbacks
 - `POST /crm/events/record-created/`
   - body: `chat_id`, `module`, `record_id`, optional `record_name`, optional `user_message`, optional `source`
-  - use case: CRM confirms user created a pending record outside talk2api2 (for example pending Meeting)
+  - use case: CRM confirms user created a pending record outside talk2crm (for example pending Meeting)
   - effect: app appends assistant history event with CRM ID and clears pending-create flow for next turn
 
 ### Search

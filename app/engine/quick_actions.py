@@ -8,7 +8,7 @@ from app.nlu.command_parser import CommandParser
 from app.services.crm_write_service import CRMWriteService
 
 if TYPE_CHECKING:
-    from app.services.crm_client import SugarClient
+    from app.services.crm_client import CoripoClient
 
 
 @dataclass
@@ -20,7 +20,7 @@ class QuickActionResult:
 async def try_handle_quick_action(
     *,
     input_text: str,
-    crm_client: "SugarClient",
+    crm_client: "CoripoClient",
     user_id: str,
     action_confirmation: bool,
 ) -> QuickActionResult | None:

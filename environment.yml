@@ -1,4 +1,4 @@
-name: talk2api2
+name: talk2crm
 channels:
   - conda-forge
   - defaults
@@ -199,4 +199,4 @@ dependencies:
       - xxhash==3.6.0
       - yarl==1.22.0
       - zstandard==0.25.0
-prefix: /Users/kovarjan/miniconda3/envs/talk2api2
+prefix: /Users/kovarjan/miniconda3/envs/talk2crm

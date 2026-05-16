@@ -1,6 +1,6 @@
-# Sugar Voice Bridge v1.0
+# talk2crm v1.0
 
-Multi-tenant FastAPI gateway for voice/text-to-action workflows against SugarCRM 6.5, with LangChain agent orchestration, tenant-scoped RAG (Qdrant), and audio pipeline support.
+Multi-tenant FastAPI gateway for voice/text-to-action workflows against Coripo CRM 6.5, with LangChain agent orchestration, tenant-scoped RAG (Qdrant), and audio pipeline support.
 
 ## Stack
 
@@ -73,7 +73,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload --no-access-log
 Qdrant (required for `/rag/*` endpoints):
 
 ```bash
-docker run -d --name talk2api2-qdrant \
+docker run -d --name talk2crm-qdrant \
   -p 6333:6333 \
   -v "$PWD/.qdrant_storage:/qdrant/storage" \
   qdrant/qdrant:latest
@@ -91,10 +91,10 @@ python scripts/create_tenant.py \
   --crm-token "REPLACE_TOKEN"
 ```
 
-`--crm-token` for Sugar v4.1 can be either:
+`--crm-token` for Coripo v4.1-compatible mode can be either:
 - existing session id string
 - JSON credentials string, for example:
-`'{"username":"admin","password":"admin","application_name":"sugar_voice_bridge"}'`
+`'{"username":"admin","password":"admin","application_name":"talk2crm"}'`
 
 Coripo public REST mode (`site/public/index.php`) is also supported:
 
@@ -111,14 +111,14 @@ For Coripo:
 - `--crm-token` can be:
 `HMAC secret` (plain string), or JSON:
 `'{"mode":"coripo_public","hmac_key_id":"acmark-ai","hmac_secret":"...","session_id":"optional-sid","user_id":"28","user_name":"jkovar"}'`
-- send `X-User-Id` on API requests (must be Coripo/Sugar user id)
+- send `X-User-Id` on API requests (must be Coripo user id)
 - if Coripo enforces username checks, set `user_name` in tenant token JSON
 
 Coripo FE (`rest_coripo`) bridge wiring for local development:
 - in `rest_coripo/.env`: `AI_GATEWAY_URL='http://host.docker.internal:8011'`
 - in `rest_coripo/.env`: `AI_GATEWAY_TENANT='ai-local'`
 - in `rest_coripo/.env`: `AI_GATEWAY_HMAC_KEY_ID='acmark-ai'` and matching `AI_GATEWAY_HMAC_SECRET`
-- in `talk2api2/.env`: `HMAC_KEYS_JSON={"acmark-ai":"<same-secret-as-rest_coripo>"}`
+- in `talk2crm/.env`: `HMAC_KEYS_JSON={"acmark-ai":"<same-secret-as-rest_coripo>"}`
 - recreate php container after `.env` change: `docker compose -f docker-compose.yml up -d php`
 
 5. Open API docs:
@@ -171,7 +171,7 @@ Default dev DB credentials:
 
 - host: `localhost`
 - port: `5432`
-- db: `sugar_voice_bridge`
+- db: `talk2crm`
 - user: `postgres`
 - password: `postgres`
 
@@ -268,7 +268,7 @@ Optional machine-to-machine HMAC headers:
   - compact chat history snapshot
 - Optional file logging:
   - `LOG_FILE_ENABLED=true`
-  - `LOG_FILE_PATH=./logs/talk2api2.log`
+  - `LOG_FILE_PATH=./logs/talk2crm.log`
   - `LOG_FILE_FORMAT=json` or `pretty`
 - Every request keeps request id (`X-Request-Id`) and latency in logs.
 - Tenant id and user id are kept explicit throughout route -> service -> tool -> agent flow.
@@ -337,7 +337,7 @@ The script checks CRM (`/public/list/Contacts`) vs Qdrant (`tenant_knowledge__<t
 ### Run Qdrant docker:
 
 ```bash
-docker run -d --name talk2api2-qdrant -p 6333:6333 \
-  -v "/Users/kovarjan/Sites/localhost/playground/opensource/talk2api2/.qdrant_storage:/qdrant/storage" \
+docker run -d --name talk2crm-qdrant -p 6333:6333 \
+  -v "/Users/kovarjan/Sites/localhost/playground/opensource/talk2crm/.qdrant_storage:/qdrant/storage" \
   qdrant/qdrant:latest
 ```

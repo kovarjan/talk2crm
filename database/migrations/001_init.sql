@@ -1,4 +1,4 @@
--- Base schema for Sugar Voice Bridge v1.0
+-- Base schema for talk2crm v1.0
 CREATE TABLE IF NOT EXISTS tenants (
     id VARCHAR(100) PRIMARY KEY,
     name VARCHAR(255) NOT NULL,

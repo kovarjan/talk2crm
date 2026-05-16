@@ -11,7 +11,7 @@ from typing import Any
 from app.core.logging import get_logger
 from app.domain.entity_resolver import EntityResolver
 from app.domain.temporal_resolver import TemporalResolver
-from app.services.crm_client import SugarClient
+from app.services.crm_client import CoripoClient
 
 
 logger = get_logger(__name__)
@@ -41,7 +41,7 @@ class ModuleAdjustmentEngine:
         *,
         tenant_id: str,
         user_id: str,
-        crm_client: SugarClient,
+        crm_client: CoripoClient,
         input_text: str,
         request_context: dict[str, Any] | None,
     ):

@@ -9,7 +9,7 @@ from typing import Any
 from app.core.logging import get_logger
 from app.domain.contracts import EntityResolution
 from app.domain.resolver_policy import ResolverPolicy, load_resolver_policy
-from app.services.crm_client import SugarClient
+from app.services.crm_client import CoripoClient
 
 
 logger = get_logger(__name__)
@@ -22,11 +22,11 @@ _PLACEHOLDER_ID_RE = re.compile(r"^[A-Z_]+_ID$")
 @dataclass
 class EntityResolver:
     tenant_id: str
-    crm_client: SugarClient
+    crm_client: CoripoClient
     policy: ResolverPolicy
 
     @classmethod
-    def from_settings(cls, *, tenant_id: str, crm_client: SugarClient) -> "EntityResolver":
+    def from_settings(cls, *, tenant_id: str, crm_client: CoripoClient) -> "EntityResolver":
         return cls(tenant_id=tenant_id, crm_client=crm_client, policy=load_resolver_policy())
 
     @staticmethod

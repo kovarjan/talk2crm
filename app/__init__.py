@@ -1,1 +1,1 @@
-"""Sugar Voice Bridge application package."""
+"""talk2crm application package."""

@@ -17,14 +17,14 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "tak2crm"
+    app_name: str = "talk2crm"
     app_version: str = "1.0.0"
     debug: bool = False
     environment: str = "dev"
     log_format: str = "pretty"
     log_force_color: bool = True
     log_file_enabled: bool = False
-    log_file_path: str = "./logs/tak2crm.log"
+    log_file_path: str = "./logs/talk2crm.log"
     log_file_format: str = "json"
     log_trace_enabled: bool = True
     log_trace_max_chars: int = 1200
@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     rag_embedding_api_key: str | None = llm_api_key
     rag_embedding_size: int = 2560
     rag_upsert_batch_size: int = 200
+    rag_entity_min_score: float = 60.0
+    rag_entity_stopwords_extra: str = ""
     qdrant_allow_local_fallback: bool = True
     qdrant_local_path: str = "./.qdrant_storage_local"
 

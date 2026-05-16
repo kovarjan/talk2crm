@@ -11,7 +11,7 @@ from app.domain.contracts import NormalizedCommand, build_pending_action_envelop
 from app.engine.adjustments import ModuleAdjustmentEngine
 from app.engine.rag import TenantRAGService
 from app.presentation.cards import parse_datetime
-from app.services.crm_client import SugarClient
+from app.services.crm_client import CoripoClient
 
 
 class CRMWriteService:
@@ -22,7 +22,7 @@ class CRMWriteService:
         user_id: str,
         input_text: str,
         request_context: dict[str, Any] | None,
-        crm_client: SugarClient,
+        crm_client: CoripoClient,
         rag_service: TenantRAGService | None,
         action_confirmation: bool,
     ):

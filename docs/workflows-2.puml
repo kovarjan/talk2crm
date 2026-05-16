@@ -1,0 +1,69 @@
+@startuml workflow_main
+!theme plain
+skinparam defaultFontSize 11
+skinparam ArrowColor #4A5568
+skinparam BackgroundColor #FFFFFF
+skinparam NoteBackgroundColor #FFFDE7
+skinparam NoteBorderColor #F9A825
+skinparam ParticipantBackgroundColor #FAFAFA
+skinparam ParticipantBorderColor #90A4AE
+skinparam SequenceBoxBackgroundColor #F0F4FF
+skinparam SequenceBoxBorderColor #B0BEC5
+skinparam sequenceArrowThickness 1
+skinparam maxMessageSize 140
+skinparam ParticipantPadding 15
+skinparam BoxPadding 8
+
+title Workflow systemu talk2crm
+
+box "Klient" #E3F2FD
+  actor UI
+end box
+box "API vrstva" #E8F5E9
+  participant "FastAPI\n+ Auth" as API
+end box
+box "AI Engine" #FFF3E0
+  participant "agent.py\n(ReAct)" as AG
+end box
+box "Nastroje + Sluzby" #F3E5F5
+  participant "tools.py\n+ CoripoClient" as CRM
+  participant "TenantRAGService\n(Qdrant)" as RAG
+end box
+box "Vystup" #E0F7FA
+  participant "TTS + DB" as OUT
+end box
+
+UI -> API : POST /process-input/ nebo /process-audio/\n(X-Tenant, X-User-Id, volitelne HMAC)
+API -> API : Auth, TenantManager, chat history\npending_action, [STT ak audio]
+API -> AG : input + history + context + tools
+
+loop max 6 iteraci (ReAct)
+  AG -> AG : LLM.ainvoke() — strip <think>
+  alt rag_search_tool
+    AG -> RAG : embed + MatchText + cosine
+    RAG --> AG : top-k zaznamu
+  else crm_query_tool / my_meetings_tool\n/ get_company_overview
+    AG -> CRM : execute_module_action\n(module, action, filters)
+    CRM --> AG : zaznamy / detail firmy
+  else crm_action_tool
+    AG -> CRM : create / update / delete
+    alt Vyzaduje potvrzeni
+      CRM --> AG : confirmation_required\n+ pending_action
+      AG --> API : Okamzita odpoved
+    else Potvrzeno
+      CRM --> AG : vysledek akce
+    end
+  else <answer> / plain text
+    AG --> API : final_answer
+  end
+end
+
+note over AG : Fallback po 6x:\nposledni Observation
+
+API -> OUT : DB: chat_history + metadata
+alt return_voice = true
+  API -> OUT : edge-tts -> .wav /audio/{file_id}
+end
+API --> UI : JSON {success, response,\nchat_id, pending_action?, audio_url?}
+
+@enduml

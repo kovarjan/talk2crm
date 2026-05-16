@@ -60,7 +60,7 @@ class TenantManager:
             has_static_sid = has_static_sid or bool(sid_value)
             has_hmac_secret = bool(str(parsed.get("hmac_secret") or "").strip())
         else:
-            # Plain non-JSON token is interpreted by SugarClient as HMAC secret.
+            # Plain non-JSON token is interpreted by CoripoClient as HMAC secret.
             has_hmac_secret = not has_static_sid and bool(str(token or "").strip())
 
         if has_hmac_secret and not has_static_sid:
