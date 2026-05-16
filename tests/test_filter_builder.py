@@ -131,11 +131,25 @@ def test_build_filter_quotes_account_id_maps_to_billing_account_id():
     assert operand["relationField"] is None
 
 
+def test_build_filter_acm_invoices_account_id_maps_to_account_relation():
+    specs = [FilterSpec(field="account_id", op="eq", value="a42333d4-c035-2f73-865c-64ee30906163")]
+    f = build_filter(module="acm_invoices", filters=specs)
+    operand = f["operands"][0]
+    assert operand["field"] == "id"
+    assert operand["fieldModule"] == "acm_invoices"
+    assert operand["fieldRel"] == ["acm_invoices_accounts"]
+    assert operand["type"] == "eq"
+    assert operand["value"] == "a42333d4-c035-2f73-865c-64ee30906163"
+    assert operand["relationField"] is None
+
+
 def test_build_filter_date_range_sales_modules():
     opportunity_filter = build_filter(module="Opportunities", date_from="2026-05-01")
     quote_filter = build_filter(module="Quotes", date_to="2026-05-31")
+    invoice_filter = build_filter(module="acm_invoices", date_from="2026-01-01")
     assert opportunity_filter["operands"][0]["field"] == "date_closed"
     assert quote_filter["operands"][0]["field"] == "date_quote_expected_closed"
+    assert invoice_filter["operands"][0]["field"] == "datum_vystaveni"
 
 
 def test_build_order_asc():

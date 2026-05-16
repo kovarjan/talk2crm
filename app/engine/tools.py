@@ -1245,13 +1245,21 @@ def _contact_cards(
     ]
 
 
-def _generic_cards(records: list[dict[str, Any]], total_count: int) -> list[dict[str, Any]]:
+def _record_module_hint(row: dict[str, Any], default_module: str = "CRM") -> str:
+    for key in ("_module_hint", "_module", "module", "record_module"):
+        value = _safe_text(row.get(key))
+        if value:
+            return value
+    return _safe_text(default_module) or "CRM"
+
+
+def _generic_cards(records: list[dict[str, Any]], total_count: int, default_module: str = "CRM") -> list[dict[str, Any]]:
     if not records:
         return []
     if total_count <= 4:
         cards = []
         for row in records:
-            module = _safe_text(row.get("_module_hint")) or "CRM"
+            module = _record_module_hint(row, default_module)
             cards.append(
                 _record_card(
                     module,
@@ -1267,8 +1275,11 @@ def _generic_cards(records: list[dict[str, Any]], total_count: int) -> list[dict
         return cards
 
     rows: list[dict[str, Any]] = []
+    modules: list[str] = []
     for row in records:
-        module = _safe_text(row.get("_module_hint")) or "CRM"
+        module = _record_module_hint(row, default_module)
+        if module not in modules:
+            modules.append(module)
         rec_id = _safe_text(row.get("id"))
         rows.append(
             {
@@ -1290,7 +1301,7 @@ def _generic_cards(records: list[dict[str, Any]], total_count: int) -> list[dict
     return [
         _table_card(
             title=f"Vysledky ({total_count})",
-            tag="CRM",
+            tag=modules[0] if len(modules) == 1 else "CRM",
             columns=[
                 {"key": "module", "label": "Modul"},
                 {"key": "name", "label": "Nazev"},
@@ -1551,7 +1562,7 @@ def build_tools(
         Použij pro získání ID záznamu před dotazem do CRM.
         Vrací přibližné shody – vždy porovnej vrácený název s dotazem uživatele
         a upozorni na výrazný rozdíl.
-        Parametry: query (str), module ('accounts'|'contacts'|'meetings'|'opportunities'|'quotes'), limit (int, výchozí 5).
+        Parametry: query (str), module ('accounts'|'contacts'|'meetings'|'opportunities'|'quotes'|'acm_invoices'), limit (int, výchozí 5).
         """
         async with ToolCallLogger(
             "rag_search_tool", tenant_id, user_id,
@@ -1589,6 +1600,7 @@ def build_tools(
                     "opportunities": ["Opportunities"],
                     "opportunites": ["Opportunities"],
                     "quotes": ["Quotes"],
+                    "acm_invoices": ["acm_invoices"],
                 }
                 results = rag_service.search(
                     tenant_id=tenant_id,
@@ -1835,7 +1847,7 @@ def build_tools(
                 title = f"Kontakty ({total})"
                 cards = _contact_cards(records, total, title, force_table=total > 4)
             else:
-                cards = _generic_cards(records, total)
+                cards = _generic_cards(records, total, default_module=module)
 
             # print(f"Generated {len(cards)} cards for module '{module}'.")
             # print(f"First 5 cards: {json.dumps(cards[:5], ensure_ascii=False)}")

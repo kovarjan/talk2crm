@@ -40,6 +40,7 @@ _DATE_FIELD: dict[str, str] = {
     "opportunities": "date_closed",
     "opportunites": "date_closed",
     "quotes": "date_quote_expected_closed",
+    "acm_invoices": "datum_vystaveni",
 }
 
 _ACTIVITY_MODULES = {"meetings", "calls", "tasks", "notes"}
@@ -95,6 +96,7 @@ _MODULE_ACCOUNT_RELATION_ALIASES: dict[str, tuple[str, str]] = {
     "opportunities": ("Opportunities", "accounts"),
     "opportunites": ("Opportunities", "accounts"),
     "quotes": ("Quotes", "billing_accounts"),
+    "acm_invoices": ("acm_invoices", "acm_invoices_accounts"),
 }
 
 

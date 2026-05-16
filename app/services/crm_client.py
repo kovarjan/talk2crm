@@ -327,6 +327,7 @@ class CoripoClient:
             "cases": "Cases",
             "quotes": "Quotes",
             "opportunites": "Opportunities",
+            "acm_invoices": "acm_invoices",
         }
         lowered = value.lower()
         if lowered in mapping:
@@ -770,6 +771,7 @@ class CoripoClient:
             "opportunities": "Opportunities",
             "opportunites": "Opportunities",
             "quotes": "Quotes",
+            "acm_invoices": "acm_invoices",
         }
         normalized_scope = str(scope or "all").strip().lower()
         payload_data = {"query": query, "q": query, "limit": 20, "offset": 0}

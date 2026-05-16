@@ -221,6 +221,50 @@ def test_crm_query_tool_supports_quotes_account_filter():
     assert operand["relationField"] is None
 
 
+def test_crm_query_tool_supports_acm_invoices_account_filter():
+    client = FakeCrmClient()
+    tools = _make_tools(crm_client=client)
+    tool = _get_tool(tools, "crm_query_tool")
+    filters_json = json.dumps([{"field": "account_id", "op": "eq", "value": "1667abd3-3b35-ad3e-bf5e-607fdc94d3da"}])
+    result = json.loads(asyncio.run(tool.ainvoke({"module": "acm_invoices", "filters": filters_json})))
+
+    assert result["status"] == "ok"
+    assert client.last_call is not None
+    assert client.last_call["module"] == "acm_invoices"
+    operand = client.last_call["data"]["filter"]["operands"][0]
+    assert operand["field"] == "id"
+    assert operand["fieldModule"] == "acm_invoices"
+    assert operand["fieldRel"] == ["acm_invoices_accounts"]
+    assert operand["type"] == "eq"
+    assert operand["value"] == "1667abd3-3b35-ad3e-bf5e-607fdc94d3da"
+    assert operand["relationField"] is None
+
+
+def test_crm_query_tool_acm_invoices_cards_link_to_invoice_module():
+    class InvoiceClient(FakeCrmClient):
+        async def execute_module_action(self, module: str, action: str, data: dict[str, Any]) -> dict[str, Any]:
+            self.last_call = {"module": module, "action": action, "data": data}
+            return {
+                "records": [
+                    {"id": f"ce51880c-dd08-c966-9ba3-692bcfe6957{i}", "name": f"26100{i}"}
+                    for i in range(5)
+                ]
+            }
+
+    client = InvoiceClient()
+    tools = _make_tools(crm_client=client)
+    tool = _get_tool(tools, "crm_query_tool")
+    result = json.loads(asyncio.run(tool.ainvoke({"module": "acm_invoices", "filters": "[]"})))
+
+    assert result["status"] == "ok"
+    card = result["cards"][0]
+    assert card["type"] == "table"
+    assert card["tag"] == "acm_invoices"
+    first_row = card["rows"][0]
+    assert first_row["cells"]["module"] == "acm_invoices"
+    assert first_row["link"]["url"] == "/#detail/acm_invoices/ce51880c-dd08-c966-9ba3-692bcfe69570"
+
+
 def test_crm_query_tool_invalid_filters_json():
     tools = _make_tools()
     tool = _get_tool(tools, "crm_query_tool")

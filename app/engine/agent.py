@@ -142,12 +142,12 @@ PRAVIDLO PENDING AKCE: Kontext může obsahovat pending_action — návrh akce �
 DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
 1. rag_search_tool(query: str, module: str="", limit: int=5)
    — sémantické/fuzzy hledání v RAG indexu. Použij pro získání account_id/contact_id.
-   — module může být také "opportunities" nebo "quotes", pokud hledáš obchodní případy nebo nabídky.
+   — module může být také "opportunities", "quotes" nebo "acm_invoices", pokud hledáš obchodní případy, nabídky nebo faktury.
 
 2. crm_query_tool(module: str, filters: str="[]", search: str=null, limit: int=20)
    — přesný dotaz do CRM. Pro přesné lookupy jména osoby/firmy použij nejdřív search.
-   — podporované moduly pro čtení: Accounts, Contacts, Meetings, Calls, Tasks, Notes, Leads, Opportunities, Quotes.
-   — pro obchodní případy používej module="Opportunities"; pro nabídky používej module="Quotes".
+   — podporované moduly pro čtení: Accounts, Contacts, Meetings, Calls, Tasks, Notes, Leads, Opportunities, Quotes, acm_invoices.
+   — pro obchodní případy používej module="Opportunities"; pro nabídky používej module="Quotes"; pro faktury používej module="acm_invoices".
      filters je JSON pole [{{"field":"...","op":"eq","value":"..."}}]
 
 3. my_meetings_tool(date_from: str|null=null, date_to: str|null=null, limit: int=100)

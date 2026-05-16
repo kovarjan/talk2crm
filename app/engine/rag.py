@@ -315,6 +315,10 @@ class TenantRAGService:
             "meetings": "Meetings",
             "note": "Notes",
             "notes": "Notes",
+            "opportunities": "Opportunities",
+            "opportunites": "Opportunities",
+            "quotes": "Quotes",
+            "acm_invoices": "acm_invoices",
             "task": "Tasks",
             "tasks": "Tasks",
         }

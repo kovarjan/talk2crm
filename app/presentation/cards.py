@@ -212,13 +212,21 @@ def contact_cards(
     ]
 
 
-def generic_cards(records: list[dict[str, Any]], total_count: int) -> list[dict[str, Any]]:
+def record_module_hint(row: dict[str, Any], default_module: str = "CRM") -> str:
+    for key in ("_module_hint", "_module", "module", "record_module"):
+        value = safe_text(row.get(key))
+        if value:
+            return value
+    return safe_text(default_module) or "CRM"
+
+
+def generic_cards(records: list[dict[str, Any]], total_count: int, default_module: str = "CRM") -> list[dict[str, Any]]:
     if not records:
         return []
     if total_count <= 4:
         cards = []
         for row in records:
-            module = safe_text(row.get("_module_hint")) or "CRM"
+            module = record_module_hint(row, default_module)
             cards.append(
                 record_card(
                     module,
@@ -234,8 +242,11 @@ def generic_cards(records: list[dict[str, Any]], total_count: int) -> list[dict[
         return cards
 
     rows: list[dict[str, Any]] = []
+    modules: list[str] = []
     for row in records:
-        module = safe_text(row.get("_module_hint")) or "CRM"
+        module = record_module_hint(row, default_module)
+        if module not in modules:
+            modules.append(module)
         rec_id = safe_text(row.get("id"))
         rows.append(
             {
@@ -257,7 +268,7 @@ def generic_cards(records: list[dict[str, Any]], total_count: int) -> list[dict[
     return [
         table_card(
             title=f"Vysledky ({total_count})",
-            tag="CRM",
+            tag=modules[0] if len(modules) == 1 else "CRM",
             columns=[
                 {"key": "module", "label": "Modul"},
                 {"key": "name", "label": "Nazev"},

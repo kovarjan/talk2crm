@@ -23,6 +23,7 @@ _READ_MODULES = {
     "opportunities",
     "opportunites",
     "quotes",
+    "acm_invoices",
 }
 _RAG_MODULES = {
     "",
@@ -36,6 +37,7 @@ _RAG_MODULES = {
     "opportunities",
     "opportunites",
     "quotes",
+    "acm_invoices",
 }
 
 class CrmActionToolArgs(BaseModel):

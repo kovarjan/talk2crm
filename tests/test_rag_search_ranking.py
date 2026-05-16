@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 import pytest
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.engine.rag import TenantRAGService
 
@@ -297,6 +303,14 @@ def test_strip_diacritics_czech_chars():
 def test_strip_diacritics_ascii_passthrough():
     assert TenantRAGService._strip_diacritics("tescan group") == "tescan group"
     assert TenantRAGService._strip_diacritics("ACMARK s.r.o.") == "acmark s.r.o."
+
+
+def test_canonical_modules_include_sales_and_invoice_modules():
+    assert TenantRAGService._canonical_modules(["opportunities", "quotes", "acm_invoices"]) == [
+        "Opportunities",
+        "Quotes",
+        "acm_invoices",
+    ]
 
 
 def test_strip_diacritics_is_used_to_build_text_ascii():

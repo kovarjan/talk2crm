@@ -113,6 +113,10 @@ class CRMReadService:
             "contacts": "Contacts",
             "accounts": "Accounts",
             "meetings": "Meetings",
+            "opportunities": "Opportunities",
+            "opportunites": "Opportunities",
+            "quotes": "Quotes",
+            "acm_invoices": "acm_invoices",
         }
 
         if normalized_scope in module_map:
@@ -227,6 +231,10 @@ class CRMReadService:
             "contacts": "Contacts",
             "accounts": "Accounts",
             "meetings": "Meetings",
+            "opportunities": "Opportunities",
+            "opportunites": "Opportunities",
+            "quotes": "Quotes",
+            "acm_invoices": "acm_invoices",
         }
         requested_query_type = self.h.safe_text(query_type).lower()
         read_v2_enabled = get_settings().read_service_v2_active
@@ -605,6 +613,10 @@ class CRMReadService:
                     "contacts": "Contacts",
                     "accounts": "Accounts",
                     "meetings": "Meetings",
+                    "opportunities": "Opportunities",
+                    "opportunites": "Opportunities",
+                    "quotes": "Quotes",
+                    "acm_invoices": "acm_invoices",
                 }
                 for module_key, payload in aggregate.items():
                     module_name = module_map.get(str(module_key).lower(), str(module_key))
