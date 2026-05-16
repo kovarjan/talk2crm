@@ -107,6 +107,37 @@ def test_build_filter_meetings_account_id_with_name_falls_back_to_parent_name():
     assert operand["parent_type"] == "Accounts"
 
 
+def test_build_filter_opportunities_account_id_stays_account_id():
+    specs = [FilterSpec(field="account_id", op="eq", value="a42333d4-c035-2f73-865c-64ee30906163")]
+    f = build_filter(module="Opportunities", filters=specs)
+    operand = f["operands"][0]
+    assert operand["field"] == "id"
+    assert operand["fieldModule"] == "Opportunities"
+    assert operand["fieldRel"] == ["accounts"]
+    assert operand["type"] == "eq"
+    assert operand["value"] == "a42333d4-c035-2f73-865c-64ee30906163"
+    assert operand["relationField"] is None
+
+
+def test_build_filter_quotes_account_id_maps_to_billing_account_id():
+    specs = [FilterSpec(field="account_id", op="eq", value="a42333d4-c035-2f73-865c-64ee30906163")]
+    f = build_filter(module="Quotes", filters=specs)
+    operand = f["operands"][0]
+    assert operand["field"] == "id"
+    assert operand["fieldModule"] == "Quotes"
+    assert operand["fieldRel"] == ["billing_accounts"]
+    assert operand["type"] == "eq"
+    assert operand["value"] == "a42333d4-c035-2f73-865c-64ee30906163"
+    assert operand["relationField"] is None
+
+
+def test_build_filter_date_range_sales_modules():
+    opportunity_filter = build_filter(module="Opportunities", date_from="2026-05-01")
+    quote_filter = build_filter(module="Quotes", date_to="2026-05-31")
+    assert opportunity_filter["operands"][0]["field"] == "date_closed"
+    assert quote_filter["operands"][0]["field"] == "date_quote_expected_closed"
+
+
 def test_build_order_asc():
     result = build_order("date_start:asc")
     assert result == [{"field": "date_start", "sort": "ASC", "module": None}]

@@ -37,6 +37,9 @@ _DATE_FIELD: dict[str, str] = {
     "meetings": "date_start",
     "calls":    "date_start",
     "tasks":    "date_due",
+    "opportunities": "date_closed",
+    "opportunites": "date_closed",
+    "quotes": "date_quote_expected_closed",
 }
 
 _ACTIVITY_MODULES = {"meetings", "calls", "tasks", "notes"}
@@ -86,6 +89,12 @@ _ACTIVITY_ID_ALIASES: set[str] = {
     "quote_id",
     "quotes.id",
     "quotes|id",
+}
+
+_MODULE_ACCOUNT_RELATION_ALIASES: dict[str, tuple[str, str]] = {
+    "opportunities": ("Opportunities", "accounts"),
+    "opportunites": ("Opportunities", "accounts"),
+    "quotes": ("Quotes", "billing_accounts"),
 }
 
 
@@ -164,6 +173,17 @@ def _make_contacts_account_relation_operand(op_type: str, value: str | None) -> 
     return {"operator": "or", "operands": operands}
 
 
+def _make_module_account_relation_operand(module_name: str, relationship: str, op_type: str, value: str | None) -> dict[str, Any]:
+    return {
+        "field": "id",
+        "fieldModule": module_name,
+        "fieldRel": [relationship],
+        "type": op_type,
+        "value": value,
+        "relationField": None,
+    }
+
+
 def build_filter(
     *,
     module: str = "",
@@ -203,20 +223,26 @@ def build_filter(
     account_id_aliases = {"account_id", "accounts.id", "accounts|id"}
 
     for spec in (filters or []):
+        field_name = (spec.field or "").strip()
+        field_lower = field_name.lower()
         coripo_op = _OP_MAP[spec.op]
         activity_parent_operand = _make_activity_parent_operand(
             module_lower=module_lower,
-            field_name=spec.field,
+            field_name=field_name,
             op=coripo_op,
             value=spec.value,
         )
         if activity_parent_operand is not None:
             operands.append(activity_parent_operand)
             continue
-        if module_lower == "contacts" and (spec.field or "").strip().lower() in account_id_aliases:
+        if module_lower == "contacts" and field_lower in account_id_aliases:
             operands.append(_make_contacts_account_relation_operand(coripo_op, spec.value))
             continue
-        operands.append(_make_operand(spec.field, coripo_op, spec.value))
+        if field_lower in account_id_aliases and module_lower in _MODULE_ACCOUNT_RELATION_ALIASES:
+            relation_module, relationship = _MODULE_ACCOUNT_RELATION_ALIASES[module_lower]
+            operands.append(_make_module_account_relation_operand(relation_module, relationship, coripo_op, spec.value))
+            continue
+        operands.append(_make_operand(field_name, coripo_op, spec.value))
 
     return {"operator": "and", "operands": operands}
 

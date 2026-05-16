@@ -23,10 +23,35 @@ logger = get_logger(__name__)
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 _ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL)
+_ANSWER_TAG_RE = re.compile(r"</?answer>", re.IGNORECASE)
+_ISO_DATE_RE = re.compile(
+    r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?(?!\d)"
+)
 
 
 def _clean(text: Any) -> str:
     return _THINK_TAG_RE.sub("", str(text or "")).strip()
+
+
+def _strip_answer_tags(text: Any) -> str:
+    return _ANSWER_TAG_RE.sub("", str(text or "")).strip()
+
+
+def _format_european_dates(text: Any) -> str:
+    def repl(match: re.Match[str]) -> str:
+        year, month, day, hour, minute, second = match.groups()
+        formatted = f"{int(day)}.{int(month)}.{year}"
+        if hour and minute:
+            formatted += f" {hour}:{minute}"
+            if second and second != "00":
+                formatted += f":{second}"
+        return formatted
+
+    return _ISO_DATE_RE.sub(repl, str(text or ""))
+
+
+def _normalize_final_answer_text(text: Any) -> str:
+    return _format_european_dates(_strip_answer_tags(text)).strip()
 
 
 def _build_date_context(now: datetime) -> str:
@@ -117,9 +142,12 @@ PRAVIDLO PENDING AKCE: Kontext může obsahovat pending_action — návrh akce �
 DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
 1. rag_search_tool(query: str, module: str="", limit: int=5)
    — sémantické/fuzzy hledání v RAG indexu. Použij pro získání account_id/contact_id.
+   — module může být také "opportunities" nebo "quotes", pokud hledáš obchodní případy nebo nabídky.
 
 2. crm_query_tool(module: str, filters: str="[]", search: str=null, limit: int=20)
    — přesný dotaz do CRM. Pro přesné lookupy jména osoby/firmy použij nejdřív search.
+   — podporované moduly pro čtení: Accounts, Contacts, Meetings, Calls, Tasks, Notes, Leads, Opportunities, Quotes.
+   — pro obchodní případy používej module="Opportunities"; pro nabídky používej module="Quotes".
      filters je JSON pole [{{"field":"...","op":"eq","value":"..."}}]
 
 3. my_meetings_tool(date_from: str|null=null, date_to: str|null=null, limit: int=100)
@@ -134,13 +162,15 @@ DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
 5. get_company_overview(account_id: str)
    — vrátí kompaktní AI detail firmy (Accounts) + related_records ze subpanelů.
    — activities i každý related_records subpanel je ve výchozím stavu omezen na 10 nejnovějších záznamů.
-   — měna částek je uvedena v default_currency.iso4217; platí i pro amount_usdollar.
+   — měna částek je uvedena v default_currency.iso4217, výchozí je vždy Kč (CZK) pokud není uvedeno jinak; platí i pro sloupec amount_usdollar.
+   — related_records.Opportunities jsou obchodní případy (opportunities), NE nabídky (quotes).
    — používej pro detail firmy, když máš account_id.
 
 FORMÁT ODPOVĚDI:
 - Pokud chceš zavolat nástroj: <tool_call>{{"name": "jmeno_nastroje", "args": {{"param": "hodnota"}}}}</tool_call>
 - Pokud máš finální odpověď pro uživatele: <answer>Tvá odpověď česky</answer>
-- Pokud užvatel nezadá dostatečně přesný dotaz, doptej se na upřesnění.
+- Pokud uživatel nezadá dostatečně přesný dotaz, doptej se na upřesnění.
+- Zobrazuj uživateli jenom přeložené názvy modulů jako "Nabídky" ne "Quotes" ani "Nabídky (Quotes)" a podobně.
 
 PRAVIDLA VÝBĚRU KONTAKTU/FIRMY:
 - Při výsledku z rag_search_tool vždy nejdřív posuď, zda jde o přesné shody, nebo jen podobné kandidáty.
@@ -349,6 +379,8 @@ async def run_agent(
                 final_answer = str(parsed.get("message_to_user") or parsed.get("summary") or "").strip()
             if not final_answer:
                 final_answer = str(last_obs)[:500]
+
+    final_answer = _normalize_final_answer_text(final_answer)
 
     if not final_answer:
         logger.warning("tenant=%s Agent returned empty output after %d steps", tenant_id, len(intermediate_steps))

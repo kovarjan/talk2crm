@@ -1551,7 +1551,7 @@ def build_tools(
         Použij pro získání ID záznamu před dotazem do CRM.
         Vrací přibližné shody – vždy porovnej vrácený název s dotazem uživatele
         a upozorni na výrazný rozdíl.
-        Parametry: query (str), module ('accounts'|'contacts'|'meetings'), limit (int, výchozí 5).
+        Parametry: query (str), module ('accounts'|'contacts'|'meetings'|'opportunities'|'quotes'), limit (int, výchozí 5).
         """
         async with ToolCallLogger(
             "rag_search_tool", tenant_id, user_id,
@@ -1586,6 +1586,9 @@ def build_tools(
                     "tasks": ["Tasks"],
                     "notes": ["Notes"],
                     "leads": ["Leads"],
+                    "opportunities": ["Opportunities"],
+                    "opportunites": ["Opportunities"],
+                    "quotes": ["Quotes"],
                 }
                 results = rag_service.search(
                     tenant_id=tenant_id,
