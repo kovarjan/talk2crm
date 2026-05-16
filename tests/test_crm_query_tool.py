@@ -183,6 +183,44 @@ def test_crm_query_tool_meetings_account_id_translates_to_parent_filter():
     assert operand["parent_type"] == "Accounts"
 
 
+def test_crm_query_tool_supports_opportunities_account_filter():
+    client = FakeCrmClient()
+    tools = _make_tools(crm_client=client)
+    tool = _get_tool(tools, "crm_query_tool")
+    filters_json = json.dumps([{"field": "account_id", "op": "eq", "value": "1667abd3-3b35-ad3e-bf5e-607fdc94d3da"}])
+    result = json.loads(asyncio.run(tool.ainvoke({"module": "Opportunities", "filters": filters_json})))
+
+    assert result["status"] == "ok"
+    assert client.last_call is not None
+    assert client.last_call["module"] == "Opportunities"
+    operand = client.last_call["data"]["filter"]["operands"][0]
+    assert operand["field"] == "id"
+    assert operand["fieldModule"] == "Opportunities"
+    assert operand["fieldRel"] == ["accounts"]
+    assert operand["type"] == "eq"
+    assert operand["value"] == "1667abd3-3b35-ad3e-bf5e-607fdc94d3da"
+    assert operand["relationField"] is None
+
+
+def test_crm_query_tool_supports_quotes_account_filter():
+    client = FakeCrmClient()
+    tools = _make_tools(crm_client=client)
+    tool = _get_tool(tools, "crm_query_tool")
+    filters_json = json.dumps([{"field": "account_id", "op": "eq", "value": "1667abd3-3b35-ad3e-bf5e-607fdc94d3da"}])
+    result = json.loads(asyncio.run(tool.ainvoke({"module": "Quotes", "filters": filters_json})))
+
+    assert result["status"] == "ok"
+    assert client.last_call is not None
+    assert client.last_call["module"] == "Quotes"
+    operand = client.last_call["data"]["filter"]["operands"][0]
+    assert operand["field"] == "id"
+    assert operand["fieldModule"] == "Quotes"
+    assert operand["fieldRel"] == ["billing_accounts"]
+    assert operand["type"] == "eq"
+    assert operand["value"] == "1667abd3-3b35-ad3e-bf5e-607fdc94d3da"
+    assert operand["relationField"] is None
+
+
 def test_crm_query_tool_invalid_filters_json():
     tools = _make_tools()
     tool = _get_tool(tools, "crm_query_tool")

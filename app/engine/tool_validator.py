@@ -12,8 +12,31 @@ _CRM_ID_RE = re.compile(
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _WRITE_MODULES = {"meetings", "calls", "tasks", "notes", "contacts", "accounts", "leads"}
-_READ_MODULES = {"meetings", "calls", "tasks", "notes", "contacts", "accounts", "leads"}
-_RAG_MODULES = {"", "contacts", "accounts", "meetings", "calls", "tasks", "notes", "leads"}
+_READ_MODULES = {
+    "meetings",
+    "calls",
+    "tasks",
+    "notes",
+    "contacts",
+    "accounts",
+    "leads",
+    "opportunities",
+    "opportunites",
+    "quotes",
+}
+_RAG_MODULES = {
+    "",
+    "contacts",
+    "accounts",
+    "meetings",
+    "calls",
+    "tasks",
+    "notes",
+    "leads",
+    "opportunities",
+    "opportunites",
+    "quotes",
+}
 
 class CrmActionToolArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")

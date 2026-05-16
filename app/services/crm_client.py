@@ -325,6 +325,8 @@ class CoripoClient:
             "leads": "Leads",
             "users": "Users",
             "cases": "Cases",
+            "quotes": "Quotes",
+            "opportunites": "Opportunities",
         }
         lowered = value.lower()
         if lowered in mapping:
@@ -713,11 +715,61 @@ class CoripoClient:
             )
         return response
 
+    @staticmethod
+    def _resolve_company_overview_currency(payload: dict[str, Any]) -> str:
+        direct_currency = str(payload.get("monetary_values_currency") or "").strip().upper()
+        if direct_currency:
+            return direct_currency
+
+        default_currency = payload.get("default_currency")
+        if isinstance(default_currency, dict):
+            for key in ("iso4217", "code"):
+                value = str(default_currency.get(key) or "").strip().upper()
+                if value:
+                    return value
+
+        # Coripo/Sugar defaults monetary values to CRM default currency. Keep a
+        # deterministic fallback when explicit currency metadata is missing.
+        return "CZK"
+
+    @classmethod
+    def _annotate_amount_fields(cls, node: Any, currency: str) -> None:
+        if isinstance(node, list):
+            for item in node:
+                cls._annotate_amount_fields(item, currency)
+            return
+
+        if not isinstance(node, dict):
+            return
+
+        raw_amount = node.get("amount_usdollar")
+        if raw_amount is not None and str(raw_amount).strip():
+            if node.get("amount") is None or str(node.get("amount")).strip() == "":
+                node["amount"] = raw_amount
+            resolved_currency = str(node.get("amount_currency") or currency).strip().upper() or currency
+            node["amount_currency"] = resolved_currency
+            if not str(node.get("amount_display") or "").strip():
+                node["amount_display"] = f"{node['amount']} {resolved_currency}"
+            node.setdefault("amount_source_field", "amount_usdollar")
+
+        for value in node.values():
+            cls._annotate_amount_fields(value, currency)
+
+    @classmethod
+    def _normalize_company_overview_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        currency = cls._resolve_company_overview_currency(payload)
+        payload["monetary_values_currency"] = currency
+        cls._annotate_amount_fields(payload, currency)
+        return payload
+
     async def generic_search(self, query: str, scope: str = "all") -> dict[str, Any]:
         module_map = {
             "contacts": "Contacts",
             "accounts": "Accounts",
             "meetings": "Meetings",
+            "opportunities": "Opportunities",
+            "opportunites": "Opportunities",
+            "quotes": "Quotes",
         }
         normalized_scope = str(scope or "all").strip().lower()
         payload_data = {"query": query, "q": query, "limit": 20, "offset": 0}
@@ -838,10 +890,12 @@ class CoripoClient:
             if isinstance(message, dict):
                 payload = message.get("data")
                 if isinstance(payload, dict):
-                    return payload
+                    return self._normalize_company_overview_payload(payload)
             data_payload = raw.get("data")
             if isinstance(data_payload, dict):
-                return data_payload
+                return self._normalize_company_overview_payload(data_payload)
+            if isinstance(raw, dict):
+                return self._normalize_company_overview_payload(raw)
             return raw
 
         if normalized_action in {"get", "read", "detail"}:

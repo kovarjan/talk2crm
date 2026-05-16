@@ -62,6 +62,10 @@ router = APIRouter()
 settings = get_settings()
 _rag_service_instance: TenantRAGService | None = None
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_ANSWER_TAG_RE = re.compile(r"</?answer>", re.IGNORECASE)
+_ISO_DATE_RE = re.compile(
+    r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?(?!\d)"
+)
 _MD_FENCE_RE = re.compile(r"```(?:\w+)?\s*([\s\S]*?)```", re.IGNORECASE)
 _MD_BOLD_RE = re.compile(r"\*\*(.*?)\*\*")
 _MD_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)")
@@ -73,6 +77,19 @@ _EMOJI_RE = re.compile(
 )
 _CHAT_TITLE_MAX_CHARS = 80
 _CHAT_TITLE_MAX_WORDS = 6
+
+
+def _format_european_dates(text: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        year, month, day, hour, minute, second = match.groups()
+        formatted = f"{int(day)}.{int(month)}.{year}"
+        if hour and minute:
+            formatted += f" {hour}:{minute}"
+            if second and second != "00":
+                formatted += f":{second}"
+        return formatted
+
+    return _ISO_DATE_RE.sub(repl, text or "")
 
 
 def get_rag_service() -> TenantRAGService | None:
@@ -242,6 +259,8 @@ async def _synthesize_to_final_path(
 
 def _to_user_message(text: str) -> str:
     cleaned = _THINK_TAG_RE.sub("", text or "")
+    cleaned = _ANSWER_TAG_RE.sub("", cleaned)
+    cleaned = _format_european_dates(cleaned)
     cleaned = _MD_FENCE_RE.sub(r"\1", cleaned)
     cleaned = _MD_BOLD_RE.sub(r"\1", cleaned)
     cleaned = _MD_ITALIC_RE.sub(r"\1", cleaned)
@@ -578,6 +597,8 @@ def _canonical_module_name(value: str | None) -> str:
         "leads": "Leads",
         "users": "Users",
         "cases": "Cases",
+        "quotes": "Quotes",
+        "opportunites": "Opportunities",
     }
     return canonical_map.get(text.lower(), text)
 
@@ -1182,6 +1203,8 @@ def _normalize_ingest_modules(modules: list[str] | None) -> list[str]:
         "leads": "Leads",
         "users": "Users",
         "cases": "Cases",
+        "quotes": "Quotes",
+        "opportunites": "Opportunities",
     }
     normalized: list[str] = []
     seen: set[str] = set()
@@ -1748,6 +1771,8 @@ async def rag_status(
             "leads": "Leads",
             "users": "Users",
             "cases": "Cases",
+            "quotes": "Quotes",
+            "opportunites": "Opportunities",
         }
         normalized_module = canonical_map.get(trimmed.lower(), trimmed) if trimmed else None
     count = rag_service.count(tenant_id=ctx["tenant_id"], module=normalized_module)
