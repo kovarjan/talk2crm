@@ -23,11 +23,8 @@ _UUID_RE = re.compile(
 )
 
 
-class SugarClient:
-    """Coripo public API client used by the app.
-
-    The class name is kept for compatibility with existing call sites.
-    """
+class CoripoClient:
+    """Coripo public API client used by the app."""
 
     def __init__(
         self,
@@ -59,7 +56,7 @@ class SugarClient:
             if fallback_secret:
                 self.coripo_hmac_secret = fallback_secret
                 logger.warning(
-                    "SugarClient using HMAC secret fallback from HMAC_KEYS_JSON for key_id=%s",
+                    "CoripoClient using HMAC secret fallback from HMAC_KEYS_JSON for key_id=%s",
                     self.coripo_hmac_key_id,
                 )
         self.clean_response_default = bool(self._auth_config.get("clean_response", True))
@@ -536,7 +533,7 @@ class SugarClient:
 
     @staticmethod
     def _extract_first_record(payload: dict[str, Any]) -> dict[str, Any] | None:
-        records = SugarClient._extract_records(payload)
+        records = CoripoClient._extract_records(payload)
         if records:
             return records[0]
 

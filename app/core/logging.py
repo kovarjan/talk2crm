@@ -399,7 +399,7 @@ def setup_logging(
     log_format: str = "pretty",
     log_force_color: bool = True,
     log_file_enabled: bool = False,
-    log_file_path: str = "./logs/talk2api2.log",
+    log_file_path: str = "./logs/talk2crm.log",
     log_file_format: str = "json",
     log_trace_enabled: bool = True,
     log_trace_max_chars: int = 1200,

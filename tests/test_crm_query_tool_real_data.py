@@ -3,13 +3,13 @@ import json
 import pytest
 import asyncio
 
-from app.services.crm_client import SugarClient
+from app.services.crm_client import CoripoClient
 from app.engine.tools import build_tools
 
 @pytest.mark.asyncio
 async def test_crm_query_tool_real_data():
     
-    real_client = SugarClient(
+    real_client = CoripoClient(
         base_url=os.getenv("CORIPO_TEST_BASE_URL"),
         token=os.getenv("CORIPO_TEST_TOKEN"),
         user_id=os.getenv("CORIPO_TEST_USER_ID"),

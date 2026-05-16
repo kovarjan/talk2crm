@@ -153,3 +153,7 @@ cache/*
 
 # Git worktrees
 .worktrees/
+out/scenario1_full_pipeline_metrics.csv
+out/stt_metrics_complete_scrnario1_base.csv
+out/stt_metrics_scenario1_turbo.csv
+out/stt_metrics.csv

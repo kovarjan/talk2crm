@@ -69,7 +69,7 @@ def custom_openapi():
         title=app.title,
         version=app.version,
         description=(
-            "Multi-tenant AI voice bridge for SugarCRM. "
+            "Multi-tenant AI voice bridge for Coripo CRM. "
             "Supports text/audio processing, chat lifecycle, and tenant-scoped search."
         ),
         routes=app.routes,

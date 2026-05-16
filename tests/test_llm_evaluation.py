@@ -1,5 +1,5 @@
 """
-LLM Evaluation Suite — Sugar Voice Bridge Bachelor's Thesis Benchmark
+LLM Evaluation Suite — talk2crm Bachelor's Thesis Benchmark
 ======================================================================
 Evaluates local Ollama models as the agent against stubbed CRM/RAG backends.
 
@@ -32,7 +32,7 @@ from app.core.config import get_settings
 from app.engine.agent import run_agent
 from app.engine.rag import TenantRAGService
 from app.engine.tools import build_tools
-from app.services.crm_client import SugarClient
+from app.services.crm_client import CoripoClient
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -176,8 +176,8 @@ def _model_name() -> str:
     return os.environ.get("LLM_MODEL") or get_settings().llm_model
 
 
-def _make_crm_client() -> SugarClient:
-    client = SugarClient(
+def _make_crm_client() -> CoripoClient:
+    client = CoripoClient(
         base_url=CRM_BASE_URL,
         token=CRM_TOKEN,
         user_id=USER_ID,

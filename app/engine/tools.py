@@ -13,7 +13,7 @@ from langchain_core.tools import tool
 from app.core.config import get_settings
 from app.engine.rag import TenantRAGService
 from app.services.crm_read_service import CRMReadHelpers, CRMReadService
-from app.services.crm_client import SugarClient
+from app.services.crm_client import CoripoClient
 from app.services.crm_write_service import CRMWriteService
 from app.engine.filter_builder import FilterSpec, build_filter, build_order
 from app.engine.tool_logger import ToolCallLogger
@@ -696,7 +696,12 @@ def _resolve_accounts_from_qdrant(
     if not query:
         return []
 
-    results = rag_service.search(tenant_id=tenant_id, query=query, limit=50)
+    results = rag_service.search_entities(
+        tenant_id=tenant_id,
+        query=query,
+        entity_type="account",
+        limit=50,
+    )
     account_rows = _extract_rag_records(results, module_hint="accounts")
     contact_rows = _extract_rag_records(results, module_hint="contacts")
     account_rows = _enrich_account_rows_with_contact_names(
@@ -1402,7 +1407,7 @@ def build_tools(
     user_id: str,
     input_text: str,
     request_context: dict[str, Any] | None,
-    crm_client: SugarClient,
+    crm_client: CoripoClient,
     rag_service: TenantRAGService | None,
     action_confirmation: bool = False,
 ) -> list:
@@ -1562,26 +1567,32 @@ def build_tools(
                 tcl.set_output(result_payload)
                 return json.dumps(result_payload, ensure_ascii=False)
             module_filter = _safe_text(module).lower()
-            account_lookup_query = (
-                (re.sub(r"^\s*(?:firma|firmy|firmu)\s+", "", query, flags=re.IGNORECASE).strip() or query)
-                if module_filter == "accounts"
-                else query
-            )
-
             wide_limit = max(10, int(limit or 5) * 4)
-            results = rag_service.search(tenant_id=tenant_id, query=account_lookup_query, limit=wide_limit)
-            if module_filter:
-                filtered: list[dict[str, Any]] = []
-                for item in results:
-                    if not isinstance(item, dict):
-                        continue
-                    payload = item.get("payload")
-                    if not isinstance(payload, dict):
-                        continue
-                    payload_module = _safe_text(payload.get("module")).lower()
-                    if payload_module == module_filter:
-                        filtered.append(item)
-                results = filtered
+            if module_filter in {"", "contacts", "accounts"}:
+                entity_type = {
+                    "contacts": "contact",
+                    "accounts": "account",
+                }.get(module_filter, "any")
+                results = rag_service.search_entities(
+                    tenant_id=tenant_id,
+                    query=query,
+                    entity_type=entity_type,
+                    limit=wide_limit,
+                )
+            else:
+                module_map = {
+                    "meetings": ["Meetings"],
+                    "calls": ["Calls"],
+                    "tasks": ["Tasks"],
+                    "notes": ["Notes"],
+                    "leads": ["Leads"],
+                }
+                results = rag_service.search(
+                    tenant_id=tenant_id,
+                    query=query,
+                    limit=wide_limit,
+                    modules=module_map.get(module_filter),
+                )
             results = _dedupe_rag_results(results)
     
             # Inject mismatch warning into first result when name diverges significantly.

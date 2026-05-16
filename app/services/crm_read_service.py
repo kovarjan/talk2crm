@@ -8,7 +8,7 @@ import httpx
 
 from app.core.config import get_settings
 from app.engine.rag import TenantRAGService
-from app.services.crm_client import SugarClient
+from app.services.crm_client import CoripoClient
 
 
 SafeTextFn = Callable[[Any], str]
@@ -56,7 +56,7 @@ class CRMReadService:
         user_id: str,
         input_text: str,
         request_context: dict[str, Any] | None,
-        crm_client: SugarClient,
+        crm_client: CoripoClient,
         rag_service: TenantRAGService | None,
         helpers: CRMReadHelpers,
     ):
@@ -357,9 +357,10 @@ class CRMReadService:
                 rag_candidates: list[dict[str, Any]] = []
                 if self.rag_service is not None:
                     try:
-                        rag_hits = self.rag_service.search(
+                        rag_hits = self.rag_service.search_entities(
                             tenant_id=self.tenant_id,
                             query=person_name,
+                            entity_type="contact",
                             limit=max(20, safe_limit * 3),
                         )
                         rag_candidates = self.h.filter_valid_contact_records(self.h.extract_rag_records(rag_hits, "contacts"))

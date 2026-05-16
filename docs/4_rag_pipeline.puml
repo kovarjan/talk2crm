@@ -1,0 +1,71 @@
+@startuml 4_rag_pipeline
+!theme plain
+skinparam defaultFontSize 11
+skinparam ArrowColor #4A5568
+skinparam BackgroundColor #FFFFFF
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam NoteBackgroundColor #FFFDE7
+skinparam NoteBorderColor #F9A825
+skinparam rectangleBorderColor #90A4AE
+skinparam rectangleBackgroundColor #FAFAFA
+
+title Datový tok RAG pipeline (talk2crm)
+
+actor "Uživatel" as USER
+
+rectangle "Coripo CRM API" as CRM #E3F2FD
+rectangle "CoripoClient\n(app/services/crm_client.py)" as CLIENT #E8F5E9
+rectangle "TenantRAGService\n(app/engine/rag.py)" as RAG #FFF3E0
+database "Qdrant\ntenantní kolekce\n<prefix>__<tenant_id>" as QDRANT #F3E5F5
+rectangle "AI Agent\n(rag_search_tool, crm_query_tool,\ncrm_action_tool, my_meetings_tool,\nget_company_overview)" as AGENT #E0F7FA
+
+package "Ingest pipeline" {
+  rectangle "1) Stránkované čtení z CRM\nexecute_module_action(modul, action=list)" as ING1
+  rectangle "2) Inkrementální filtr\nwatermark (modified_at)\n+ přeskočení při shodě record_hash" as ING2
+  rectangle "3) Vytvoření embeddingu\nOllamaEmbedder (/embeddings)\nfallback: HashEmbedder" as ING3
+  rectangle "4) Upsert do Qdrantu\n{id, vektor, payload}" as ING4
+
+  ING1 -down-> ING2
+  ING2 -down-> ING3
+  ING3 -down-> ING4
+}
+
+package "Query pipeline" {
+  rectangle "5) Uživatelský dotaz" as Q1
+  rectangle "6) Embedding dotazu" as Q2
+  rectangle "7) Hybridní retrieval\ntextová shoda + vektorové\nvyhledávání, slučování\na skórování kandidátů" as Q3
+  rectangle "8) Kontext pro agenta\n(top-k CRM záznamů)" as Q4
+
+  Q1 -down-> Q2
+  Q2 -down-> Q3
+  Q3 -down-> Q4
+}
+
+CRM    -down-> CLIENT
+CLIENT -down-> RAG
+RAG    -up-> ING1
+ING4   -down-> QDRANT
+
+USER   -down-> Q1
+Q1     -left-> AGENT
+AGENT  -down-> Q2
+Q2     -down-> RAG
+RAG    -down-> Q3
+Q3    <-right-> QDRANT
+Q4     -up->   AGENT
+AGENT  -down-> USER
+
+note bottom of QDRANT
+  Tenantní izolace:
+  každý tenant má vlastní kolekci,
+  vyhledávání nepřekračuje hranice tenantu.
+end note
+
+note bottom of RAG
+  RAG vrstva poskytuje kontext pro agenta.
+  Autoritativní zdroj dat pro CRUD operace
+  zůstává CRM backend (Coripo API).
+end note
+
+@enduml

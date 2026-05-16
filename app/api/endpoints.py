@@ -49,7 +49,7 @@ from app.engine.pending_patch import try_patch_pending_action
 from app.engine.quick_actions import QuickActionResult, try_handle_quick_action
 from app.engine.rag import TenantRAGService
 from app.engine.tools import build_tools
-from app.services.crm_client import SugarClient
+from app.services.crm_client import CoripoClient
 from app.services.tenant_manager import TenantManager
 from database.models import Chat, ChatMessage
 from database.session import get_db
@@ -889,7 +889,7 @@ async def _process_input_core(
 
     tenant_manager = TenantManager(db)
     credentials = await tenant_manager.get_credentials(tenant_id)
-    crm_client = SugarClient(
+    crm_client = CoripoClient(
         credentials.crm_base_url,
         credentials.crm_token,
         user_id=user_id,
@@ -1143,7 +1143,7 @@ async def _trigger_ingest(
         logger.warning("Skipping ingest because RAG service is unavailable")
         return
 
-    client = SugarClient(
+    client = CoripoClient(
         credentials_base_url,
         credentials_token,
         user_id=user_id,
@@ -1592,7 +1592,7 @@ async def search(
 ) -> BaseResponse:
     tenant_manager = TenantManager(db)
     credentials = await tenant_manager.get_credentials(ctx["tenant_id"])
-    crm_client = SugarClient(
+    crm_client = CoripoClient(
         credentials.crm_base_url,
         credentials.crm_token,
         user_id=ctx["user_id"],
@@ -1658,7 +1658,7 @@ async def rag_ingest(
     credentials = await tenant_manager.get_credentials(ctx["tenant_id"])
 
     if payload.synchronous:
-        client = SugarClient(
+        client = CoripoClient(
             credentials.crm_base_url,
             credentials.crm_token,
             user_id=ctx["user_id"],

@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.services.crm_client import SugarClient
+from app.services.crm_client import CoripoClient
 
 
 def _to_pretty_json(value: Any, *, limit: int = 2500) -> str:
@@ -28,12 +28,12 @@ def _to_pretty_json(value: Any, *, limit: int = 2500) -> str:
     return rendered
 
 
-def _attach_client_trace(client: SugarClient) -> None:
+def _attach_client_trace(client: CoripoClient) -> None:
     trace_raw = str(os.getenv("CORIPO_TEST_TRACE_RAW", "")).strip().lower() in {"1", "true", "yes"}
     original_action = client.execute_module_action
 
     async def traced_action(
-        self: SugarClient,
+        self: CoripoClient,
         module: str,
         action: str,
         data: dict[str, Any],
@@ -72,7 +72,7 @@ def _attach_client_trace(client: SugarClient) -> None:
         original_raw = client._coripo_request
 
         async def traced_raw(
-            self: SugarClient,
+            self: CoripoClient,
             method: str,
             path: str,
             *,
@@ -100,7 +100,7 @@ def _attach_client_trace(client: SugarClient) -> None:
         client._coripo_request = types.MethodType(traced_raw, client)
 
 
-def _build_client_from_env() -> SugarClient:
+def _build_client_from_env() -> CoripoClient:
     if os.getenv("CORIPO_TEST_BASE_URL"):
         base_url = str(os.getenv("CORIPO_TEST_BASE_URL")).strip()
     else:
@@ -133,7 +133,7 @@ def _build_client_from_env() -> SugarClient:
             "(for example 'jkovar') so HMAC user fallback can resolve."
         )
 
-    client = SugarClient(
+    client = CoripoClient(
         base_url=base_url,
         token=token,
         user_id=user_id,
@@ -143,7 +143,7 @@ def _build_client_from_env() -> SugarClient:
     return client
 
 
-def _run_or_skip_connect_error(client: SugarClient, module: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _run_or_skip_connect_error(client: CoripoClient, module: str, payload: dict[str, Any]) -> dict[str, Any]:
     try:
         return asyncio.run(client.execute_module_action(module, "list", payload))
     except ValueError as exc:
