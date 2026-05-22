@@ -1,4 +1,6 @@
-# talk2crm v1.0
+# talk2crm
+
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 Multi-tenant FastAPI gateway for voice/text-to-action workflows against Coripo CRM 6.5, with LangChain agent orchestration, tenant-scoped RAG (Qdrant), and audio pipeline support.
 
@@ -369,3 +371,9 @@ For Coripo numeric user IDs, include `X-User-Name` so HMAC user resolution stays
 - Qdrant uses one collection per tenant (`<QDRANT_COLLECTION>__<tenant_id-sanitized>`), which provides hard tenant isolation at storage level.
 - If upgrading from older shared-collection mode, re-ingest tenant data (or migrate vectors) so historical vectors are visible in tenant-specific collections.
 - Quick actions (regex-based NLU shortcuts) are present in the codebase but intentionally disabled (`QUICK_ACTION_MIN_CONFIDENCE=1.0`). The LLM agent path handles these intents correctly without the false positives the regex path produced.
+
+## License
+
+Copyright 2026 Jan Kovář and Acmark s.r.o.
+
+Licensed under the [Apache License 2.0](LICENSE).
