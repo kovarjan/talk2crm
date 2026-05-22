@@ -101,3 +101,9 @@ yarl==1.22.0
 zstandard==0.25.0
 loguru==0.7.3
 json-repair==0.58.7
+
+# dev / test
+iniconfig==2.3.0
+pluggy==1.6.0
+pytest==9.0.3
+pytest-asyncio==1.3.0

@@ -4,12 +4,13 @@ Multi-tenant FastAPI gateway for voice/text-to-action workflows against Coripo C
 
 ## Stack
 
-- FastAPI (Python 3.10+)
-- LangChain + OpenAI-compatible Qwen endpoint (Ollama/vLLM)
-- Qdrant for tenant-scoped retrieval
+- FastAPI (Python 3.11+)
+- LangChain + OpenAI-compatible LLM endpoint (Qwen via Ollama/vLLM)
+- Qdrant for tenant-scoped RAG retrieval
 - faster-whisper for STT
 - edge-tts for TTS
-- SQLAlchemy + PostgreSQL for tenant/chat state
+- SQLAlchemy + asyncpg + PostgreSQL for tenant/chat state
+- Fernet encryption for tenant CRM token storage
 
 ## Project Structure
 
@@ -17,21 +18,41 @@ Multi-tenant FastAPI gateway for voice/text-to-action workflows against Coripo C
 app/
   main.py
   api/
-    endpoints.py
-    dependencies.py
-    models.py
+    endpoints.py       # all routes
+    dependencies.py    # tenant context, HMAC auth
+    models.py          # request/response Pydantic models
   core/
-    config.py
-    security.py
-    audio.py
-    logging.py
+    config.py          # Settings (pydantic-settings, .env)
+    security.py        # Fernet encryption, HMAC verification
+    audio.py           # Whisper STT, edge-tts TTS
+    logging.py         # structured JSON/pretty logging
+  domain/
+    contracts.py       # shared dataclasses, pending action envelopes
+    entity_resolver.py # fuzzy CRM entity resolution
+    resolver_policy.py # threshold config for entity resolver
+    temporal_resolver.py # natural language date/time resolution
   engine/
-    agent.py
-    tools.py
-    rag.py
+    agent.py           # LangChain AgentExecutor loop
+    tools.py           # five LangChain tools (CRM query/action, RAG, meetings, overview)
+    tool_validator.py  # Pydantic arg validation for tools
+    tool_logger.py     # structured tool-call logging
+    rag.py             # TenantRAGService (Qdrant)
+    adjustments.py     # pre-mutation pipeline (name→ID, Czech inflections, defaults)
+    filter_builder.py  # LLM-friendly → Coripo REST filter translation
+    pending_patch.py   # in-conversation edit detection without LLM round-trip
+    quick_actions.py   # fast NLU path (currently disabled, threshold=1.0)
+  nlu/
+    command_parser.py  # regex-based intent parser for quick actions
+  presentation/
+    cards.py           # contact/record card rendering
   services/
-    tenant_manager.py
-    crm_client.py
+    tenant_manager.py  # tenant DB lookup, credential decryption
+    crm_client.py      # Coripo REST client (HMAC + session-ID auth)
+    crm_read_service.py
+    crm_write_service.py
+  utils/
+    text.py            # normalize_text, safe_text (shared across modules)
+    crm_id.py          # CRM_ID_RE regex, is_valid_crm_id (shared across modules)
 database/
   models.py
   session.py
@@ -39,6 +60,8 @@ database/
 scripts/
   create_tenant.py
 requirements.txt
+requirements.gpu.txt   # NVIDIA wheels — install only on GPU hosts
+environment.yml        # Conda environment spec
 ```
 
 ## Quick Start
@@ -63,6 +86,17 @@ pip install -r requirements.gpu.txt
 ```bash
 cp .env.example .env
 ```
+
+**Required before first run** — set these in `.env`:
+
+| Variable | Description |
+|---|---|
+| `TENANT_SECRET_KEY` | Fernet key for CRM token encryption. Generate: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `DATABASE_URL` | PostgreSQL connection string (`postgresql+asyncpg://...`) |
+| `HMAC_KEYS_JSON` | JSON map of `{ "key-id": "secret" }` for M2M auth |
+| `CRM_MODE` | `on` or `off` (default `on`) |
+
+The app **refuses to start** if `TENANT_SECRET_KEY` is still the placeholder value.
 
 3. Start API (local, without Docker):
 
@@ -217,7 +251,7 @@ docker compose -f docker-compose.prod.yml exec api nvidia-smi
 - Verify Whisper runtime from logs (should show `device=cuda`):
 
 ```bash
-docker compose -f docker-compose.prod.yml logs api | grep -i \"Whisper initialized\"
+docker compose -f docker-compose.prod.yml logs api | grep -i "Whisper initialized"
 ```
 
 - Verify CUDA shared libraries are visible in API container:
@@ -226,34 +260,46 @@ docker compose -f docker-compose.prod.yml logs api | grep -i \"Whisper initializ
 docker compose -f docker-compose.prod.yml exec api sh -lc 'echo $LD_LIBRARY_PATH && ls -l /usr/local/lib/python3.11/site-packages/nvidia/cublas/lib/libcublas.so.12'
 ```
 
-## API Compatibility
+## API Endpoints
 
-Implemented endpoints:
+Required headers for all protected endpoints:
 
-- `GET /openapi.json`
-- `GET /swagger`
-- `GET /`
-- `GET /ping/`
-- `POST /chats/`
-- `GET /chats/{chat_id}`
-- `GET /chats/user/{user_id_in_path}`
-- `PUT /chats/{chat_id}`
-- `DELETE /chats/{chat_id}`
-- `POST /process-input/`
-- `POST /process-audio/`
-- `POST /search/`
-- `GET /audio/{file_id}`
-
-Required headers for protected endpoints:
-
-- `X-Tenant`
-- `X-User-Id`
+- `X-Tenant` — tenant identifier
+- `X-User-Id` — CRM user ID
 
 Optional machine-to-machine HMAC headers:
 
 - `Authorization: HMAC keyId=<kid>, signature=<b64>`
 - `X-Timestamp`
 - `X-Nonce`
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | Health / status |
+| `GET` | `/ping/` | Liveness probe |
+| `POST` | `/chats/` | Create new chat session |
+| `GET` | `/chats/{chat_id}` | Get chat history |
+| `GET` | `/chats/user/{user_id}` | List user's chats (default limit 50, max 200) |
+| `PUT` | `/chats/{chat_id}` | Replace chat history |
+| `DELETE` | `/chats/{chat_id}` | Delete chat |
+| `POST` | `/process-input/` | Submit text turn to agent |
+| `POST` | `/process-audio/` | Submit audio turn (STT → agent → TTS) |
+| `POST` | `/search/` | Direct RAG search |
+| `POST` | `/rag/ingest/` | Ingest CRM module data into Qdrant |
+| `GET` | `/rag/status/` | Qdrant vector count per module |
+| `POST` | `/crm/events/record-created/` | CRM webhook: new record created |
+| `GET` | `/audio/{file_id}` | Serve generated audio file |
+
+## Tests
+
+```bash
+source .venv/bin/activate
+pytest tests/                              # all tests
+pytest tests/test_entity_resolver_calibration.py   # single file
+pytest tests/test_tool_call_validator.py::test_name  # single test
+```
+
+Tests are self-contained (stub CRM clients, no live network required). Live-CRM tests (`test_crm_client_coripo_integration.py`, `test_crm_query_tool_real_data.py`) and LLM evaluation tests (`test_llm_evaluation.py`) require running services and will skip or fail without them.
 
 ## Debugging & Transparency
 
@@ -271,20 +317,19 @@ Optional machine-to-machine HMAC headers:
   - `LOG_FILE_PATH=./logs/talk2crm.log`
   - `LOG_FILE_FORMAT=json` or `pretty`
 - Every request keeps request id (`X-Request-Id`) and latency in logs.
-- Tenant id and user id are kept explicit throughout route -> service -> tool -> agent flow.
+- Tenant id and user id are kept explicit throughout route → service → tool → agent flow.
 - Chat history persists user/assistant turns with metadata for replay/debug.
 - Tool outputs are captured into assistant message metadata.
 
-## Notes
+## Security Notes
 
-- `app/engine/rag.py` uses deterministic hash embeddings as a lightweight default for local development.
-- In production, replace the embedder with a real embedding model and keep the same tenant filter contract.
-- Qdrant uses one collection per tenant (`<QDRANT_COLLECTION>__<tenant_id-sanitized>`), which provides hard tenant isolation at storage level.
-- If upgrading from older shared-collection mode, re-ingest tenant data (or migrate vectors) so historical vectors are visible in tenant-specific collections.
+- **`TENANT_SECRET_KEY`** must be set to a real Fernet key before deployment. The app will refuse to start with the default placeholder value.
+- **HMAC auth** (`Authorization: HMAC ...`) is the recommended M2M authentication method. Without it, the API trusts `X-Tenant` / `X-User-Id` headers from the caller — deploy behind a trusted reverse proxy or API gateway in that configuration.
+- **CORS** defaults to `["*"]` for development. Set `CORS_ALLOW_ORIGINS` to specific origins in production.
+- **Tenant CRM tokens** are stored Fernet-encrypted in the database.
+- **Audio files** are served from a scoped cache directory; file IDs are validated to be exactly 32 lowercase hex characters.
 
-
-
-## Ingest
+## RAG Ingest
 
 ```bash
 curl -X POST 'http://127.0.0.1:8011/rag/ingest/' \
@@ -301,8 +346,8 @@ curl -X POST 'http://127.0.0.1:8011/rag/ingest/' \
   }'
 ```
 
-
 ### Reimport all data for a module(s):
+
 ```bash
 curl -X POST 'http://127.0.0.1:8011/rag/ingest/' \
   -H 'Content-Type: application/json' \
@@ -319,25 +364,9 @@ curl -X POST 'http://127.0.0.1:8011/rag/ingest/' \
 
 For Coripo numeric user IDs, include `X-User-Name` so HMAC user resolution stays deterministic.
 
-## Contacts Ingest Validation
+## Notes
 
-Compare CRM `Contacts` records against Qdrant `Contacts` payloads and detect missing vectors:
-
-```bash
-./scripts/validate_contacts_ingest.py \
-  --crm-path /Users/kovarjan/Sites/localhost/coripo/master_ai/rest_coripo \
-  --tenant-id ai-local \
-  --output-json out/contacts_ingest_validation.json \
-  --sample 20 \
-  --module Contacts
-```
-
-The script checks CRM (`/public/list/Contacts`) vs Qdrant (`tenant_knowledge__<tenant_id>` by default), prints missing/stale IDs, and always verifies contact `105004f2-f220-2bbb-2ca0-64e330763f18`.
-
-### Run Qdrant docker:
-
-```bash
-docker run -d --name talk2crm-qdrant -p 6333:6333 \
-  -v "/Users/kovarjan/Sites/localhost/playground/opensource/talk2crm/.qdrant_storage:/qdrant/storage" \
-  qdrant/qdrant:latest
-```
+- `app/engine/rag.py` uses deterministic hash embeddings as a lightweight default for local development. In production, replace the embedder with a real embedding model (set `RAG_EMBEDDING_BASE_URL` and optionally `RAG_EMBEDDING_API_KEY`) and keep the same tenant filter contract.
+- Qdrant uses one collection per tenant (`<QDRANT_COLLECTION>__<tenant_id-sanitized>`), which provides hard tenant isolation at storage level.
+- If upgrading from older shared-collection mode, re-ingest tenant data (or migrate vectors) so historical vectors are visible in tenant-specific collections.
+- Quick actions (regex-based NLU shortcuts) are present in the codebase but intentionally disabled (`QUICK_ACTION_MIN_CONFIDENCE=1.0`). The LLM agent path handles these intents correctly without the false positives the regex path produced.
