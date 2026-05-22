@@ -282,6 +282,8 @@ async def run_agent(
     intermediate_steps: list[dict[str, Any]] = []
     final_answer = ""
 
+    # 6 iterations matches LangChain AgentExecutor's default; prevents runaway
+    # tool-call loops when the LLM fails to emit a final answer.
     for iteration in range(6):
         try:
             response: AIMessage = await llm.ainvoke(messages)

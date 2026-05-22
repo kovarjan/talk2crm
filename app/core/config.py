@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     qdrant_collection: str = "tenant_knowledge"
     rag_embedding_model: str = "qwen3-embedding:4b"
     rag_embedding_base_url: str = "http://192.168.8.16:4000/v1"
-    rag_embedding_api_key: str | None = llm_api_key
+    rag_embedding_api_key: str | None = None
     rag_embedding_size: int = 2560
     rag_upsert_batch_size: int = 200
     rag_entity_min_score: float = 60.0
@@ -80,10 +80,15 @@ class Settings(BaseSettings):
     resolver_ambiguity_gap_threshold: float = 0.08
     resolver_strict_mutation_confirmation: bool = True
 
-    quick_action_enabled: bool = True
+    quick_action_enabled: bool = False
     quick_action_fallback_on_no_candidates: bool = True
     quick_action_fallback_on_ambiguous: bool = True
     quick_action_fallback_on_exception: bool = True
+    # Intentionally set to 1.0 to disable quick actions entirely.
+    # CommandParser emits confidence=0.95 for all matches, so this threshold
+    # is never met. Quick actions caused more false-positive mutations than they
+    # saved LLM round-trips; the LLM agent path handles these intents correctly.
+    # To re-enable, lower this to 0.94 or below.
     quick_action_min_confidence: float = 1.0
 
     hmac_keys_json: str = Field(default="{}")
@@ -113,6 +118,28 @@ class Settings(BaseSettings):
             raise ValueError(
                 "DATABASE_URL must use PostgreSQL with asyncpg "
                 "(postgresql+asyncpg://...)"
+            )
+        return normalized
+
+    @field_validator("tenant_secret_key")
+    @classmethod
+    def validate_tenant_secret_key(cls, value: str) -> str:
+        placeholder = "CHANGE_ME_WITH_32_BYTE_URLSAFE_BASE64_FOR_FERNET"
+        if value.strip() == placeholder:
+            raise ValueError(
+                "TENANT_SECRET_KEY is still the placeholder value. "
+                "Generate a real key: python -c "
+                "\"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            )
+        return value
+
+    @field_validator("crm_mode")
+    @classmethod
+    def validate_crm_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"on", "off"}:
+            raise ValueError(
+                f"CRM_MODE must be 'on' or 'off', got {value!r}"
             )
         return normalized
 

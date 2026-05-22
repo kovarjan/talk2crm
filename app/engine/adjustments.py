@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import copy
 import re
-import unicodedata
 from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
+from app.utils.crm_id import CRM_ID_RE as _CRM_ID_RE
+from app.utils.text import normalize_text
 from app.core.logging import get_logger
 from app.domain.entity_resolver import EntityResolver
 from app.domain.temporal_resolver import TemporalResolver
@@ -18,9 +19,6 @@ logger = get_logger(__name__)
 
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-)
-_CRM_ID_RE = re.compile(
-    r"^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
 )
 _CRM_SCOPED_ID_RE = re.compile(
     r"^(?P<module>[A-Za-z]+)[-:/](?P<id>(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}))$"
@@ -398,14 +396,6 @@ class ModuleAdjustmentEngine:
         return None
 
     @staticmethod
-    def _normalize_text(value: str) -> str:
-        lowered = value.strip().lower()
-        unaccented = "".join(
-            c for c in unicodedata.normalize("NFD", lowered) if unicodedata.category(c) != "Mn"
-        )
-        return re.sub(r"[^a-z0-9]+", " ", unaccented).strip()
-
-    @staticmethod
     def _extract_last_name(full_name: str | None) -> str | None:
         text = str(full_name or "").strip()
         if not text:
@@ -420,7 +410,7 @@ class ModuleAdjustmentEngine:
         value = str(last_name or "").strip()
         if not value:
             return None
-        lowered = ModuleAdjustmentEngine._normalize_text(value)
+        lowered = normalize_text(value)
         if lowered.endswith("ovou"):
             return value[:-4] + "ová"
         if lowered.endswith("ou"):
@@ -551,8 +541,8 @@ class ModuleAdjustmentEngine:
         candidate = cls._record_label(record)
         if not candidate:
             return 0
-        n_search = cls._normalize_text(search_name)
-        n_candidate = cls._normalize_text(candidate)
+        n_search = normalize_text(search_name)
+        n_candidate = normalize_text(candidate)
         if not n_search or not n_candidate:
             return 0
         if n_search == n_candidate:
@@ -629,7 +619,7 @@ class ModuleAdjustmentEngine:
             return None
 
         target_account_id = str(account_id or "").strip()
-        target_account_norm = self._normalize_text(str(account_name or ""))
+        target_account_norm = normalize_text(str(account_name or ""))
         if not target_account_id and not target_account_norm:
             return resolved_contact
 
@@ -637,7 +627,7 @@ class ModuleAdjustmentEngine:
             resolved_contact,
             ["account_id", "accountid", "accountId"],
         ) or ""
-        resolved_account_norm = self._normalize_text(
+        resolved_account_norm = normalize_text(
             self._first_nonempty(
                 resolved_contact,
                 ["account_name", "accountName", "company_name"],

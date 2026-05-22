@@ -3,10 +3,10 @@ from __future__ import annotations
 import copy
 import json
 import re
-import unicodedata
 from datetime import datetime
 from typing import Any
 
+from app.utils.text import normalize_text as _normalize_text
 from app.domain.contracts import build_pending_action_envelope, normalize_pending_action_envelope
 from app.presentation.cards import parse_datetime
 
@@ -14,14 +14,6 @@ _TIME_TOKEN_RE = re.compile(r"\b(?P<hour>\d{1,2})[:.](?P<minute>\d{2})\b")
 _HOURS_RE = re.compile(r"\b(?:na\s+)?(?P<hours>\d{1,2})\s*(?:h|hod|hodin|hodiny)\b", re.IGNORECASE)
 _MINUTES_RE = re.compile(r"\b(?:na\s+)?(?P<minutes>\d{1,3})\s*(?:m|min|minut|minuty)\b", re.IGNORECASE)
 _DESCRIPTION_RE = re.compile(r"\bpopis\s+(.+)", re.IGNORECASE | re.DOTALL)
-
-
-def _normalize_text(value: str) -> str:
-    lowered = (value or "").strip().lower()
-    unaccented = "".join(
-        c for c in unicodedata.normalize("NFD", lowered) if unicodedata.category(c) != "Mn"
-    )
-    return re.sub(r"[^a-z0-9]+", " ", unaccented).strip()
 
 
 def _is_confirmation_only(input_text: str) -> bool:
@@ -90,14 +82,6 @@ def _extract_duration_patch(input_text: str) -> tuple[int, int] | None:
 # Day-of-week resolution from phrases like "na úterý v pondělí nemůžu" is
 # ambiguous when multiple weekdays are present; the LLM receives the current
 # date in its system prompt and resolves relative weekdays correctly on its own.
-# def _weekday_from_text(input_text: str) -> int | None:
-#     normalized = _normalize_text(input_text)
-#     mapping = {"pondeli": 0, "utery": 1, "streda": 2, "ctvrtek": 3,
-#                "patek": 4, "sobota": 5, "nedele": 6}
-#     for token, day in mapping.items():
-#         if token in normalized:
-#             return day
-#     return None
 
 
 def _resolve_datetime_patch(*, input_text: str, current_value: str, now: datetime | None) -> str | None:

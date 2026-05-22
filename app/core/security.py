@@ -97,7 +97,9 @@ def verify_hmac_request(
         if value and value not in candidate_paths:
             candidate_paths.append(value)
 
-    # Common reverse-proxy rewrite case: external /v1/* -> internal /*
+    # Some reverse proxies rewrite /v1/... to /... before forwarding.
+    # Try the prefixed path as a second candidate; if neither matches we
+    # return False — we do NOT fall through with a partial match.
     if path and not path.startswith("/v1/"):
         prefixed = f"/v1{path}"
         if prefixed not in candidate_paths:

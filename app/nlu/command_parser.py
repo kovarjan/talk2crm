@@ -1,25 +1,21 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from typing import Any
 
+from app.utils.text import normalize_text
 from app.domain.contracts import NormalizedCommand
 
 
 _EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _PHONE_RE = re.compile(r"(?:\+420\s*)?(\d[\d\s]{7,}\d)")
 
+"""
+This module contains a simple rule-based parser for quick action commands.
+NOTE: Not used anymore, introduces too many issues.
+"""
 
 class CommandParser:
-    @staticmethod
-    def _normalize_text(value: str) -> str:
-        lowered = (value or "").strip().lower()
-        unaccented = "".join(
-            c for c in unicodedata.normalize("NFD", lowered) if unicodedata.category(c) != "Mn"
-        )
-        return re.sub(r"[^a-z0-9]+", " ", unaccented).strip()
-
     def parse(self, text: str) -> NormalizedCommand | None:
         contact_payload = self._extract_create_contact_payload(text)
         if contact_payload is not None:
@@ -43,7 +39,7 @@ class CommandParser:
                 source="quick_action_regex",
             )
 
-        normalized = self._normalize_text(text)
+        normalized = normalize_text(text)
         if self._is_latest_leads_query(normalized):
             return NormalizedCommand(
                 intent="latest_leads",
@@ -77,7 +73,7 @@ class CommandParser:
         return any(token in normalized for token in ("schuzk", "scuzk", "plan", "meeting"))
 
     def _extract_create_contact_payload(self, text: str) -> dict[str, Any] | None:
-        normalized = self._normalize_text(text)
+        normalized = normalize_text(text)
         if "kontakt" not in normalized:
             return None
         if not any(trigger in normalized for trigger in ("vytvor", "zaloz", "pridej kontakt", "novy kontakt")):
@@ -127,7 +123,7 @@ class CommandParser:
         return payload
 
     def _extract_create_meeting_payload(self, text: str) -> dict[str, Any] | None:
-        normalized = self._normalize_text(text)
+        normalized = normalize_text(text)
         if "schuzk" not in normalized and "meeting" not in normalized:
             return None
         if not any(
@@ -167,7 +163,7 @@ class CommandParser:
         fields: dict[str, Any] = {}
         if person_match:
             contact_hint = re.sub(r"\s+", " ", person_match.group(1)).strip(" ,.;")
-            contact_hint_norm = self._normalize_text(contact_hint)
+            contact_hint_norm = normalize_text(contact_hint)
             if contact_hint_norm and not any(
                 token in contact_hint_norm for token in ("firma", "firm", "spolecnost", "company")
             ):

@@ -10,6 +10,8 @@ import re
 from typing import Any, Literal
 from pydantic import BaseModel
 
+from app.utils.crm_id import CRM_ID_RE as _CRM_ID_RE
+
 
 class FilterSpec(BaseModel):
     """One field condition the LLM can express."""
@@ -51,10 +53,6 @@ _MODULE_CANONICAL: dict[str, str] = {
     "tasks": "Tasks",
     "notes": "Notes",
 }
-
-_CRM_ID_RE = re.compile(
-    r"^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
-)
 
 _ACTIVITY_PARENT_TYPE_ALIASES: dict[str, set[str]] = {
     "Accounts": {"account_id", "accounts.id", "accounts|id", "account_name", "accounts.name", "company"},

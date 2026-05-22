@@ -3,13 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import unicodedata
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from typing import Any
 
 from langchain_core.tools import tool
 
+from app.utils.crm_id import CRM_ID_RE as _CRM_ID_RE
+from app.utils.text import normalize_text as _normalize_text, safe_text as _safe_text
 from app.core.config import get_settings
 from app.engine.rag import TenantRAGService
 from app.services.crm_read_service import CRMReadHelpers, CRMReadService
@@ -34,28 +35,10 @@ _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
-_CRM_ID_RE = re.compile(
-    r"^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
-    re.IGNORECASE,
-)
 _SCOPED_RECORD_ID_RE = re.compile(
     r"^(?P<module>[A-Za-z]+)[-:/](?P<id>(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}))$",
     re.IGNORECASE,
 )
-
-
-def _normalize_text(value: str) -> str:
-    lowered = (value or "").strip().lower()
-    unaccented = "".join(
-        c for c in unicodedata.normalize("NFD", lowered) if unicodedata.category(c) != "Mn"
-    )
-    return re.sub(r"[^a-z0-9]+", " ", unaccented).strip()
-
-
-def _safe_text(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
 
 
 def _canonical_record_id(value: Any) -> str:
@@ -1825,17 +1808,12 @@ def build_tools(
                     action="list",
                     data=data,
                 )
-
-                # print(f"Raw CRM response: {json.dumps(raw, ensure_ascii=False)}")
             except Exception as exc:
                 error_payload = {"status": "error", "message": str(exc), "cards": []}
                 tcl.set_output(error_payload)
                 return json.dumps(error_payload, ensure_ascii=False)
 
             records = _extract_records(raw)
-
-            # print(f"Extracted {len(records)} records from CRM response.")
-            # print(f"First 10 records: {json.dumps(records[:10], ensure_ascii=False)}")
 
             cards: list[dict] = []
             module_lower = module.strip().lower()
@@ -1848,9 +1826,6 @@ def build_tools(
                 cards = _contact_cards(records, total, title, force_table=total > 4)
             else:
                 cards = _generic_cards(records, total, default_module=module)
-
-            # print(f"Generated {len(cards)} cards for module '{module}'.")
-            # print(f"First 5 cards: {json.dumps(cards[:5], ensure_ascii=False)}")
 
             summary_lines = []
             for row in records[:10]:

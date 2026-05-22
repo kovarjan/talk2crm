@@ -7,8 +7,12 @@ from typing import Any, Awaitable, Callable
 import httpx
 
 from app.core.config import get_settings
+from app.core.logging import get_logger
 from app.engine.rag import TenantRAGService
 from app.services.crm_client import CoripoClient
+
+
+logger = get_logger(__name__)
 
 
 SafeTextFn = Callable[[Any], str]
@@ -108,7 +112,13 @@ class CRMReadService:
 
     async def run_search(self, *, query: Any, scope: str = "all", limit: int = 20) -> dict[str, Any]:
         normalized_scope = self.h.safe_text(scope).lower() or "all"
-        safe_limit = max(1, min(int(limit or 20), 15))
+        requested = int(limit or 20)
+        safe_limit = max(1, min(requested, 15))
+        if requested > 15:
+            logger.debug(
+                "crm_read limit clamped: requested=%d → %d (hard cap)",
+                requested, safe_limit,
+            )
         module_map = {
             "contacts": "Contacts",
             "accounts": "Accounts",
@@ -223,7 +233,13 @@ class CRMReadService:
         scope: Any | None = None,
         limit: int = 20,
     ) -> dict[str, Any]:
-        safe_limit = max(1, min(int(limit or 20), 15))
+        requested = int(limit or 20)
+        safe_limit = max(1, min(requested, 15))
+        if requested > 15:
+            logger.debug(
+                "crm_read limit clamped: requested=%d → %d (hard cap)",
+                requested, safe_limit,
+            )
         user_query = self.h.safe_text(self.input_text)
         effective_query = self.h.safe_text(query) or user_query
         normalized_scope = self.h.safe_text(scope).lower()

@@ -1193,28 +1193,13 @@ async def _trigger_ingest(
 def _normalize_ingest_modules(modules: list[str] | None) -> list[str]:
     if not modules:
         return ["Contacts", "Accounts", "Meetings"]
-    canonical_map = {
-        "contacts": "Contacts",
-        "accounts": "Accounts",
-        "meetings": "Meetings",
-        "calls": "Calls",
-        "tasks": "Tasks",
-        "notes": "Notes",
-        "opportunities": "Opportunities",
-        "leads": "Leads",
-        "users": "Users",
-        "cases": "Cases",
-        "quotes": "Quotes",
-        "opportunites": "Opportunities",
-        "acm_invoices": "acm_invoices",
-    }
     normalized: list[str] = []
     seen: set[str] = set()
     for module in modules:
         value = (module or "").strip()
         if not value:
             continue
-        canonical = canonical_map.get(value.lower(), value)
+        canonical = _canonical_module_name(value) or value
         if canonical.lower() in seen:
             continue
         seen.add(canonical.lower())
@@ -1281,15 +1266,20 @@ async def get_user_chats(
     if user_id_in_path != ctx["user_id"]:
         raise HTTPException(status_code=403, detail="Forbidden")
 
+    # Cap at 50 by default; callers that need more must pass an explicit limit.
+    # NOTE: full message history is still loaded per chat (N+1). Acceptable while
+    # the per-user chat count is bounded by this SQL-level limit. Move to a
+    # joined/batched load if this becomes a bottleneck at scale.
+    effective_limit = max(1, min(int(limit), 200)) if limit is not None else 50
+
     stmt = (
         select(Chat)
         .where(Chat.tenant_id == ctx["tenant_id"], Chat.user_id == ctx["user_id"])
         .order_by(Chat.updated_at.desc())
+        .limit(effective_limit)
     )
     result = await db.execute(stmt)
     chats = result.scalars().all()
-    if limit is not None:
-        chats = chats[: max(limit, 0)]
 
     items: list[ChatHistoryResponse] = []
     for chat in chats:
@@ -1762,22 +1752,7 @@ async def rag_status(
     normalized_module = None
     if module:
         trimmed = module.strip()
-        canonical_map = {
-            "contacts": "Contacts",
-            "accounts": "Accounts",
-            "meetings": "Meetings",
-            "calls": "Calls",
-            "tasks": "Tasks",
-            "notes": "Notes",
-            "opportunities": "Opportunities",
-            "leads": "Leads",
-            "users": "Users",
-            "cases": "Cases",
-            "quotes": "Quotes",
-            "opportunites": "Opportunities",
-            "acm_invoices": "acm_invoices",
-        }
-        normalized_module = canonical_map.get(trimmed.lower(), trimmed) if trimmed else None
+        normalized_module = _canonical_module_name(trimmed) if trimmed else None
     count = rag_service.count(tenant_id=ctx["tenant_id"], module=normalized_module)
     return BaseResponse(
         success=True,
@@ -1791,6 +1766,8 @@ async def rag_status(
 
 @router.get("/audio/{file_id}")
 async def get_audio(file_id: str) -> FileResponse:
+    if not re.fullmatch(r"[a-f0-9]{32}", file_id):
+        raise HTTPException(status_code=400, detail="Invalid audio file ID")
     audio_path = settings.cache_audio_dir / f"{file_id}.wav"
     if not audio_path.exists():
         raise HTTPException(status_code=404, detail="Audio file not found")

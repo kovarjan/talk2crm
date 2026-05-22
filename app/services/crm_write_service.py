@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from app.utils.text import normalize_text
 from app.core.config import get_settings
 from app.domain.contracts import NormalizedCommand, build_pending_action_envelope
 from app.engine.adjustments import ModuleAdjustmentEngine
@@ -41,20 +42,9 @@ class CRMWriteService:
             request_context=request_context,
         )
 
-    @staticmethod
-    def _normalize_text(value: str) -> str:
-        import re
-        import unicodedata
-
-        lowered = (value or "").strip().lower()
-        unaccented = "".join(
-            c for c in unicodedata.normalize("NFD", lowered) if unicodedata.category(c) != "Mn"
-        )
-        return re.sub(r"[^a-z0-9]+", " ", unaccented).strip()
-
     @classmethod
     def infer_module_from_intent(cls, *, input_text: str, requested_module: str) -> str:
-        normalized = cls._normalize_text(input_text)
+        normalized = normalize_text(input_text)
         module_norm = (requested_module or "").strip().lower()
         module_aliases = {
             "meeting": "Meetings",
@@ -183,7 +173,7 @@ class CRMWriteService:
         if not records:
             return None
 
-        target_account_norm = self._normalize_text(account_name)
+        target_account_norm = normalize_text(account_name)
         scoped: list[dict[str, Any]] = []
         for row in records:
             row_account_id = str(
@@ -196,7 +186,7 @@ class CRMWriteService:
                 scoped.append(row)
                 continue
             if target_account_norm:
-                row_norm = self._normalize_text(row_account_name)
+                row_norm = normalize_text(row_account_name)
                 if row_norm and (target_account_norm in row_norm or row_norm in target_account_norm):
                     scoped.append(row)
 

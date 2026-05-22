@@ -78,8 +78,9 @@ class CoripoClient:
             # Plain token means HMAC secret for convenience.
             self.coripo_hmac_secret = self.token
 
-        # If HMAC credentials are available, prefer fresh /hmac-login SID over any
-        # preconfigured static session id to avoid stale/limited session scope.
+        # Prefer a fresh HMAC-derived SID over any pre-configured static one.
+        # Static SIDs may have limited scope or become stale after a server restart;
+        # HMAC login always yields a fresh, full-scope session.
         if self._coripo_session_id and self._can_use_hmac():
             self._coripo_session_id = None
 

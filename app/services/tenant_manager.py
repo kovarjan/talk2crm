@@ -91,7 +91,12 @@ class TenantManager:
         )
 
     async def assert_user_access(self, tenant_id: str, user_id: str) -> None:
-        # Placeholder policy hook for tenant-specific access checks.
-        # Current model trusts upstream identity and only enforces tenant existence.
+        # NOTE: User-level authorization is intentionally NOT enforced here.
+        # This service trusts that the caller (upstream gateway or HMAC auth in
+        # app/api/dependencies.py) has already verified identity. The only check
+        # performed is that the tenant exists and is active.
+        #
+        # DO NOT expose this API directly to the internet without implementing
+        # proper user-level checks here first.
         _ = user_id
         await self.get_tenant(tenant_id)

@@ -6,9 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-_CRM_ID_RE = re.compile(
-    r"^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
-)
+from app.utils.crm_id import CRM_ID_RE as _CRM_ID_RE
+from app.utils.text import safe_text as _safe_text
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _WRITE_MODULES = {"meetings", "calls", "tasks", "notes", "contacts", "accounts", "leads"}
@@ -77,11 +76,6 @@ class GetCompanyOverviewToolArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     account_id: str
 
-
-def _safe_text(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
 
 
 def _is_valid_crm_id(value: Any) -> bool:

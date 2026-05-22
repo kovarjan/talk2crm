@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
 
+from app.utils.crm_id import CRM_ID_RE as _CRM_ID_RE
+from app.utils.text import normalize_text
 from app.core.logging import get_logger
 from app.domain.contracts import EntityResolution
 from app.domain.resolver_policy import ResolverPolicy, load_resolver_policy
@@ -13,9 +14,6 @@ from app.services.crm_client import CoripoClient
 
 
 logger = get_logger(__name__)
-_CRM_ID_RE = re.compile(
-    r"^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
-)
 _PLACEHOLDER_ID_RE = re.compile(r"^[A-Z_]+_ID$")
 
 
@@ -28,14 +26,6 @@ class EntityResolver:
     @classmethod
     def from_settings(cls, *, tenant_id: str, crm_client: CoripoClient) -> "EntityResolver":
         return cls(tenant_id=tenant_id, crm_client=crm_client, policy=load_resolver_policy())
-
-    @staticmethod
-    def _normalize_text(value: str) -> str:
-        lowered = (value or "").strip().lower()
-        unaccented = "".join(
-            c for c in unicodedata.normalize("NFD", lowered) if unicodedata.category(c) != "Mn"
-        )
-        return re.sub(r"[^a-z0-9]+", " ", unaccented).strip()
 
     @staticmethod
     def _is_valid_crm_id(value: str | None) -> bool:
@@ -57,7 +47,7 @@ class EntityResolver:
             if not raw:
                 return []
             out = [raw]
-            norm = cls._normalize_text(raw)
+            norm = normalize_text(raw)
             if norm.endswith("ovou") and len(raw) > 4:
                 out.append(raw[:-4] + "ova")
             elif norm.endswith("ou") and len(raw) > 2:
@@ -139,8 +129,8 @@ class EntityResolver:
         candidate = cls._record_label(record)
         if not candidate:
             return 0
-        n_search = cls._normalize_text(search_name)
-        n_candidate = cls._normalize_text(candidate)
+        n_search = normalize_text(search_name)
+        n_candidate = normalize_text(candidate)
         if not n_search or not n_candidate:
             return 0
         if n_search == n_candidate:
@@ -222,7 +212,7 @@ class EntityResolver:
         for_mutation: bool = False,
     ) -> EntityResolution:
         raw_query = str(name or "").strip()
-        normalized_query = self._normalize_text(raw_query)
+        normalized_query = normalize_text(raw_query)
         variants = self.expand_name_variants(raw_query)
         module_by_scope = {"contacts": "Contacts", "accounts": "Accounts"}
         module_name = module_by_scope.get(scope.strip().lower())
