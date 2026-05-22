@@ -1,7 +1,0 @@
-category,semantic_hit@1,hybrid_hit@1
-Přesný název,0.20,1.00
-Bez diakritiky,0.40,1.00
-Skloňovaný tvar,0.60,0.60
-Překlep / STT chyba,0.40,0.40
-Neúplný dotaz,0.20,1.00
-Průměr,0.36,0.80
