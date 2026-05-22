@@ -69,18 +69,6 @@ services:
       - ./.qdrant_storage:/qdrant/storage
     restart: unless-stopped
 
-  dozzle:
-    image: amir20/dozzle:latest
-    container_name: talk2crm-dozzle
-    volumes:
-      # This is the magic. It gives Dozzle permission to read other containers' logs.
-      - /var/run/docker.sock:/var/run/docker.sock
-    ports:
-      - "8090:8080"
-    environment:
-      # Optional: Filter to only show containers from this project
-      - DOZZLE_FILTER=name=talk2crm
-    restart: unless-stopped
 
 volumes:
   postgres_data:

@@ -182,7 +182,6 @@ Dev defaults to CPU build (`INSTALL_GPU_DEPS=false`) so it skips large NVIDIA wh
 - API Swagger: `http://localhost:8011/swagger`
 - Adminer: `http://localhost:8085`
 - Qdrant dashboard: `http://localhost:6333/dashboard`
-- Dozzle (log viewer): `http://localhost:8090`
 
 4. Seed tenant (inside API container):
 

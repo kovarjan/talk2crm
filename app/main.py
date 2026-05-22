@@ -1,3 +1,7 @@
+# Copyright 2026 Jan Kovář
+# Copyright 2026 Acmark s.r.o.
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
