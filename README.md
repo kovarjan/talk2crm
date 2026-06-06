@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Multi-tenant FastAPI gateway for voice/text-to-action workflows against Coripo CRM 6.5, with LangChain agent orchestration, tenant-scoped RAG (Qdrant), and audio pipeline support.
+Multi-tenant FastAPI gateway for voice/text-to-action workflows against Coripo CRM, with LangChain agent orchestration, tenant-scoped RAG (Qdrant), and audio pipeline support.
 
 ## Stack
 
