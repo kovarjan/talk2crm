@@ -221,10 +221,10 @@ def _build_runtime_defaults(args: argparse.Namespace) -> dict[str, str]:
         merged.get("QDRANT__SERVICE__API_KEY"),
     )
 
-    hmac_key_id = _pick_first(args.hmac_key_id, merged.get("CORIPO_HMAC_KEY_ID"), merged.get("AI_GATEWAY_HMAC_KEY_ID"), "acmark-ai")
+    hmac_key_id = _pick_first(args.hmac_key_id, merged.get("CORIPO_HMAC_KEY_ID"), merged.get("AI_GATEWAY_HMAC_KEY_ID"), "your-tenant-id")
     hmac_secret = _pick_first(args.hmac_secret, merged.get("CORIPO_TEST_TOKEN"), merged.get("AI_GATEWAY_HMAC_SECRET"), merged.get("CORIPO_TEST_HMAC_SECRET"))
-    user_id = _pick_first(args.user_id, merged.get("CORIPO_TEST_USER_ID"), merged.get("CRM_TEST_USER_ID"), "28")
-    user_name = _pick_first(args.user_name, merged.get("CORIPO_TEST_USER_NAME"), merged.get("CRM_TEST_USER_NAME"), "jkovar")
+    user_id = _pick_first(args.user_id, merged.get("CORIPO_TEST_USER_ID"), merged.get("CRM_TEST_USER_ID"), "1")
+    user_name = _pick_first(args.user_name, merged.get("CORIPO_TEST_USER_NAME"), merged.get("CRM_TEST_USER_NAME"), "testuser")
 
     collection = _pick_first(args.collection)
     if collection is None:

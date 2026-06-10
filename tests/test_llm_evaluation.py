@@ -39,9 +39,9 @@ from app.services.crm_client import CoripoClient
 # ---------------------------------------------------------------------------
 
 TENANT_ID = "ai-local"
-USER_ID = "28"
-USER_NAME = "jkovar"
-HMAC_KEY_ID = "acmark-ai"
+USER_ID = "1"
+USER_NAME = "testuser"
+HMAC_KEY_ID = "your-tenant-id"
 HMAC_SECRET = "****"
 CRM_BASE_URL = "http://localhost:2000/public"
 CRM_TOKEN = f"{HMAC_KEY_ID}:{HMAC_SECRET}"

@@ -130,7 +130,7 @@ def _build_client_from_env() -> CoripoClient:
     if user_id and "-" not in user_id and not user_name:
         pytest.skip(
             "CORIPO_TEST_USER_ID appears non-UUID; set CORIPO_TEST_USER_NAME as well "
-            "(for example 'jkovar') so HMAC user fallback can resolve."
+            "(for example 'your-username') so HMAC user fallback can resolve."
         )
 
     client = CoripoClient(
@@ -160,7 +160,7 @@ def _run_or_skip_connect_error(client: CoripoClient, module: str, payload: dict[
         if exc.response is not None and exc.response.status_code == 401:
             pytest.skip(
                 "Coripo HMAC auth rejected credentials (401 on checksid). "
-                "Verify: CORIPO_TEST_TOKEN secret, keyId (default acmark-ai), "
+                "Verify: CORIPO_TEST_TOKEN secret, keyId (default your-tenant-id), "
                 "CORIPO_TEST_USER_ID, and CORIPO_TEST_USER_NAME. "
                 f"Response body: {exc.response.text[:400]}"
             )

@@ -69,7 +69,7 @@ def test_pending_action_contract_is_canonical_for_quick_action_and_tool() -> Non
             try_handle_quick_action(
                 input_text="naplánuj schůzku s Karlem vybíhalem z firmy zliner na středu ráno",
                 crm_client=client,  # type: ignore[arg-type]
-                user_id="28",
+                user_id="1",
                 action_confirmation=False,
             )
         )
@@ -81,7 +81,7 @@ def test_pending_action_contract_is_canonical_for_quick_action_and_tool() -> Non
 
     tools = build_tools(
         tenant_id="ai-local",
-        user_id="28",
+        user_id="1",
         input_text="Naplánuj call s Igorem na pátek ráno.",
         request_context={},
         crm_client=client,  # type: ignore[arg-type]

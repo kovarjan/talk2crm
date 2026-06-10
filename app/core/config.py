@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     qdrant_api_key: str | None = None
     qdrant_collection: str = "tenant_knowledge"
     rag_embedding_model: str = "qwen3-embedding:4b"
-    rag_embedding_base_url: str = "http://192.168.8.16:4000/v1"
+    rag_embedding_base_url: str = "http://localhost:11434/v1"
     rag_embedding_api_key: str | None = None
     rag_embedding_size: int = 2560
     rag_upsert_batch_size: int = 200
@@ -66,7 +66,7 @@ class Settings(BaseSettings):
 
     crm_mode: str = "on"
     crm_timeout_seconds: float = 25.0
-    coripo_hmac_key_id: str = "acmark-ai"
+    coripo_hmac_key_id: str = "your-tenant-id"
     coripo_test_token: str = ""
     engine_v2_enabled: bool = True
     resolver_v2_enabled: bool = True

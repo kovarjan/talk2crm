@@ -46,7 +46,7 @@ def test_crm_query_tool_returns_cards_and_summary_for_meetings() -> None:
         mock_settings.return_value.tool_call_logging = False
         tools = build_tools(
             tenant_id="ai-local",
-            user_id="28",
+            user_id="1",
             input_text="jaké mám schůzky na další týden",
             request_context={},
             crm_client=client,  # type: ignore[arg-type]

@@ -105,7 +105,7 @@ def test_resolution_outcome_parity_across_quick_adjustment_and_read_tool() -> No
             try_handle_quick_action(
                 input_text=text,
                 crm_client=client,  # type: ignore[arg-type]
-                user_id="28",
+                user_id="1",
                 action_confirmation=False,
             )
         )
@@ -114,7 +114,7 @@ def test_resolution_outcome_parity_across_quick_adjustment_and_read_tool() -> No
 
     adjustment_engine = ModuleAdjustmentEngine(
         tenant_id="ai-local",
-        user_id="28",
+        user_id="1",
         crm_client=client,  # type: ignore[arg-type]
         input_text=text,
         request_context={},
@@ -129,7 +129,7 @@ def test_resolution_outcome_parity_across_quick_adjustment_and_read_tool() -> No
 
     tools = build_tools(
         tenant_id="ai-local",
-        user_id="28",
+        user_id="1",
         input_text=text,
         request_context={},
         crm_client=client,  # type: ignore[arg-type]

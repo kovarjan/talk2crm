@@ -63,7 +63,7 @@ def test_execute_structured_list_passthrough_payload() -> None:
     client = DummyCrmClient()
     service = CRMReadService(
         tenant_id="ai-local",
-        user_id="28",
+        user_id="1",
         input_text="",
         request_context={},
         crm_client=client,  # type: ignore[arg-type]

@@ -143,18 +143,18 @@ python scripts/create_tenant.py \
 ```
 
 For Coripo:
-- set `CORIPO_HMAC_KEY_ID` in `.env` (default `acmark-ai`)
+- set `CORIPO_HMAC_KEY_ID` in `.env` (default `your-tenant-id`)
 - `--crm-token` can be:
 `HMAC secret` (plain string), or JSON:
-`'{"mode":"coripo_public","hmac_key_id":"acmark-ai","hmac_secret":"...","session_id":"optional-sid","user_id":"28","user_name":"jkovar"}'`
+`'{"mode":"coripo_public","hmac_key_id":"your-tenant-id","hmac_secret":"...","session_id":"optional-sid","user_id":"YOUR_USER_ID","user_name":"your-username"}'`
 - send `X-User-Id` on API requests (must be Coripo user id)
 - if Coripo enforces username checks, set `user_name` in tenant token JSON
 
 Coripo FE (`rest_coripo`) bridge wiring for local development:
 - in `rest_coripo/.env`: `AI_GATEWAY_URL='http://host.docker.internal:8011'`
 - in `rest_coripo/.env`: `AI_GATEWAY_TENANT='ai-local'`
-- in `rest_coripo/.env`: `AI_GATEWAY_HMAC_KEY_ID='acmark-ai'` and matching `AI_GATEWAY_HMAC_SECRET`
-- in `talk2crm/.env`: `HMAC_KEYS_JSON={"acmark-ai":"<same-secret-as-rest_coripo>"}`
+- in `rest_coripo/.env`: `AI_GATEWAY_HMAC_KEY_ID='your-tenant-id'` and matching `AI_GATEWAY_HMAC_SECRET`
+- in `talk2crm/.env`: `HMAC_KEYS_JSON={"your-tenant-id":"<same-secret-as-rest_coripo>"}`
 - recreate php container after `.env` change: `docker compose -f docker-compose.yml up -d php`
 
 5. Open API docs:
@@ -336,8 +336,8 @@ Tests are self-contained (stub CRM clients, no live network required). Live-CRM 
 curl -X POST 'http://127.0.0.1:8011/rag/ingest/' \
   -H 'Content-Type: application/json' \
   -H 'X-Tenant: ai-local' \
-  -H 'X-User-Id: 28' \
-  -H 'X-User-Name: jkovar' \
+  -H 'X-User-Id: YOUR_USER_ID' \
+  -H 'X-User-Name: your-username' \
   --data '{
     "modules": ["Contacts"],
     "incremental": true,
@@ -353,8 +353,8 @@ curl -X POST 'http://127.0.0.1:8011/rag/ingest/' \
 curl -X POST 'http://127.0.0.1:8011/rag/ingest/' \
   -H 'Content-Type: application/json' \
   -H 'X-Tenant: ai-local' \
-  -H 'X-User-Id: 28' \
-  -H 'X-User-Name: jkovar' \
+  -H 'X-User-Id: YOUR_USER_ID' \
+  -H 'X-User-Name: your-username' \
   --data '{
     "modules":["Contacts","Accounts","Meetings","Calls","Tasks","Notes","Opportunities","Leads","Users","Cases"],
     "incremental":false,

@@ -144,7 +144,7 @@ def test_quick_action_creates_confirmation_for_meeting_request() -> None:
             try_handle_quick_action(
                 input_text="Vytvoř schůzku s paní Mimrovou z firmy Panas na podnělí odpoledne",
                 crm_client=client,  # type: ignore[arg-type]
-                user_id="28",
+                user_id="1",
                 action_confirmation=False,
             )
         )
@@ -183,7 +183,7 @@ def test_quick_action_resolves_contact_from_non_title_phrase() -> None:
             try_handle_quick_action(
                 input_text="naplánuj schůzku s Karlem vybíhalem na středu ráno",
                 crm_client=client,  # type: ignore[arg-type]
-                user_id="28",
+                user_id="1",
                 action_confirmation=False,
             )
         )
@@ -211,7 +211,7 @@ def test_quick_action_resolves_contact_when_phrase_contains_company_clause() -> 
             try_handle_quick_action(
                 input_text="naplánuj schůzku s Karlem vybíhalem z firmy zliner na středu ráno",
                 crm_client=client,  # type: ignore[arg-type]
-                user_id="28",
+                user_id="1",
                 action_confirmation=False,
             )
         )
@@ -238,7 +238,7 @@ def test_quick_action_uses_fallback_list_lookup_when_generic_search_returns_empt
             try_handle_quick_action(
                 input_text="naplánuj schůzku s Karlem vybíhalem z firmy zliner na středu ráno",
                 crm_client=client,  # type: ignore[arg-type]
-                user_id="28",
+                user_id="1",
                 action_confirmation=False,
             )
         )
@@ -262,7 +262,7 @@ def test_quick_action_hard_stops_when_contact_cannot_be_resolved() -> None:
             try_handle_quick_action(
                 input_text="naplánuj schůzku s Karlem vybíhalem z firmy zliner na středu ráno",
                 crm_client=client,  # type: ignore[arg-type]
-                user_id="28",
+                user_id="1",
                 action_confirmation=False,
             )
         )
@@ -282,7 +282,7 @@ def test_adjust_meeting_normalizes_card_style_contact_id_into_invitees() -> None
     client = DummyCrmClient()
     engine = ModuleAdjustmentEngine(
         tenant_id="ai-local",
-        user_id="28",
+        user_id="1",
         crm_client=client,  # type: ignore[arg-type]
         input_text="Naplánuj schůzku s Liborem Adamcem",
         request_context={},

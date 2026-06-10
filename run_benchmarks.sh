@@ -10,7 +10,7 @@ TEST_CMD="pytest tests/test_llm_evaluation.py -v -s"
 
 # --- Endpoints & Keys ---
 # Replace the placeholder keys before running the API tests
-OLLAMA_URL="http://192.168.8.16:11434/v1"
+OLLAMA_URL="http://localhost:11434/v1"
 
 OPENAI_URL="https://api.openai.com/v1"
 OPENAI_KEY="YOUR_OPENAI_KEY"
