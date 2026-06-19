@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker, create_async_engine
+from alembic import command
+from alembic.config import Config
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
-from database.models import Base
 
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 settings = get_settings()
 engine = create_async_engine(
@@ -25,39 +29,16 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
-async def _migrate_chat_messages_id_to_uuid_postgres(conn: AsyncConnection) -> None:
-    result = await conn.execute(
-        text(
-            """
-            SELECT data_type
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = 'chat_messages'
-              AND column_name = 'id'
-            """
-        )
-    )
-    data_type = result.scalar_one_or_none()
-    if data_type not in {"bigint", "integer"}:
-        return
-
-    await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
-    await conn.execute(text("ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS id_uuid UUID"))
-    await conn.execute(
-        text("UPDATE chat_messages SET id_uuid = gen_random_uuid() WHERE id_uuid IS NULL")
-    )
-    await conn.execute(text("ALTER TABLE chat_messages ALTER COLUMN id_uuid SET NOT NULL"))
-    await conn.execute(text("ALTER TABLE chat_messages DROP CONSTRAINT IF EXISTS chat_messages_pkey"))
-    await conn.execute(text("ALTER TABLE chat_messages DROP COLUMN id"))
-    await conn.execute(text("ALTER TABLE chat_messages RENAME COLUMN id_uuid TO id"))
-    await conn.execute(text("ALTER TABLE chat_messages ADD PRIMARY KEY (id)"))
-
-
-async def _migrate_chat_messages_id_to_uuid(conn: AsyncConnection) -> None:
-    await _migrate_chat_messages_id_to_uuid_postgres(conn)
+def _run_alembic_upgrade() -> None:
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(PROJECT_ROOT / "database" / "migrations"))
+    command.upgrade(config, "head")
 
 
 async def init_db() -> None:
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await _migrate_chat_messages_id_to_uuid(conn)
+    """Apply pending Alembic migrations.
+
+    Alembic drives its own (sync-wrapped async) engine inside env.py, so the
+    upgrade runs in a worker thread to keep the startup event loop free.
+    """
+    await asyncio.to_thread(_run_alembic_upgrade)

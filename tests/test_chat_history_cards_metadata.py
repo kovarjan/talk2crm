@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.api.endpoints import _chat_message_to_model
+from app.services.chat_service import chat_message_to_model as _chat_message_to_model
 
 
 def test_chat_message_to_model_flattens_cards_from_agent_result() -> None:

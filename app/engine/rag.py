@@ -1,21 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
 import unicodedata
 import uuid
 import warnings
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
-from difflib import SequenceMatcher
 from typing import Any
 
 import httpx
-from qdrant_client import QdrantClient, models
+from qdrant_client import AsyncQdrantClient, models
 
 from app.core.config import get_settings
+from app.core.http import get_shared_http_client
 from app.core.logging import get_logger
 from app.services.crm_client import CoripoClient
+from app.utils.fuzzy import expand_fuzzy_token_variants, fuzzy_tokens, score_lexical_fuzzy
+from app.utils.modules import MODULE_ALIASES
 
 
 logger = get_logger(__name__)
@@ -82,8 +86,8 @@ class HashEmbedder:
 class OllamaEmbedder:
     """Embedder backed by an OpenAI-compatible /embeddings endpoint (e.g. LiteLLM proxy).
 
-    Provides both a synchronous embed() for search paths and an async aembed()
-    for ingest paths, so callers don't need to be converted to async.
+    aembed() is the primary path (search and ingest); the synchronous embed()
+    remains for standalone scripts that run outside an event loop.
     """
 
     def __init__(self, *, base_url: str, model: str, size: int, api_key: str | None, fallback: HashEmbedder):
@@ -97,7 +101,7 @@ class OllamaEmbedder:
         return {"model": self.model, "input": text}
 
     def embed(self, text: str) -> list[float]:
-        """Synchronous embed — used by search paths that cannot be awaited."""
+        """Synchronous embed — only for standalone scripts outside an event loop."""
         if not text:
             return [0.0] * self.size
         try:
@@ -119,16 +123,16 @@ class OllamaEmbedder:
             return self._fallback.embed(text)
 
     async def aembed(self, text: str) -> list[float]:
-        """Async embed — used by ingest paths for better throughput."""
+        """Async embed — shares the pooled HTTP client with other outbound calls."""
         if not text:
             return [0.0] * self.size
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.base_url}/embeddings",
-                    json=self._request_body(text),
-                    headers=self._headers,
-                )
+            response = await get_shared_http_client().post(
+                f"{self.base_url}/embeddings",
+                json=self._request_body(text),
+                headers=self._headers,
+                timeout=30.0,
+            )
             response.raise_for_status()
             return response.json()["data"][0]["embedding"]
         except Exception:
@@ -145,7 +149,10 @@ class TenantRAGService:
     def __init__(self):
         settings = get_settings()
         self.settings = settings
-        self.client = self._build_client_with_fallback()
+        # AsyncQdrantClient must be created and prefligted from within a running
+        # event loop, so it is built lazily on first use.
+        self._client: AsyncQdrantClient | None = None
+        self._client_lock = asyncio.Lock()
         self.collection_prefix = settings.qdrant_collection
         self._ensured_collections: set[str] = set()
         self.embedder = self._build_embedder()
@@ -181,20 +188,28 @@ class TenantRAGService:
         )
         return embedder
 
-    def _build_client_with_fallback(self) -> QdrantClient:
+    async def _get_client(self) -> AsyncQdrantClient:
+        if self._client is not None:
+            return self._client
+        async with self._client_lock:
+            if self._client is None:
+                self._client = await self._build_client_with_fallback()
+            return self._client
+
+    async def _build_client_with_fallback(self) -> AsyncQdrantClient:
         try:
             with warnings.catch_warnings():
                 warnings.filterwarnings(
                     "ignore",
                     message="Api key is used with an insecure connection.",
                 )
-                remote = QdrantClient(
+                remote = AsyncQdrantClient(
                     url=self.settings.qdrant_url,
                     api_key=self.settings.qdrant_api_key,
                     timeout=10.0,
                 )
-            # Connectivity preflight to fail fast on startup.
-            remote.get_collections()
+            # Connectivity preflight to fail fast on first use.
+            await remote.get_collections()
             logger.info("Connected to remote Qdrant url=%s", self.settings.qdrant_url)
             return remote
         except Exception:
@@ -205,12 +220,13 @@ class TenantRAGService:
                 self.settings.qdrant_url,
                 self.settings.qdrant_local_path,
             )
-            return QdrantClient(path=self.settings.qdrant_local_path)
+            return AsyncQdrantClient(path=self.settings.qdrant_local_path)
 
-    def _ensure_payload_indexes(self, collection_name: str, *, log_warnings: bool) -> None:
+    async def _ensure_payload_indexes(self, collection_name: str, *, log_warnings: bool) -> None:
+        client = await self._get_client()
         for field_name in _TEXT_INDEX_FIELDS:
             try:
-                self.client.create_payload_index(
+                await client.create_payload_index(
                     collection_name=collection_name,
                     field_name=field_name,
                     field_schema=models.TextIndexParams(
@@ -227,7 +243,7 @@ class TenantRAGService:
                         collection_name,
                     )
         try:
-            self.client.create_payload_index(
+            await client.create_payload_index(
                 collection_name=collection_name,
                 field_name="module",
                 field_schema=models.KeywordIndexParams(type=models.PayloadSchemaType.KEYWORD),
@@ -236,10 +252,11 @@ class TenantRAGService:
             if log_warnings:
                 logger.warning("Could not create module index on collection=%s", collection_name)
 
-    def _ensure_collection(self, collection_name: str) -> None:
+    async def _ensure_collection(self, collection_name: str) -> None:
+        client = await self._get_client()
         if collection_name in self._ensured_collections:
             try:
-                self.client.get_collection(collection_name)
+                await client.get_collection(collection_name)
                 return
             except Exception:
                 logger.warning(
@@ -247,10 +264,10 @@ class TenantRAGService:
                     collection_name,
                 )
                 self._ensured_collections.discard(collection_name)
-        existing = {item.name for item in self.client.get_collections().collections}
+        existing = {item.name for item in (await client.get_collections()).collections}
         if collection_name in existing:
             try:
-                info = self.client.get_collection(collection_name)
+                info = await client.get_collection(collection_name)
                 existing_size = info.config.params.vectors.size  # type: ignore[union-attr]
                 if existing_size != self.settings.rag_embedding_size:
                     logger.warning(
@@ -262,22 +279,22 @@ class TenantRAGService:
                     )
             except Exception:
                 pass
-            self._ensure_payload_indexes(collection_name, log_warnings=False)
+            await self._ensure_payload_indexes(collection_name, log_warnings=False)
             self._ensured_collections.add(collection_name)
             return
-        self.client.create_collection(
+        await client.create_collection(
             collection_name=collection_name,
             vectors_config=models.VectorParams(
                 size=self.settings.rag_embedding_size,
                 distance=models.Distance.COSINE,
             ),
         )
-        self._ensure_payload_indexes(collection_name, log_warnings=True)
+        await self._ensure_payload_indexes(collection_name, log_warnings=True)
         self._ensured_collections.add(collection_name)
         logger.info("Created Qdrant collection name=%s", collection_name)
 
     async def _aembed(self, text: str) -> list[float]:
-        """Async embed for ingest paths — uses aembed() on OllamaEmbedder, embed() on HashEmbedder."""
+        """Async embed — uses aembed() on OllamaEmbedder, embed() on HashEmbedder."""
         if isinstance(self.embedder, OllamaEmbedder):
             return await self.embedder.aembed(text)
         return self.embedder.embed(text)
@@ -288,43 +305,23 @@ class TenantRAGService:
         cleaned = cleaned.strip("_")
         return cleaned or "tenant"
 
-    def _tenant_collection(self, tenant_id: str) -> str:
+    async def _tenant_collection(self, tenant_id: str) -> str:
         prefix = self._sanitize_collection_segment(self.collection_prefix)
         tenant = self._sanitize_collection_segment(tenant_id)
         candidate = f"{prefix}__{tenant}"
         if len(candidate) > 190:
             suffix = hashlib.sha1(tenant.encode("utf-8")).hexdigest()[:10]
             candidate = f"{prefix}__{tenant[:150]}__{suffix}"
-        self._ensure_collection(candidate)
+        await self._ensure_collection(candidate)
         return candidate
 
     @classmethod
     def _canonical_modules(cls, modules: list[str] | tuple[str, ...] | set[str] | None) -> list[str]:
         if not modules:
             return []
-        aliases = {
-            "account": "Accounts",
-            "accounts": "Accounts",
-            "call": "Calls",
-            "calls": "Calls",
-            "contact": "Contacts",
-            "contacts": "Contacts",
-            "lead": "Leads",
-            "leads": "Leads",
-            "meeting": "Meetings",
-            "meetings": "Meetings",
-            "note": "Notes",
-            "notes": "Notes",
-            "opportunities": "Opportunities",
-            "opportunites": "Opportunities",
-            "quotes": "Quotes",
-            "acm_invoices": "acm_invoices",
-            "task": "Tasks",
-            "tasks": "Tasks",
-        }
         canonical: list[str] = []
         for module in modules:
-            mapped = aliases.get(str(module or "").strip().lower())
+            mapped = MODULE_ALIASES.get(str(module or "").strip().lower())
             if mapped and mapped not in canonical:
                 canonical.append(mapped)
         return canonical
@@ -369,7 +366,7 @@ class TenantRAGService:
             return None
         return models.Filter(must=conditions)
 
-    def search(
+    async def search(
         self,
         *,
         tenant_id: str,
@@ -377,7 +374,8 @@ class TenantRAGService:
         limit: int = 5,
         modules: list[str] | tuple[str, ...] | set[str] | None = None,
     ) -> list[dict[str, Any]]:
-        collection = self._tenant_collection(tenant_id)
+        collection = await self._tenant_collection(tenant_id)
+        client = await self._get_client()
         limit = max(1, int(limit or 5))
 
         # --- Text filter pass (prefer entity name fields, then full JSON text) ---
@@ -399,7 +397,7 @@ class TenantRAGService:
 
         for field_name, text_query, match_type in text_passes:
             try:
-                scroll_points, _ = self.client.scroll(
+                scroll_points, _ = await client.scroll(
                     collection_name=collection,
                     scroll_filter=self._text_filter(
                         field_name=field_name,
@@ -426,50 +424,31 @@ class TenantRAGService:
         text_results = self._sort_text_results(text_results, query)
 
         # --- Vector similarity pass ---
-        query_vector = self.embedder.embed(query)
+        query_vector = await self._aembed(query)
         vector_limit = max(limit, limit * 2)  # fetch extra to fill after dedup
         vector_filter = self._module_filter(modules)
         try:
-            if hasattr(self.client, "search"):
-                search_kwargs: dict[str, Any] = {
-                    "collection_name": collection,
-                    "query_vector": query_vector,
-                    "limit": vector_limit,
-                    "with_payload": True,
-                }
-                if vector_filter is not None:
-                    search_kwargs["query_filter"] = vector_filter
-                vec_points = self.client.search(
-                    **search_kwargs,
-                )
-            else:
-                query_kwargs: dict[str, Any] = {
-                    "collection_name": collection,
-                    "query": query_vector,
-                    "limit": vector_limit,
-                    "with_payload": True,
-                }
-                if vector_filter is not None:
-                    query_kwargs["query_filter"] = vector_filter
-                vec_points = self.client.query_points(
-                    **query_kwargs,
-                ).points
+            query_kwargs: dict[str, Any] = {
+                "collection_name": collection,
+                "query": query_vector,
+                "limit": vector_limit,
+                "with_payload": True,
+            }
+            if vector_filter is not None:
+                query_kwargs["query_filter"] = vector_filter
+            vec_points = (await client.query_points(**query_kwargs)).points
         except Exception:
             try:
-                if hasattr(self.client, "search"):
-                    vec_points = self.client.search(
-                        collection_name=collection,
-                        query_vector=query_vector,
-                        limit=vector_limit,
-                        with_payload=True,
-                    )
-                else:
-                    vec_points = self.client.query_points(
+                # Retry without the module filter — old collections may lack the
+                # keyword index; module filtering happens client-side below.
+                vec_points = (
+                    await client.query_points(
                         collection_name=collection,
                         query=query_vector,
                         limit=vector_limit,
                         with_payload=True,
-                    ).points
+                    )
+                ).points
             except Exception:
                 vec_points = []
 
@@ -496,7 +475,7 @@ class TenantRAGService:
 
         return combined[:limit]
 
-    def search_entities(
+    async def search_entities(
         self,
         *,
         tenant_id: str,
@@ -514,7 +493,7 @@ class TenantRAGService:
         candidates_by_id: dict[str, dict[str, Any]] = {}
         candidate_limit = max(30, int(limit or 5) * 10)
         for candidate_query in self._entity_query_variants(clean_query):
-            for item in self.search(
+            for item in await self.search(
                 tenant_id=tenant_id,
                 query=candidate_query,
                 limit=candidate_limit,
@@ -546,42 +525,68 @@ class TenantRAGService:
         scored = self._sort_entity_results(scored, clean_query, preferred_modules=modules)
         return scored[: max(1, int(limit or 5))]
 
-    def count(self, *, tenant_id: str, module: str | None = None) -> int:
-        collection = self._tenant_collection(tenant_id)
+    async def count(self, *, tenant_id: str, module: str | None = None) -> int:
         if not module:
-            result = self.client.count(
+            collection = await self._tenant_collection(tenant_id)
+            client = await self._get_client()
+            result = await client.count(
                 collection_name=collection,
                 exact=True,
             )
             return int(result.count)
 
-        # Module-specific count is done client-side for compatibility across
-        # local/remote Qdrant variants where payload filtering semantics differ.
-        normalized = str(module).strip().lower()
         total = 0
+        async for _ in self.iter_payloads(tenant_id=tenant_id, module=module):
+            total += 1
+        return total
+
+    async def iter_payloads(
+        self,
+        *,
+        tenant_id: str,
+        module: str | None = None,
+        page_size: int = 512,
+        max_scanned: int | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield point payloads from the tenant collection, optionally for one module.
+
+        Module matching is done client-side for compatibility across local/remote
+        Qdrant variants where payload filtering semantics differ. ``max_scanned``
+        caps the number of points read (across all modules), not yielded.
+        """
+        collection = await self._tenant_collection(tenant_id)
+        client = await self._get_client()
+        normalized = str(module or "").strip().lower()
         offset = None
+        scanned = 0
+
         while True:
-            points, offset = self.client.scroll(
+            points, offset = await client.scroll(
                 collection_name=collection,
                 scroll_filter=None,
                 with_payload=True,
                 with_vectors=False,
-                limit=512,
+                limit=max(1, int(page_size)),
                 offset=offset,
             )
             if not points:
                 break
             for point in points:
+                scanned += 1
                 payload = point.payload or {}
-                payload_module = str(payload.get("module") or "").strip().lower()
-                if payload_module == normalized:
-                    total += 1
+                if normalized:
+                    payload_module = str(payload.get("module") or "").strip().lower()
+                    if payload_module != normalized:
+                        continue
+                yield payload
             if offset is None:
                 break
-        return total
+            if max_scanned is not None and scanned >= max_scanned:
+                break
 
     async def ingest_records(self, *, tenant_id: str, module: str, records: list[dict[str, Any]]) -> int:
-        collection = self._tenant_collection(tenant_id)
+        collection = await self._tenant_collection(tenant_id)
+        client = await self._get_client()
         prepared: list[dict[str, Any]] = []
         for raw_record in records:
             record = dict(raw_record)
@@ -602,7 +607,7 @@ class TenantRAGService:
                 }
             )
 
-        existing_hashes = self._load_existing_hashes(
+        existing_hashes = await self._load_existing_hashes(
             point_ids=[item["point_id"] for item in prepared],
             collection_name=collection,
         )
@@ -639,12 +644,12 @@ class TenantRAGService:
                 )
             )
             if len(points) >= batch_size:
-                self.client.upsert(collection_name=collection, points=points)
+                await client.upsert(collection_name=collection, points=points)
                 inserted += len(points)
                 points = []
 
         if points:
-            self.client.upsert(collection_name=collection, points=points)
+            await client.upsert(collection_name=collection, points=points)
             inserted += len(points)
 
         logger.info(
@@ -701,46 +706,11 @@ class TenantRAGService:
 
     @staticmethod
     def _expand_fuzzy_token_variants(token: str) -> set[str]:
-        variants = {token}
-        suffixes = (
-            "skym",
-            "skem",
-            "ovou",
-            "ove",
-            "ova",
-            "ovi",
-            "ych",
-            "ich",
-            "ho",
-            "mu",
-            "ou",
-            "em",
-            "am",
-            "um",
-            "om",
-            "m",
-            "a",
-            "u",
-            "e",
-            "y",
-            "i",
-        )
-        for suffix in suffixes:
-            if len(token) <= len(suffix) + 2:
-                continue
-            if token.endswith(suffix):
-                variants.add(token[: -len(suffix)])
-        return {item for item in variants if item}
+        return expand_fuzzy_token_variants(token)
 
     @classmethod
     def _fuzzy_tokens(cls, value: str) -> set[str]:
-        normalized = cls._normalize_search_text(value)
-        if not normalized:
-            return set()
-        expanded: set[str] = set()
-        for token in normalized.split():
-            expanded.update(cls._expand_fuzzy_token_variants(token))
-        return expanded
+        return fuzzy_tokens(value)
 
     @classmethod
     def _entity_query_variants(cls, query: str) -> list[str]:
@@ -760,28 +730,7 @@ class TenantRAGService:
 
     @classmethod
     def _score_lexical_fuzzy(cls, query: str, candidate: str) -> float:
-        q = cls._normalize_search_text(query)
-        c = cls._normalize_search_text(candidate)
-        if not q or not c:
-            return 0.0
-        if q == c:
-            return 1.0
-        if q in c:
-            return 0.96
-        if c in q:
-            return 0.85
-
-        q_tokens = cls._fuzzy_tokens(q)
-        c_tokens = cls._fuzzy_tokens(c)
-        if not q_tokens or not c_tokens:
-            return 0.0
-
-        overlap = len(q_tokens & c_tokens) / max(1, len(q_tokens))
-        ratio = SequenceMatcher(None, q, c).ratio()
-        score = max(overlap * 0.95, ratio * 0.75)
-        if overlap >= 0.66 and ratio >= 0.55:
-            score = max(score, 0.82)
-        return min(1.0, score)
+        return score_lexical_fuzzy(query, candidate)
 
     @classmethod
     def _score_entity_result(
@@ -928,15 +877,16 @@ class TenantRAGService:
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def _load_existing_hashes(self, point_ids: list[str], collection_name: str) -> dict[str, str]:
+    async def _load_existing_hashes(self, point_ids: list[str], collection_name: str) -> dict[str, str]:
         if not point_ids:
             return {}
+        client = await self._get_client()
         existing: dict[str, str] = {}
         batch_size = max(1, int(self.settings.rag_upsert_batch_size))
         for index in range(0, len(point_ids), batch_size):
             chunk = point_ids[index : index + batch_size]
             try:
-                points = self.client.retrieve(
+                points = await client.retrieve(
                     collection_name=collection_name,
                     ids=chunk,
                     with_payload=True,
@@ -999,38 +949,14 @@ class TenantRAGService:
             return cls._record_modified_at(record)
         return None
 
-    def _latest_module_modified_at(self, *, tenant_id: str, module: str) -> datetime | None:
-        collection = self._tenant_collection(tenant_id)
-        normalized = str(module).strip().lower()
-        offset = None
+    async def _latest_module_modified_at(self, *, tenant_id: str, module: str) -> datetime | None:
         latest: datetime | None = None
-
-        while True:
-            points, offset = self.client.scroll(
-                collection_name=collection,
-                scroll_filter=None,
-                with_payload=True,
-                with_vectors=False,
-                limit=512,
-                offset=offset,
-            )
-            if not points:
-                break
-
-            for point in points:
-                payload = point.payload or {}
-                payload_module = str(payload.get("module") or "").strip().lower()
-                if payload_module != normalized:
-                    continue
-                modified_at = self._payload_modified_at(payload)
-                if modified_at is None:
-                    continue
-                if latest is None or modified_at > latest:
-                    latest = modified_at
-
-            if offset is None:
-                break
-
+        async for payload in self.iter_payloads(tenant_id=tenant_id, module=module):
+            modified_at = self._payload_modified_at(payload)
+            if modified_at is None:
+                continue
+            if latest is None or modified_at > latest:
+                latest = modified_at
         return latest
 
     @staticmethod
@@ -1071,7 +997,11 @@ class TenantRAGService:
         page_size = max(1, min(int(page_size), 500))
         offset = 0
         total = 0
-        watermark = self._latest_module_modified_at(tenant_id=tenant_id, module=module) if incremental else None
+        watermark = (
+            await self._latest_module_modified_at(tenant_id=tenant_id, module=module)
+            if incremental
+            else None
+        )
         logger.info(
             "Starting CRM ingest tenant=%s module=%s incremental=%s watermark=%s limit=%s page_size=%s",
             tenant_id,
@@ -1189,3 +1119,23 @@ class TenantRAGService:
             page_size=page_size,
             incremental=incremental,
         )
+
+
+_rag_service_instance: TenantRAGService | None = None
+
+
+def get_rag_service() -> TenantRAGService | None:
+    """Process-wide TenantRAGService singleton, or None when it cannot be set up.
+
+    The Qdrant connection itself is established lazily on first use (with local
+    fallback), so None here only signals a configuration-level failure.
+    """
+    global _rag_service_instance
+    if _rag_service_instance is not None:
+        return _rag_service_instance
+    try:
+        _rag_service_instance = TenantRAGService()
+        return _rag_service_instance
+    except Exception:
+        logger.exception("Unable to initialize Qdrant RAG service")
+        return None

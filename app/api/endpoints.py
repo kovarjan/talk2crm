@@ -4,12 +4,9 @@ import asyncio
 import json
 import re
 import tempfile
-import time
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-import unicodedata
 
 from fastapi import (
     APIRouter,
@@ -22,16 +19,14 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse
-from sqlalchemy import case, delete, select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.exc import OperationalError
 
 from app.api.dependencies import TenantContext, get_tenant_context
 from app.api.models import (
     BaseResponse,
     ChatCreate,
     ChatHistoryResponse,
-    ChatMessageItem,
     ChatReplaceRequest,
     CrmRecordCreatedEventRequest,
     CreateChatResponse,
@@ -40,1112 +35,23 @@ from app.api.models import (
     SearchRequest,
     UserChatsResponse,
 )
-from app.core.audio import synthesize_to_file, transcribe
+from app.core.audio import transcribe
 from app.core.config import get_settings
-from app.core.logging import get_logger, log_llm_trace
-from app.domain.contracts import normalize_pending_action_envelope
-from app.engine.agent import run_agent
-from app.engine.pending_patch import try_patch_pending_action
-from app.engine.quick_actions import QuickActionResult, try_handle_quick_action
-from app.engine.rag import TenantRAGService
-from app.engine.tools import build_tools
+from app.core.logging import get_logger
+from app.engine.pipeline import process_input_core
+from app.engine.rag import get_rag_service
+from app.services import chat_service
+from app.services.chat_titles import fallback_chat_name
 from app.services.crm_client import CoripoClient
 from app.services.tenant_manager import TenantManager
+from app.utils.modules import canonical_module_name
 from database.models import Chat, ChatMessage
 from database.session import get_db
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
 
 logger = get_logger(__name__)
 router = APIRouter()
 settings = get_settings()
-_rag_service_instance: TenantRAGService | None = None
-_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
-_ANSWER_TAG_RE = re.compile(r"</?answer>", re.IGNORECASE)
-_ISO_DATE_RE = re.compile(
-    r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?(?!\d)"
-)
-_MD_FENCE_RE = re.compile(r"```(?:\w+)?\s*([\s\S]*?)```", re.IGNORECASE)
-_MD_BOLD_RE = re.compile(r"\*\*(.*?)\*\*")
-_MD_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)")
-_MD_INLINE_CODE_RE = re.compile(r"`([^`]*)`")
-_LEADING_SYMBOL_RE = re.compile(r"^[\s\-\u2022>*]+")
-_EMOJI_RE = re.compile(
-    r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF]+",
-    flags=re.UNICODE,
-)
-_CHAT_TITLE_MAX_CHARS = 80
-_CHAT_TITLE_MAX_WORDS = 6
-
-
-def _format_european_dates(text: str) -> str:
-    def repl(match: re.Match[str]) -> str:
-        year, month, day, hour, minute, second = match.groups()
-        formatted = f"{int(day)}.{int(month)}.{year}"
-        if hour and minute:
-            formatted += f" {hour}:{minute}"
-            if second and second != "00":
-                formatted += f":{second}"
-        return formatted
-
-    return _ISO_DATE_RE.sub(repl, text or "")
-
-
-def get_rag_service() -> TenantRAGService | None:
-    global _rag_service_instance
-    if _rag_service_instance is not None:
-        return _rag_service_instance
-    try:
-        _rag_service_instance = TenantRAGService()
-        return _rag_service_instance
-    except Exception:
-        logger.exception("Unable to initialize Qdrant RAG service")
-        return None
-
-
-def _chat_message_to_model(message: ChatMessage) -> ChatMessageItem:
-    metadata = message.metadata_json or {}
-    if message.role == "assistant" and isinstance(metadata, dict):
-        cards = metadata.get("cards")
-        if not isinstance(cards, list):
-            agent_result = metadata.get("agent_result")
-            if isinstance(agent_result, dict) and isinstance(agent_result.get("cards"), list):
-                metadata = dict(metadata)
-                metadata["cards"] = agent_result["cards"]
-    return ChatMessageItem(
-        role=message.role,
-        content=message.content,
-        metadata=metadata,
-        created_at=message.created_at,
-    )
-
-
-async def _load_messages(
-    db: AsyncSession,
-    *,
-    chat_id: str,
-    tenant_id: str,
-    user_id: str,
-) -> list[ChatMessageItem]:
-    stmt = (
-        select(ChatMessage)
-        .where(
-            ChatMessage.chat_id == chat_id,
-            ChatMessage.tenant_id == tenant_id,
-            ChatMessage.user_id == user_id,
-        )
-        .order_by(
-            ChatMessage.created_at.asc(),
-            case(
-                (ChatMessage.role == "user", 0),
-                (ChatMessage.role == "assistant", 1),
-                else_=2,
-            ).asc(),
-            ChatMessage.id.asc(),
-        )
-    )
-    result = await db.execute(stmt)
-    return [_chat_message_to_model(item) for item in result.scalars().all()]
-
-
-async def _get_chat_or_404(
-    db: AsyncSession,
-    *,
-    chat_id: str,
-    tenant_id: str,
-    user_id: str,
-) -> Chat:
-    stmt = select(Chat).where(
-        Chat.id == chat_id,
-        Chat.tenant_id == tenant_id,
-        Chat.user_id == user_id,
-    )
-    result = await db.execute(stmt)
-    chat = result.scalar_one_or_none()
-    if chat is None:
-        raise HTTPException(status_code=404, detail="Chat not found")
-    return chat
-
-
-async def _create_chat(
-    db: AsyncSession,
-    *,
-    tenant_id: str,
-    user_id: str,
-    persist: bool = True,
-) -> Chat:
-    chat = Chat(
-        id=uuid.uuid4().hex,
-        tenant_id=tenant_id,
-        user_id=user_id,
-    )
-    db.add(chat)
-    if not persist:
-        return chat
-
-    attempts = 5
-    for attempt in range(attempts):
-        try:
-            await db.commit()
-            await db.refresh(chat)
-            return chat
-        except OperationalError as exc:
-            await db.rollback()
-            if attempt == attempts - 1:
-                raise
-            await asyncio.sleep(0.05 * (2**attempt))
-
-    return chat
-
-
-async def _append_message(
-    db: AsyncSession,
-    *,
-    chat: Chat,
-    tenant_id: str,
-    user_id: str,
-    role: str,
-    content: str,
-    metadata: dict[str, Any] | None = None,
-) -> None:
-    db.add(
-        ChatMessage(
-            chat_id=chat.id,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            role=role,
-            content=content,
-            metadata_json=metadata or {},
-        )
-    )
-    chat.updated_at = datetime.now(timezone.utc)
-
-
-async def _maybe_generate_voice(
-    *,
-    text: str,
-    return_voice: bool,
-    background_tasks: BackgroundTasks,
-) -> tuple[str | None, str | None]:
-    if not return_voice:
-        return None, None
-
-    file_id = uuid.uuid4().hex
-    output_path = settings.cache_audio_dir / f"{file_id}.wav"
-
-    background_tasks.add_task(
-        _synthesize_to_final_path,
-        text,
-        str(output_path),
-        settings.tts_voice,
-    )
-    return file_id, f"/audio/{file_id}"
-
-
-async def _synthesize_to_final_path(
-    text: str,
-    final_output_path: str,
-    voice: str | None = None,
-) -> None:
-    final_path = Path(final_output_path)
-    temp_path = final_path.with_name(f"{final_path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        await synthesize_to_file(text=text, output_path=str(temp_path), voice=voice)
-        temp_path.replace(final_path)
-    finally:
-        temp_path.unlink(missing_ok=True)
-
-
-def _to_user_message(text: str) -> str:
-    cleaned = _THINK_TAG_RE.sub("", text or "")
-    cleaned = _ANSWER_TAG_RE.sub("", cleaned)
-    cleaned = _format_european_dates(cleaned)
-    cleaned = _MD_FENCE_RE.sub(r"\1", cleaned)
-    cleaned = _MD_BOLD_RE.sub(r"\1", cleaned)
-    cleaned = _MD_ITALIC_RE.sub(r"\1", cleaned)
-    cleaned = _MD_INLINE_CODE_RE.sub(r"\1", cleaned)
-    cleaned = _EMOJI_RE.sub("", cleaned)
-    cleaned = "\n".join(_LEADING_SYMBOL_RE.sub("", line) for line in cleaned.splitlines())
-    cleaned = re.sub(r"\s+\n", "\n", cleaned)
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    cleaned = cleaned.strip()
-    return cleaned or (text or "")
-
-
-def _try_parse_json(text: str) -> dict[str, Any] | None:
-    raw = (text or "").strip()
-    if not raw:
-        return None
-    try:
-        value = json.loads(raw)
-        return value if isinstance(value, dict) else None
-    except json.JSONDecodeError:
-        return None
-
-
-
-
-def _looks_like_noise(text: str) -> bool:
-    value = (text or "").strip()
-    if not value:
-        return False
-    lower = value.lower()
-    if len(value) > 1400:
-        return True
-    noisy_patterns = [
-        "here's the translation of the menu labels",
-        '"row_count"',
-        '"menu":',
-        "```json",
-    ]
-    return any(pattern in lower for pattern in noisy_patterns)
-
-
-def _normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(agent_result or {})
-    steps = normalized.get("intermediate_steps") or []
-    output_text = str(normalized.get("output") or "")
-    parsed_output = _try_parse_json(output_text)
-    if isinstance(parsed_output, dict):
-        output_message = _to_user_message(str(parsed_output.get("message_to_user") or "").strip())
-    else:
-        output_message = _to_user_message(output_text)
-    output_message_usable = bool(output_message) and not _looks_like_noise(output_message)
-
-    for step in reversed(steps if isinstance(steps, list) else []):
-        if not isinstance(step, dict):
-            continue
-        observation = step.get("observation")
-        if isinstance(observation, dict):
-            obs = observation
-        elif isinstance(observation, str):
-            obs = _try_parse_json(observation) or {}
-        else:
-            obs = {}
-        if not obs:
-            continue
-
-        status = str(obs.get("status") or "").strip().lower()
-        if status in {"confirmation_required", "resolution_required"}:
-            pending_raw = obs.get("pending_action") if isinstance(obs.get("pending_action"), dict) else {}
-            pending = normalize_pending_action_envelope(pending_raw) or pending_raw
-            module = str(
-                pending.get("effective_module")
-                or pending.get("module")
-                or pending.get("requested_module")
-                or ""
-            ).strip()
-            action = str(pending.get("action") or "").strip()
-            data = pending.get("data") if isinstance(pending.get("data"), dict) else {}
-            message = str(
-                obs.get("message")
-                or (
-                    "Akce je připravena a čeká na vaše potvrzení."
-                    if status == "confirmation_required"
-                    else "Pro pokračování potřebuji upřesnit cílový záznam."
-                )
-            ).strip()
-
-            command_payload = {
-                "action": action or "create",
-                "module": module or "Meetings",
-                "data_json": json.dumps(data, ensure_ascii=False),
-                "message_to_user": message,
-            }
-            normalized["status"] = status
-            normalized["pending_action"] = pending
-            normalized["output"] = json.dumps(command_payload, ensure_ascii=False)
-            normalized["message_to_user"] = message
-            return normalized
-
-        if status in {"crm_http_error", "crm_action_error"}:
-            message = str(
-                obs.get("message")
-                or "CRM akce selhala. Zkontrolujte mapování polí a povinné hodnoty."
-            ).strip()
-            normalized["status"] = status
-            normalized["message_to_user"] = message
-            if not str(normalized.get("output") or "").strip():
-                normalized["output"] = message
-            return normalized
-
-    for step in reversed(steps if isinstance(steps, list) else []):
-        if not isinstance(step, dict):
-            continue
-        tool_name = str(step.get("tool") or "").strip()
-        if tool_name not in {"crm_data_tool", "crm_search_tool", "crm_query_tool", "my_meetings_tool"}:
-            continue
-
-        observation = step.get("observation")
-        if isinstance(observation, dict):
-            obs = observation
-        elif isinstance(observation, str):
-            obs = _try_parse_json(observation) or {}
-        else:
-            obs = {}
-        if not obs:
-            continue
-
-        cards = obs.get("cards")
-        if isinstance(cards, list):
-            normalized["cards"] = cards
-        tool_message = _to_user_message(
-            str(
-                obs.get("message_to_user")
-                or obs.get("summary")
-                or ""
-            ).strip()
-        )
-        # Keep the model's final natural-language answer when available.
-        # Tool summary is only a fallback.
-        if output_message_usable:
-            normalized["message_to_user"] = output_message
-        elif tool_message:
-            normalized["message_to_user"] = tool_message
-        tool_status = str(obs.get("status") or "").strip()
-        if tool_status:
-            normalized["status"] = tool_status
-        if not str(normalized.get("output") or "").strip():
-            normalized["output"] = json.dumps(obs, ensure_ascii=False)
-        return normalized
-
-    if isinstance(parsed_output, dict) and parsed_output.get("message_to_user"):
-        normalized["message_to_user"] = _to_user_message(str(parsed_output["message_to_user"]))
-        return normalized
-
-    clean = _to_user_message(output_text)
-    if not clean or _looks_like_noise(clean):
-        clean = (
-            "Nerozuměla jsem spolehlivě požadavku. "
-            "Upřesněte prosím akci, modul a čas (např. schůzka v úterý 9:30)."
-        )
-    normalized["message_to_user"] = clean
-    return normalized
-
-
-def _extract_pending_action_from_agent_result(agent_result: dict[str, Any]) -> dict[str, Any] | None:
-    if not isinstance(agent_result, dict):
-        return None
-
-    direct_pending = agent_result.get("pending_action")
-    if isinstance(direct_pending, dict):
-        return normalize_pending_action_envelope(direct_pending) or direct_pending
-
-    steps = agent_result.get("intermediate_steps")
-    if not isinstance(steps, list):
-        return None
-
-    for step in reversed(steps):
-        if not isinstance(step, dict):
-            continue
-        observation = step.get("observation")
-        if isinstance(observation, dict):
-            obs = observation
-        elif isinstance(observation, str):
-            obs = _try_parse_json(observation) or {}
-        else:
-            obs = {}
-        if not isinstance(obs, dict):
-            continue
-        status = str(obs.get("status") or "").strip().lower()
-        pending = obs.get("pending_action")
-        if status in {"confirmation_required", "resolution_required"} and isinstance(pending, dict):
-            return normalize_pending_action_envelope(pending) or pending
-    return None
-
-
-def _first_nonempty_from_map(data: dict[str, Any], keys: list[str]) -> str | None:
-    for key in keys:
-        value = data.get(key)
-        if value is None:
-            continue
-        text = str(value).strip()
-        if text:
-            return text
-    return None
-
-
-def _merge_context_with_pending_action(
-    context: dict[str, Any] | None,
-    pending_action: dict[str, Any] | None,
-) -> dict[str, Any]:
-    merged = dict(context or {})
-    if not isinstance(pending_action, dict):
-        return merged
-
-    if "pending_action" not in merged:
-        merged["pending_action"] = pending_action
-
-    pending_module = str(
-        pending_action.get("module") or pending_action.get("effective_module") or ""
-    ).strip()
-    if pending_module and not str(merged.get("module") or "").strip():
-        merged["module"] = pending_module
-
-    data = pending_action.get("data")
-    data_obj = data if isinstance(data, dict) else {}
-    fields_raw = data_obj.get("fields")
-    fields = fields_raw if isinstance(fields_raw, dict) else {}
-
-    parent_type = str(fields.get("parent_type") or data_obj.get("parent_type") or "").strip()
-    parent_id = str(fields.get("parent_id") or data_obj.get("parent_id") or "").strip()
-    if parent_id and not str(merged.get("record") or "").strip():
-        merged["record"] = parent_id
-    if parent_type and not str(merged.get("record_module") or "").strip():
-        merged["record_module"] = parent_type
-
-    entities_raw = merged.get("entities")
-    entities = dict(entities_raw) if isinstance(entities_raw, dict) else {}
-
-    contact_name = _first_nonempty_from_map(
-        fields,
-        ["contact_name", "related_contact_name", "invite_contact_name", "participant_name"],
-    ) or _first_nonempty_from_map(
-        data_obj,
-        ["contact_name", "related_contact_name", "invite_contact_name", "participant_name"],
-    )
-    account_name = _first_nonempty_from_map(
-        fields,
-        ["account_name", "related_account_name", "company", "company_name"],
-    ) or _first_nonempty_from_map(
-        data_obj,
-        ["account_name", "related_account_name", "company", "company_name"],
-    )
-
-    if contact_name and not str(entities.get("contact_name") or "").strip():
-        entities["contact_name"] = contact_name
-    if account_name and not str(entities.get("account_name") or "").strip():
-        entities["account_name"] = account_name
-
-    parent_type_norm = parent_type.lower()
-    if parent_id and "contact" in parent_type_norm and not str(entities.get("contact_id") or "").strip():
-        entities["contact_id"] = parent_id
-    if parent_id and "account" in parent_type_norm and not str(entities.get("account_id") or "").strip():
-        entities["account_id"] = parent_id
-
-    if entities:
-        merged["entities"] = entities
-
-    return merged
-
-
-def _is_read_only_data_query(input_text: str) -> bool:
-    lowered = (input_text or "").strip().lower()
-    normalized = "".join(
-        char for char in unicodedata.normalize("NFD", lowered) if unicodedata.category(char) != "Mn"
-    )
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    if not normalized:
-        return False
-
-    mutation_tokens = (
-        "vytvor",
-        "zaloz",
-        "naplanuj",
-        "pridej",
-        "uprav",
-        "zmen",
-        "smaz",
-        "odstran",
-        "delete",
-        "update",
-        "create",
-        "patch",
-    )
-    if any(token in normalized for token in mutation_tokens):
-        return False
-
-    question_markers = (
-        "kdo ",
-        "jake ",
-        "jaky ",
-        "co ",
-        "kde ",
-        "kdy ",
-        "kolik ",
-        "?",
-    )
-    data_tokens = (
-        "schuzk",
-        "meeting",
-        "kontakt",
-        "contact",
-        "firma",
-        "spolecnost",
-        "account",
-        "zaznam",
-        "records",
-    )
-    return any(marker in normalized for marker in question_markers) and any(
-        token in normalized for token in data_tokens
-    )
-
-
-def _canonical_module_name(value: str | None) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    canonical_map = {
-        "contacts": "Contacts",
-        "accounts": "Accounts",
-        "meetings": "Meetings",
-        "calls": "Calls",
-        "tasks": "Tasks",
-        "notes": "Notes",
-        "opportunities": "Opportunities",
-        "leads": "Leads",
-        "users": "Users",
-        "cases": "Cases",
-        "quotes": "Quotes",
-        "opportunites": "Opportunities",
-        "acm_invoices": "acm_invoices",
-    }
-    return canonical_map.get(text.lower(), text)
-
-
-def _extract_crm_record_created_event(metadata: dict[str, Any] | None) -> dict[str, str] | None:
-    if not isinstance(metadata, dict):
-        return None
-
-    containers: list[dict[str, Any]] = [metadata]
-    agent_result = metadata.get("agent_result")
-    if isinstance(agent_result, dict):
-        containers.append(agent_result)
-
-    for container in containers:
-        raw_event = container.get("crm_sync_event")
-        if not isinstance(raw_event, dict):
-            continue
-        event_type = str(raw_event.get("type") or "").strip().lower()
-        if event_type and event_type != "record_created":
-            continue
-        module = _canonical_module_name(raw_event.get("module"))
-        record_id = str(raw_event.get("record_id") or "").strip()
-        if not module or not record_id:
-            continue
-        normalized_event: dict[str, str] = {
-            "type": "record_created",
-            "module": module,
-            "record_id": record_id,
-        }
-        record_name = str(raw_event.get("record_name") or "").strip()
-        if record_name:
-            normalized_event["record_name"] = record_name
-        source = str(raw_event.get("source") or "").strip()
-        if source:
-            normalized_event["source"] = source
-        return normalized_event
-    return None
-
-
-async def _load_latest_pending_action(
-    db: AsyncSession,
-    *,
-    chat_id: str,
-    tenant_id: str,
-    user_id: str,
-) -> dict[str, Any] | None:
-    stmt = (
-        select(ChatMessage)
-        .where(
-            ChatMessage.chat_id == chat_id,
-            ChatMessage.tenant_id == tenant_id,
-            ChatMessage.user_id == user_id,
-            ChatMessage.role == "assistant",
-        )
-        .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
-        .limit(1)
-    )
-    result = await db.execute(stmt)
-    message = result.scalar_one_or_none()
-    if message is None or not isinstance(message.metadata_json, dict):
-        return None
-
-    agent_result = message.metadata_json.get("agent_result")
-    if not isinstance(agent_result, dict):
-        return None
-    return _extract_pending_action_from_agent_result(agent_result)
-
-
-async def _load_latest_crm_record_created_event(
-    db: AsyncSession,
-    *,
-    chat_id: str,
-    tenant_id: str,
-    user_id: str,
-) -> dict[str, str] | None:
-    stmt = (
-        select(ChatMessage)
-        .where(
-            ChatMessage.chat_id == chat_id,
-            ChatMessage.tenant_id == tenant_id,
-            ChatMessage.user_id == user_id,
-            ChatMessage.role == "assistant",
-        )
-        .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
-        .limit(30)
-    )
-    result = await db.execute(stmt)
-    messages = result.scalars().all()
-    for message in messages:
-        metadata = message.metadata_json if isinstance(message.metadata_json, dict) else {}
-        event = _extract_crm_record_created_event(metadata)
-        if event is not None:
-            return event
-    return None
-
-
-def _merge_context_with_created_record(
-    context: dict[str, Any] | None,
-    created_record_event: dict[str, str] | None,
-) -> dict[str, Any]:
-    merged = dict(context or {})
-    if not isinstance(created_record_event, dict):
-        return merged
-
-    module = _canonical_module_name(created_record_event.get("module"))
-    record_id = str(created_record_event.get("record_id") or "").strip()
-    record_name = str(created_record_event.get("record_name") or "").strip()
-
-    if module and not str(merged.get("module") or "").strip():
-        merged["module"] = module
-    if module and not str(merged.get("record_module") or "").strip():
-        merged["record_module"] = module
-    if record_id and not str(merged.get("record") or "").strip():
-        merged["record"] = record_id
-    if record_id and not str(merged.get("record_id") or "").strip():
-        merged["record_id"] = record_id
-    if record_name and not str(merged.get("record_name") or "").strip():
-        merged["record_name"] = record_name
-
-    entities_raw = merged.get("entities")
-    entities = dict(entities_raw) if isinstance(entities_raw, dict) else {}
-    module_lower = module.lower()
-    if module_lower == "meetings" and record_id and not str(entities.get("meeting_id") or "").strip():
-        entities["meeting_id"] = record_id
-    if module_lower == "calls" and record_id and not str(entities.get("call_id") or "").strip():
-        entities["call_id"] = record_id
-    if entities:
-        merged["entities"] = entities
-
-    return merged
-
-
-def _build_soft_ui_focus_hint(context: dict[str, Any] | None) -> str | None:
-    if not isinstance(context, dict):
-        return None
-
-    module = _canonical_module_name(
-        context.get("record_module")
-        or context.get("module")
-    )
-    record_name = str(context.get("record_name") or "").strip()
-    record_id = str(context.get("record_id") or context.get("record") or "").strip()
-    if not module and not record_name and not record_id:
-        return None
-
-    module_label_map = {
-        "meetings": "schůzky",
-        "calls": "hovoru",
-        "contacts": "kontaktu",
-        "accounts": "firmy",
-        "tasks": "úkolu",
-        "notes": "poznámky",
-    }
-    module_label = module_label_map.get(module.lower(), "záznamu") if module else "záznamu"
-
-    parts: list[str] = [f"Uživatel má v CRM právě otevřen DetailView {module_label}."]
-    if record_name:
-        parts.append(f"Název: '{record_name}'.")
-    if record_id:
-        parts.append(f"ID: {record_id}.")
-    parts.append("Ber to jako orientační kontext (nápovědu), ne jako závazný fakt.")
-    return " ".join(parts)
-
-
-def _with_soft_ui_focus_hint(context: dict[str, Any] | None) -> dict[str, Any]:
-    merged = dict(context or {})
-    if str(merged.get("ui_focus_hint_cz") or "").strip():
-        return merged
-    hint = _build_soft_ui_focus_hint(merged)
-    if hint:
-        merged["ui_focus_hint_cz"] = hint
-    return merged
-
-
-def _history_for_title_prompt(history: list[ChatMessageItem]) -> str:
-    lines: list[str] = []
-    # Keep prompt small and focused on the beginning of conversation topic.
-    for item in history[:8]:
-        role = (item.role or "").strip().lower()
-        if role not in {"user", "assistant"}:
-            continue
-        content = _to_user_message(item.content or "")
-        if not content:
-            continue
-        compact = re.sub(r"\s+", " ", content).strip()
-        if len(compact) > 220:
-            compact = compact[:220].rstrip() + "..."
-        prefix = "U" if role == "user" else "A"
-        lines.append(f"{prefix}: {compact}")
-    return "\n".join(lines)
-
-
-def _sanitize_chat_name(value: str | None) -> str:
-    text = _to_user_message(value or "")
-    text = re.sub(r"\s+", " ", text).strip()
-    text = text.strip("`\"'“”„")
-    if not text:
-        return ""
-    # Keep only the first line if model adds extra explanation.
-    text = text.splitlines()[0].strip()
-    words = text.split()
-    if len(words) > _CHAT_TITLE_MAX_WORDS:
-        text = " ".join(words[:_CHAT_TITLE_MAX_WORDS])
-    if len(text) > _CHAT_TITLE_MAX_CHARS:
-        text = text[:_CHAT_TITLE_MAX_CHARS].rstrip(" ,.;:-")
-    return text
-
-
-def _fallback_chat_name(history: list[ChatMessageItem]) -> str:
-    for item in history:
-        if (item.role or "").strip().lower() != "user":
-            continue
-        text = re.sub(r"\s+", " ", (item.content or "")).strip()
-        if not text:
-            continue
-        words = text.split()
-        short = " ".join(words[:_CHAT_TITLE_MAX_WORDS])
-        return _sanitize_chat_name(short) or "Novy chat"
-    return "Novy chat"
-
-
-async def _generate_chat_name_with_llm(
-    *,
-    history: list[ChatMessageItem],
-    tenant_id: str,
-    user_id: str,
-) -> str:
-    transcript = _history_for_title_prompt(history)
-    if not transcript:
-        return _fallback_chat_name(history)
-
-    settings = get_settings()
-    messages = [
-        SystemMessage(content="/nothink"),
-        HumanMessage(
-            content=(
-                "Jsi asistent, který vytváří krátké názvy konverzací v češtině.\n"
-                "Pravidla:\n"
-                "- vrať pouze název (žádné vysvětlení)\n"
-                "- 2 až 6 slov\n"
-                "- max 80 znaků\n"
-                "- bez uvozovek a bez tečky na konci\n\n"
-                f"Konverzace:\n{transcript}\n\název:"
-            )
-        ),
-    ]
-    models_to_try = list(dict.fromkeys([settings.llm_title_model, settings.llm_model]))
-    for model_name in models_to_try:
-        llm = ChatOpenAI(
-            base_url=settings.llm_base_url,
-            api_key=settings.llm_api_key,
-            model=model_name,
-            temperature=0,
-            max_tokens=200,
-        )
-        try:
-            response = await llm.ainvoke(messages)
-            raw = response.content if hasattr(response, "content") else str(response)
-            if isinstance(raw, list):
-                raw = " ".join(str(part) for part in raw)
-            cleaned = _sanitize_chat_name(str(raw))
-            if cleaned:
-                return cleaned
-        except Exception:
-            logger.warning(
-                "Chat title generation failed with model=%s tenant=%s user=%s",
-                model_name,
-                tenant_id,
-                user_id,
-            )
-
-    return _fallback_chat_name(history)
-
-
-async def _ensure_chat_name(
-    *,
-    chat: Chat,
-    history: list[ChatMessageItem],
-    tenant_id: str,
-    user_id: str,
-) -> str:
-    existing = (chat.name or "").strip()
-    if existing:
-        return existing
-
-    generated = await _generate_chat_name_with_llm(
-        history=history,
-        tenant_id=tenant_id,
-        user_id=user_id,
-    )
-    generated = _sanitize_chat_name(generated)
-    if not generated:
-        generated = _fallback_chat_name(history)
-    chat.name = generated[:255]
-    chat.updated_at = datetime.now(timezone.utc)
-    return chat.name
-
-
-async def _process_input_core(
-    *,
-    db: AsyncSession,
-    ctx: TenantContext,
-    payload: ProcessInputRequest,
-    background_tasks: BackgroundTasks,
-) -> dict[str, Any]:
-    started = time.perf_counter()
-    tenant_id = ctx["tenant_id"]
-    user_id = ctx["user_id"]
-
-    tenant_manager = TenantManager(db)
-    credentials = await tenant_manager.get_credentials(tenant_id)
-    crm_client = CoripoClient(
-        credentials.crm_base_url,
-        credentials.crm_token,
-        user_id=user_id,
-        user_name=ctx["user_name"],
-    )
-    rag_service = get_rag_service()
-
-    if payload.chat_id:
-        chat = await _get_chat_or_404(
-            db,
-            chat_id=payload.chat_id,
-            tenant_id=tenant_id,
-            user_id=user_id,
-        )
-    else:
-        chat = await _create_chat(db, tenant_id=tenant_id, user_id=user_id, persist=False)
-
-    latest_pending_action = await _load_latest_pending_action(
-        db,
-        chat_id=chat.id,
-        tenant_id=tenant_id,
-        user_id=user_id,
-    )
-    incoming_context = dict(payload.context or {})
-    latest_created_record = await _load_latest_crm_record_created_event(
-        db,
-        chat_id=chat.id,
-        tenant_id=tenant_id,
-        user_id=user_id,
-    )
-    incoming_module = _canonical_module_name(incoming_context.get("module"))
-    created_module = _canonical_module_name(
-        latest_created_record.get("module") if isinstance(latest_created_record, dict) else ""
-    )
-    if latest_created_record and (not incoming_module or incoming_module.lower() == created_module.lower()):
-        incoming_context = _merge_context_with_created_record(incoming_context, latest_created_record)
-    action_confirmation = bool(incoming_context.get("confirm_action", False))
-    should_merge_pending = bool(latest_pending_action) and (
-        action_confirmation or not _is_read_only_data_query(payload.input_text)
-    )
-    if should_merge_pending:
-        effective_context = _merge_context_with_pending_action(incoming_context, latest_pending_action)
-    else:
-        effective_context = incoming_context
-    effective_context = _with_soft_ui_focus_hint(effective_context)
-    request_context = effective_context or None
-
-    await _append_message(
-        db,
-        chat=chat,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        role="user",
-        content=payload.input_text,
-    )
-
-    action_confirmation = bool(effective_context.get("confirm_action", False))
-    execution_mode = "quick_action"
-    available_tools: list[str] = []
-
-    pending_for_patch = (
-        effective_context.get("pending_action") if isinstance(effective_context.get("pending_action"), dict) else None
-    ) or latest_pending_action
-    pending_patch_result = None
-    if isinstance(pending_for_patch, dict) and not action_confirmation:
-        pending_patch_result = try_patch_pending_action(
-            input_text=payload.input_text,
-            pending_action=pending_for_patch,
-        )
-
-    if pending_patch_result is not None:
-        execution_mode = "pending_patch"
-        agent_result = pending_patch_result
-    else:
-        quick_result: QuickActionResult | None = None
-        if settings.quick_action_enabled:
-            quick_result = await try_handle_quick_action(
-                input_text=payload.input_text,
-                crm_client=crm_client,
-                user_id=user_id,
-                action_confirmation=action_confirmation,
-            )
-        if quick_result is not None and not quick_result.should_fallback:
-            agent_result = quick_result.data
-        else:
-            execution_mode = "agent"
-            tools = build_tools(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                input_text=payload.input_text,
-                request_context=request_context,
-                crm_client=crm_client,
-                rag_service=rag_service,
-                action_confirmation=action_confirmation,
-            )
-            available_tools = [str(getattr(tool, "name", "")) for tool in tools if getattr(tool, "name", None)]
-            history_for_agent = await _load_messages(
-                db,
-                chat_id=chat.id,
-                tenant_id=tenant_id,
-                user_id=user_id,
-            )
-            recent_history_for_agent = [
-                {"role": item.role, "content": item.content}
-                for item in history_for_agent[-10:]
-            ]
-            try:
-                agent_result = await run_agent(
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    input_text=payload.input_text,
-                    context=request_context,
-                    tools=tools,
-                    chat_history=recent_history_for_agent,
-                )
-                agent_result = _normalize_agent_result_for_ui(agent_result)
-            except Exception as exc:
-                logger.exception(
-                    "Agent execution failed tenant=%s user=%s chat=%s",
-                    tenant_id,
-                    user_id,
-                    chat.id,
-                )
-                agent_result = {
-                    "output": (
-                        "Nastala chyba při provedení akce v CRM. "
-                        "Akce nebyla provedena. "
-                        "Zkontrolujte povinná pole a potvrďte akci znovu."
-                    ),
-                    "error": str(exc),
-                    "status": "agent_error",
-                    "message_to_user": (
-                        "Nastala chyba při provedení akce v CRM. "
-                        "Akce nebyla provedena. "
-                        "Zkontrolujte povinná pole a potvrďte akci znovu."
-                    ),
-                }
-
-    assistant_raw_text = str(
-        agent_result.get("message_to_user")
-        or agent_result.get("output")
-        or ""
-    )
-    assistant_text = _to_user_message(assistant_raw_text)
-    if not assistant_text:
-        assistant_text = (
-            "Nerozuměla jsem spolehlivě požadavku. "
-            "Upřesněte prosím akci, modul a čas (např. schůzka v úterý 9:30)."
-        )
-    await _append_message(
-        db,
-        chat=chat,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        role="assistant",
-        content=assistant_text,
-        metadata={"agent_result": agent_result, "raw_output": assistant_raw_text},
-    )
-
-    history = await _load_messages(
-        db,
-        chat_id=chat.id,
-        tenant_id=tenant_id,
-        user_id=user_id,
-    )
-    await _ensure_chat_name(
-        chat=chat,
-        history=history,
-        tenant_id=tenant_id,
-        user_id=user_id,
-    )
-    await db.commit()
-
-    file_id, audio_url = await _maybe_generate_voice(
-        text=assistant_text,
-        return_voice=payload.return_voice,
-        background_tasks=background_tasks,
-    )
-
-    chat_history_dump = [item.model_dump(mode="json") for item in history]
-    tool_calls = agent_result.get("intermediate_steps")
-    if not isinstance(tool_calls, list):
-        tool_calls = []
-    cards = agent_result.get("cards")
-    if not isinstance(cards, list):
-        cards = []
-    duration_ms = round((time.perf_counter() - started) * 1000, 2)
-    log_llm_trace(
-        logger,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        chat_id=chat.id,
-        request={
-            "input_text": payload.input_text,
-            "chat_id": payload.chat_id or chat.id,
-            "confirm_action": action_confirmation,
-            "return_voice": payload.return_voice,
-        },
-        context=request_context,
-        tool_calls=tool_calls,
-        outcome={
-            "status": str(agent_result.get("status") or "ok"),
-            "final_answer": assistant_text,
-            "message_to_user": assistant_text,
-            "output": agent_result.get("output"),
-            "error": agent_result.get("error"),
-        },
-        resources={
-            "execution_mode": execution_mode,
-            "llm_model": settings.llm_model,
-            "llm_base_url": settings.llm_base_url,
-            "crm_mode": settings.crm_mode,
-            "rag_available": rag_service is not None,
-            "available_tools": available_tools,
-            "return_voice": payload.return_voice,
-            "audio_generated": bool(file_id),
-            "duration_ms": duration_ms,
-        },
-        chat_history=chat_history_dump,
-    )
-
-    return {
-        "action_result": agent_result,
-        "message_to_user": assistant_text,
-        "chat_id": chat.id,
-        "chat_name": chat.name,
-        "chat_history": chat_history_dump,
-        "cards": cards,
-        "audio_file_id": file_id,
-        "audio_response_id": file_id,
-        "audio_url": audio_url,
-        "tenant_id": tenant_id,
-        "user_id": user_id,
-    }
 
 
 async def _trigger_ingest(
@@ -1199,7 +105,7 @@ def _normalize_ingest_modules(modules: list[str] | None) -> list[str]:
         value = (module or "").strip()
         if not value:
             continue
-        canonical = _canonical_module_name(value) or value
+        canonical = canonical_module_name(value) or value
         if canonical.lower() in seen:
             continue
         seen.add(canonical.lower())
@@ -1225,7 +131,7 @@ async def create_chat(
 ) -> CreateChatResponse:
     if body is not None and body.user_id != ctx["user_id"]:
         raise HTTPException(status_code=403, detail="user_id mismatch with auth header")
-    chat = await _create_chat(db, tenant_id=ctx["tenant_id"], user_id=ctx["user_id"])
+    chat = await chat_service.create_chat(db, tenant_id=ctx["tenant_id"], user_id=ctx["user_id"])
     return CreateChatResponse(chat_id=chat.id)
 
 
@@ -1235,19 +141,19 @@ async def get_chat(
     ctx: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db),
 ) -> ChatHistoryResponse:
-    chat = await _get_chat_or_404(
+    chat = await chat_service.get_chat_or_404(
         db,
         chat_id=chat_id,
         tenant_id=ctx["tenant_id"],
         user_id=ctx["user_id"],
     )
-    history = await _load_messages(
+    history = await chat_service.load_messages(
         db,
         chat_id=chat.id,
         tenant_id=ctx["tenant_id"],
         user_id=ctx["user_id"],
     )
-    response_name = (chat.name or "").strip() or _fallback_chat_name(history)
+    response_name = (chat.name or "").strip() or fallback_chat_name(history)
     return ChatHistoryResponse(
         chat_id=chat.id,
         history=history,
@@ -1283,13 +189,13 @@ async def get_user_chats(
 
     items: list[ChatHistoryResponse] = []
     for chat in chats:
-        history = await _load_messages(
+        history = await chat_service.load_messages(
             db,
             chat_id=chat.id,
             tenant_id=ctx["tenant_id"],
             user_id=ctx["user_id"],
         )
-        response_name = (chat.name or "").strip() or _fallback_chat_name(history)
+        response_name = (chat.name or "").strip() or fallback_chat_name(history)
         items.append(
             ChatHistoryResponse(
                 chat_id=chat.id,
@@ -1312,7 +218,7 @@ async def put_chat(
     if body.chat_id != chat_id:
         raise HTTPException(status_code=400, detail="chat_id mismatch")
 
-    chat = await _get_chat_or_404(
+    chat = await chat_service.get_chat_or_404(
         db,
         chat_id=chat_id,
         tenant_id=ctx["tenant_id"],
@@ -1328,7 +234,7 @@ async def put_chat(
     )
 
     for item in body.history:
-        await _append_message(
+        await chat_service.append_message(
             db,
             chat=chat,
             tenant_id=ctx["tenant_id"],
@@ -1344,7 +250,7 @@ async def put_chat(
 
     await db.commit()
 
-    history = await _load_messages(
+    history = await chat_service.load_messages(
         db,
         chat_id=chat.id,
         tenant_id=ctx["tenant_id"],
@@ -1364,7 +270,7 @@ async def delete_chat(
     ctx: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, bool]:
-    chat = await _get_chat_or_404(
+    chat = await chat_service.get_chat_or_404(
         db,
         chat_id=chat_id,
         tenant_id=ctx["tenant_id"],
@@ -1382,7 +288,7 @@ async def process_input(
     ctx: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db),
 ) -> BaseResponse:
-    response = await _process_input_core(
+    response = await process_input_core(
         db=db,
         ctx=ctx,
         payload=payload,
@@ -1414,17 +320,17 @@ async def crm_record_created_event(
     record_id = str(payload.record_id or "").strip()
     if not record_id:
         raise HTTPException(status_code=400, detail="record_id is required")
-    module = _canonical_module_name(payload.module)
+    module = canonical_module_name(payload.module)
     if not module:
         raise HTTPException(status_code=400, detail="module is required")
 
-    chat = await _get_chat_or_404(
+    chat = await chat_service.get_chat_or_404(
         db,
         chat_id=payload.chat_id,
         tenant_id=ctx["tenant_id"],
         user_id=ctx["user_id"],
     )
-    latest_event = await _load_latest_crm_record_created_event(
+    latest_event = await chat_service.load_latest_crm_record_created_event(
         db,
         chat_id=chat.id,
         tenant_id=ctx["tenant_id"],
@@ -1447,7 +353,7 @@ async def crm_record_created_event(
             },
         )
 
-    latest_pending_action = await _load_latest_pending_action(
+    latest_pending_action = await chat_service.load_latest_pending_action(
         db,
         chat_id=chat.id,
         tenant_id=ctx["tenant_id"],
@@ -1456,7 +362,7 @@ async def crm_record_created_event(
     pending_action = str(
         (latest_pending_action or {}).get("action") if isinstance(latest_pending_action, dict) else ""
     ).strip().lower()
-    pending_module = _canonical_module_name(
+    pending_module = canonical_module_name(
         (latest_pending_action or {}).get("effective_module")
         or (latest_pending_action or {}).get("module")
         if isinstance(latest_pending_action, dict)
@@ -1501,7 +407,7 @@ async def crm_record_created_event(
     if isinstance(latest_pending_action, dict):
         metadata["resolved_pending_action"] = latest_pending_action
 
-    await _append_message(
+    await chat_service.append_message(
         db,
         chat=chat,
         tenant_id=ctx["tenant_id"],
@@ -1576,14 +482,15 @@ async def process_audio(
         temp_path = temp.name
 
     try:
-        input_text = transcribe(temp_path, language=user_locale)
+        # faster-whisper is CPU-bound and synchronous; keep it off the event loop.
+        input_text = await asyncio.to_thread(transcribe, temp_path, language=user_locale)
         process_payload = ProcessInputRequest(
             input_text=input_text,
             chat_id=effective_chat_id,
             context=parsed_context,
             return_voice=return_voice,
         )
-        response = await _process_input_core(
+        response = await process_input_core(
             db=db,
             ctx=ctx,
             payload=process_payload,
@@ -1623,7 +530,7 @@ async def search(
         rag: list[dict[str, Any]] = []
         if rag_service is not None:
             try:
-                rag = rag_service.search(tenant_id=ctx["tenant_id"], query=query, limit=5)
+                rag = await rag_service.search(tenant_id=ctx["tenant_id"], query=query, limit=5)
             except Exception:
                 logger.exception(
                     "RAG search failed tenant=%s scope=%s",
@@ -1632,13 +539,15 @@ async def search(
                 )
         return BaseResponse(success=True, response={"scope": scope, "crm": crm, "rag": rag})
 
-    contact_results = await crm_client.generic_search(query=query, scope="contacts")
-    account_results = await crm_client.generic_search(query=query, scope="accounts")
-    meeting_results = await crm_client.generic_search(query=query, scope="meetings")
+    contact_results, account_results, meeting_results = await asyncio.gather(
+        crm_client.generic_search(query=query, scope="contacts"),
+        crm_client.generic_search(query=query, scope="accounts"),
+        crm_client.generic_search(query=query, scope="meetings"),
+    )
     rag: list[dict[str, Any]] = []
     if rag_service is not None:
         try:
-            rag = rag_service.search(tenant_id=ctx["tenant_id"], query=query, limit=5)
+            rag = await rag_service.search(tenant_id=ctx["tenant_id"], query=query, limit=5)
         except Exception:
             logger.exception(
                 "RAG search failed tenant=%s scope=all",
@@ -1752,8 +661,8 @@ async def rag_status(
     normalized_module = None
     if module:
         trimmed = module.strip()
-        normalized_module = _canonical_module_name(trimmed) if trimmed else None
-    count = rag_service.count(tenant_id=ctx["tenant_id"], module=normalized_module)
+        normalized_module = canonical_module_name(trimmed) if trimmed else None
+    count = await rag_service.count(tenant_id=ctx["tenant_id"], module=normalized_module)
     return BaseResponse(
         success=True,
         response={

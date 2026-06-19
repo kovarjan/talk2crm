@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from app.api.endpoints import (
-    _build_soft_ui_focus_hint,
-    _extract_crm_record_created_event,
-    _merge_context_with_created_record,
-    _with_soft_ui_focus_hint,
+from app.engine.pipeline import (
+    build_soft_ui_focus_hint as _build_soft_ui_focus_hint,
+    merge_context_with_created_record as _merge_context_with_created_record,
+    with_soft_ui_focus_hint as _with_soft_ui_focus_hint,
+)
+from app.services.chat_service import (
+    extract_crm_record_created_event as _extract_crm_record_created_event,
 )
 
 

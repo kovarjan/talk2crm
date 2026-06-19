@@ -48,16 +48,15 @@ def test_pending_patch_updates_time_without_tool_call() -> None:
     assert "18:00" in str(result.get("message_to_user") or "")
 
 
-def test_pending_patch_updates_weekday_keeps_time() -> None:
+def test_pending_patch_defers_weekday_only_edit_to_llm() -> None:
+    # Weekday resolution is intentionally not handled by the patcher (see the
+    # note in pending_patch.py) — the LLM resolves relative weekdays itself.
     result = try_patch_pending_action(
         input_text="změň ji na čtvrtek",
         pending_action=_pending_meeting(),
         now=datetime(2026, 3, 13, 10, 0, 0),
     )
-    assert isinstance(result, dict)
-    pending = result.get("pending_action") or {}
-    fields = (pending.get("data") or {}).get("fields") or {}
-    assert fields.get("date_start") == "2026-03-19 14:00:00"
+    assert result is None
 
 
 def test_pending_patch_skips_confirmation_only_input() -> None:
@@ -81,7 +80,9 @@ def test_pending_patch_output_contains_serialized_payload() -> None:
     assert output.get("module") == "Meetings"
 
 
-def test_pending_patch_detects_long_weekday_edit_phrase() -> None:
+def test_pending_patch_defers_long_weekday_edit_phrase_to_llm() -> None:
+    # Multi-weekday phrases are ambiguous for the regex patcher; resolution is
+    # intentionally left to the LLM (see the note in pending_patch.py).
     result = try_patch_pending_action(
         input_text="až to další pondělí ne teď 12.",
         pending_action={
@@ -102,7 +103,4 @@ def test_pending_patch_detects_long_weekday_edit_phrase() -> None:
         },
         now=datetime(2026, 4, 10, 10, 0, 0),
     )
-    assert isinstance(result, dict)
-    pending = result.get("pending_action") or {}
-    fields = (pending.get("data") or {}).get("fields") or {}
-    assert fields.get("date_start") == "2026-04-20 09:00:00"
+    assert result is None

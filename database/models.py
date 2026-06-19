@@ -8,6 +8,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     String,
     Text,
     UniqueConstraint,
@@ -45,7 +46,10 @@ class Tenant(Base):
 
 class Chat(Base):
     __tablename__ = "chats"
-    __table_args__ = (UniqueConstraint("id", "tenant_id", name="uq_chat_tenant"),)
+    __table_args__ = (
+        UniqueConstraint("id", "tenant_id", name="uq_chat_tenant"),
+        Index("ix_chats_tenant_user_updated", "tenant_id", "user_id", "updated_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(
@@ -73,6 +77,9 @@ class Chat(Base):
 
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
+    __table_args__ = (
+        Index("ix_chat_messages_chat_created", "chat_id", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(
         Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())

@@ -7,7 +7,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.api.endpoints import _normalize_agent_result_for_ui
+from app.presentation.agent_result import normalize_agent_result_for_ui as _normalize_agent_result_for_ui
 
 
 def test_normalization_keeps_agent_final_answer_over_tool_summary() -> None:

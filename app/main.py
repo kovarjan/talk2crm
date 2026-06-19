@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,8 +13,10 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 
 from app.api.endpoints import router as api_router
+from app.core.audio import cleanup_audio_cache
 from app.core.config import get_settings
-from app.core.logging import request_context_middleware, setup_logging
+from app.core.logging import get_logger, request_context_middleware, setup_logging
+from app.core.http import aclose_shared_http_client
 from database.session import init_db
 
 
@@ -31,10 +34,30 @@ setup_logging(
 )
 
 
+logger = get_logger(__name__)
+
+
+async def _audio_cache_cleanup_loop() -> None:
+    while True:
+        try:
+            await asyncio.to_thread(cleanup_audio_cache, settings.audio_cache_max_age_hours)
+        except Exception:
+            logger.exception("Audio cache cleanup failed")
+        await asyncio.sleep(3600)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await init_db()
+    cleanup_task: asyncio.Task | None = None
+    if settings.audio_cache_max_age_hours > 0:
+        cleanup_task = asyncio.create_task(_audio_cache_cleanup_loop())
     yield
+    if cleanup_task is not None:
+        cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cleanup_task
+    await aclose_shared_http_client()
 
 
 app = FastAPI(
@@ -49,7 +72,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allow_origins,
-    allow_credentials=True,
+    allow_credentials=settings.cors_allow_credentials and settings.cors_allow_origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import copy
 import hashlib
 import hmac
 import json
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -13,7 +15,9 @@ from typing import Any
 import httpx
 
 from app.core.config import get_settings
+from app.core.http import get_shared_http_client
 from app.core.logging import get_logger
+from app.utils.modules import canonical_module_name
 
 
 logger = get_logger(__name__)
@@ -21,6 +25,10 @@ logger = get_logger(__name__)
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
+
+# HMAC-derived SIDs cached across CoripoClient instances so each API request
+# does not pay an extra hmac-login round trip. Keyed by (api_base, key_id, user_id).
+_SID_CACHE: dict[tuple[str, str, str], tuple[float, str]] = {}
 
 
 class CoripoClient:
@@ -83,6 +91,9 @@ class CoripoClient:
         # HMAC login always yields a fresh, full-scope session.
         if self._coripo_session_id and self._can_use_hmac():
             self._coripo_session_id = None
+
+        self._sid_from_cache = False
+        self._sid_lock = asyncio.Lock()
 
     @staticmethod
     def _is_uuid(value: str | None) -> bool:
@@ -202,6 +213,14 @@ class CoripoClient:
                     return value.strip()
         return None
 
+    def _sid_cache_key(self) -> tuple[str, str, str]:
+        return (self._coripo_api_base(), self.coripo_hmac_key_id, str(self.user_id or ""))
+
+    def _invalidate_cached_sid(self) -> None:
+        _SID_CACHE.pop(self._sid_cache_key(), None)
+        self._coripo_session_id = None
+        self._sid_from_cache = False
+
     async def _ensure_coripo_sid(self) -> None:
         if self._coripo_session_id:
             return
@@ -210,6 +229,28 @@ class CoripoClient:
                 "Coripo authentication requires either SID token or HMAC secret + user_id."
             )
 
+        # The lock keeps concurrent calls on this instance (e.g. gathered module
+        # searches) from racing into parallel hmac-login round trips.
+        async with self._sid_lock:
+            if self._coripo_session_id:
+                return
+
+            ttl = self.settings.coripo_sid_cache_ttl_seconds
+            cache_key = self._sid_cache_key()
+            if ttl > 0:
+                cached = _SID_CACHE.get(cache_key)
+                if cached and cached[0] > time.monotonic():
+                    self._coripo_session_id = cached[1]
+                    self._sid_from_cache = True
+                    return
+
+            sid = await self._login_for_sid()
+            self._coripo_session_id = sid
+            self._sid_from_cache = False
+            if ttl > 0:
+                _SID_CACHE[cache_key] = (time.monotonic() + ttl, sid)
+
+    async def _login_for_sid(self) -> str:
         # Coripo HMAC signing is computed from exact raw body bytes.
         # Preferred flow (per rest_coripo/test_hmac_public_login.sh) is hmac-login.
         attempts: list[tuple[str, dict[str, Any] | None]] = [
@@ -227,8 +268,7 @@ class CoripoClient:
                 )
                 sid = self._extract_sid(response)
                 if sid:
-                    self._coripo_session_id = sid
-                    return
+                    return sid
             except httpx.HTTPStatusError as exc:
                 last_exc = exc
                 continue
@@ -249,8 +289,7 @@ class CoripoClient:
                 )
                 sid = self._extract_sid(response)
                 if sid:
-                    self._coripo_session_id = sid
-                    return
+                    return sid
             except httpx.HTTPStatusError as exc:
                 last_exc = exc
                 continue
@@ -271,10 +310,6 @@ class CoripoClient:
         if require_sid and not self._coripo_session_id:
             await self._ensure_coripo_sid()
 
-        headers: dict[str, str] = {"Accept": "application/json"}
-        if self._coripo_session_id:
-            headers["sid"] = self._coripo_session_id
-
         body_bytes = b""
         if json_body is not None:
             body_bytes = json.dumps(
@@ -283,19 +318,38 @@ class CoripoClient:
                 separators=(",", ":"),
                 default=str,
             ).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-
-        headers.update(self._build_coripo_hmac_headers(body_bytes))
 
         url = f"{self._coripo_api_base()}/{path.lstrip('/')}"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.request(
+
+        async def _send() -> httpx.Response:
+            headers: dict[str, str] = {"Accept": "application/json"}
+            if self._coripo_session_id:
+                headers["sid"] = self._coripo_session_id
+            if json_body is not None:
+                headers["Content-Type"] = "application/json"
+            headers.update(self._build_coripo_hmac_headers(body_bytes))
+            return await get_shared_http_client().request(
                 method=method,
                 url=url,
                 headers=headers,
                 params=params,
                 content=body_bytes if json_body is not None else None,
+                timeout=self.timeout,
             )
+
+        response = await _send()
+
+        if (
+            response.status_code in {401, 403}
+            and require_sid
+            and self._sid_from_cache
+            and self._can_use_hmac()
+        ):
+            # A SID taken from the cross-request cache may have expired server-side.
+            # Drop it and retry once with a freshly negotiated session.
+            self._invalidate_cached_sid()
+            await self._ensure_coripo_sid()
+            response = await _send()
 
         if response.status_code >= 400:
             logger.error(
@@ -314,26 +368,7 @@ class CoripoClient:
         value = str(module or "").strip().strip("/")
         if not value:
             raise ValueError("Module cannot be empty")
-
-        mapping = {
-            "contacts": "Contacts",
-            "accounts": "Accounts",
-            "meetings": "Meetings",
-            "calls": "Calls",
-            "tasks": "Tasks",
-            "notes": "Notes",
-            "opportunities": "Opportunities",
-            "leads": "Leads",
-            "users": "Users",
-            "cases": "Cases",
-            "quotes": "Quotes",
-            "opportunites": "Opportunities",
-            "acm_invoices": "acm_invoices",
-        }
-        lowered = value.lower()
-        if lowered in mapping:
-            return mapping[lowered]
-        return value
+        return canonical_module_name(value)
 
     @staticmethod
     def _module_candidates(module_name: str) -> list[str]:
@@ -784,14 +819,13 @@ class CoripoClient:
                 data=payload_data,
             )
 
-        return {
-            key: await self.execute_module_action(
-                module=module_name,
-                action="list",
-                data=payload_data,
+        results = await asyncio.gather(
+            *(
+                self.execute_module_action(module=module_name, action="list", data=payload_data)
+                for module_name in module_map.values()
             )
-            for key, module_name in module_map.items()
-        }
+        )
+        return dict(zip(module_map.keys(), results))
 
     async def execute_module_action(
         self,

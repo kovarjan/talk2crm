@@ -45,7 +45,7 @@ class CRMReadHelpers:
     best_record_match: Callable[[list[dict[str, Any]], str], dict[str, Any] | None]
     extract_company_name: Callable[[str, dict[str, Any] | None], str]
     extract_account_ids_from_query: Callable[[Any, dict[str, Any] | None], list[str]]
-    resolve_accounts_from_qdrant: Callable[[str], list[dict[str, Any]]]
+    resolve_accounts_from_qdrant: Callable[[str], Awaitable[list[dict[str, Any]]]]
     select_account_candidates: Callable[[str, list[dict[str, Any]], int, int], list[dict[str, Any]]]
     query_requires_filled_email: Callable[[str], bool]
     build_contacts_filter_by_account_ids: Callable[[list[str], bool], dict[str, Any]]
@@ -381,7 +381,7 @@ class CRMReadService:
                 rag_candidates: list[dict[str, Any]] = []
                 if self.rag_service is not None:
                     try:
-                        rag_hits = self.rag_service.search_entities(
+                        rag_hits = await self.rag_service.search_entities(
                             tenant_id=self.tenant_id,
                             query=person_name,
                             entity_type="contact",
@@ -458,7 +458,7 @@ class CRMReadService:
                     except Exception:
                         resolved_accounts = [{"id": row_id} for row_id in account_ids]
                 else:
-                    resolved_accounts = self.h.resolve_accounts_from_qdrant(company_name)
+                    resolved_accounts = await self.h.resolve_accounts_from_qdrant(company_name)
                     if not resolved_accounts:
                         accounts_list_result = await self.crm_client.execute_module_action(
                             module="Accounts",
@@ -611,7 +611,7 @@ class CRMReadService:
             merged: list[dict[str, Any]] = []
             if self.rag_service is not None:
                 try:
-                    rag_hits = self.rag_service.search(
+                    rag_hits = await self.rag_service.search(
                         tenant_id=self.tenant_id,
                         query=effective_query,
                         limit=max(30, safe_limit * 4),

@@ -10,6 +10,7 @@ Outputs:
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import sys
 from dataclasses import dataclass
@@ -90,7 +91,7 @@ TEST_CASES: list[TestCase] = [
 ]
 
 
-def _search_hybrid(
+async def _search_hybrid(
     rag_service: TenantRAGService,
     tenant_id: str,
     query: str,
@@ -98,10 +99,10 @@ def _search_hybrid(
 ) -> list[dict[str, Any]]:
     """Hybrid search: text-filter pass (score 1.0) merged with vector similarity.
     This is the exact path TenantRAGService.search() uses in production."""
-    return rag_service.search(tenant_id=tenant_id, query=query, limit=limit)
+    return await rag_service.search(tenant_id=tenant_id, query=query, limit=limit)
 
 
-def _search_semantic(
+async def _search_semantic(
     rag_service: TenantRAGService,
     tenant_id: str,
     query: str,
@@ -109,23 +110,18 @@ def _search_semantic(
 ) -> list[dict[str, Any]]:
     """Semantic-only search: pure vector similarity, no text-filter pre-pass.
     Uses the same client and embedder as the hybrid path for a fair comparison."""
-    collection = rag_service._tenant_collection(tenant_id)
-    query_vector = rag_service.embedder.embed(query)
+    collection = await rag_service._tenant_collection(tenant_id)
+    client = await rag_service._get_client()
+    query_vector = await rag_service._aembed(query)
     try:
-        if hasattr(rag_service.client, "search"):
-            points = rag_service.client.search(
-                collection_name=collection,
-                query_vector=query_vector,
-                limit=limit,
-                with_payload=True,
-            )
-        else:
-            points = rag_service.client.query_points(
+        points = (
+            await client.query_points(
                 collection_name=collection,
                 query=query_vector,
                 limit=limit,
                 with_payload=True,
-            ).points
+            )
+        ).points
         return [{"score": p.score, "payload": p.payload} for p in points]
     except Exception as exc:
         print(f"  [semantic error] {exc}")
@@ -161,7 +157,7 @@ CATEGORIES_ORDER = [
 ]
 
 
-def main() -> None:
+async def main() -> None:
     from collections import defaultdict
 
     print("RAG search accuracy benchmark")
@@ -193,7 +189,7 @@ def main() -> None:
             ("semantic", _search_semantic),
             ("hybrid",   _search_hybrid),
         ]:
-            results = search_fn(rag_service, TENANT_ID, tc.query, LIMIT)
+            results = await search_fn(rag_service, TENANT_ID, tc.query, LIMIT)
             h1 = _hit_at_k(results, tc.expected_ids, 1)
             h3 = _hit_at_k(results, tc.expected_ids, 3)
             h5 = _hit_at_k(results, tc.expected_ids, 5)
@@ -271,4 +267,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

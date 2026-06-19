@@ -63,11 +63,21 @@ class Settings(BaseSettings):
 
     tts_provider: str = "edge-tts"
     tts_voice: str = "en-US-AriaNeural"
+    # Generated TTS responses older than this are deleted by the hourly cleanup
+    # task (0 disables cleanup).
+    audio_cache_max_age_hours: float = 24.0
 
     crm_mode: str = "on"
     crm_timeout_seconds: float = 25.0
     coripo_hmac_key_id: str = "your-tenant-id"
     coripo_test_token: str = ""
+    # How long an HMAC-derived Coripo SID is reused across requests (0 disables
+    # the cache and restores one hmac-login per request).
+    coripo_sid_cache_ttl_seconds: float = 600.0
+    # How long resolved tenant credentials are served from memory before the
+    # DB row is consulted again (0 disables the cache). Deactivating a tenant
+    # can take up to this long to propagate.
+    tenant_cache_ttl_seconds: float = 60.0
     engine_v2_enabled: bool = True
     resolver_v2_enabled: bool = True
     temporal_v2_enabled: bool = True
@@ -93,12 +103,19 @@ class Settings(BaseSettings):
 
     hmac_keys_json: str = Field(default="{}")
     hmac_max_skew_seconds: int = 300
+    # When true, every protected request must carry a valid HMAC Authorization
+    # header — tenant/user headers alone are rejected. Keep enabled in any
+    # deployment where the API is not behind a trusted authenticating gateway.
+    require_hmac: bool = False
 
     tenant_secret_key: str = (
         "CHANGE_ME_WITH_32_BYTE_URLSAFE_BASE64_FOR_FERNET"
     )
 
     cors_allow_origins: list[str] = Field(default_factory=lambda: ["*"])
+    # Browsers reject credentialed CORS with a wildcard origin, so enabling this
+    # only takes effect when cors_allow_origins lists explicit origins.
+    cors_allow_credentials: bool = False
 
     @field_validator("cors_allow_origins", mode="before")
     @classmethod

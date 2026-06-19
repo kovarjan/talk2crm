@@ -6,9 +6,10 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
 from app.core.config import get_settings
+from app.engine.llm import get_chat_llm
+from app.utils.text import format_european_dates, strip_answer_tags, strip_think_tags
 from app.core.logging import (
     LLM_STEP_AGENT_ACTION,
     LLM_STEP_FINAL_RESPONSE,
@@ -20,38 +21,12 @@ from app.core.logging import (
 
 
 logger = get_logger(__name__)
-_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 _ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL)
-_ANSWER_TAG_RE = re.compile(r"</?answer>", re.IGNORECASE)
-_ISO_DATE_RE = re.compile(
-    r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?(?!\d)"
-)
-
-
-def _clean(text: Any) -> str:
-    return _THINK_TAG_RE.sub("", str(text or "")).strip()
-
-
-def _strip_answer_tags(text: Any) -> str:
-    return _ANSWER_TAG_RE.sub("", str(text or "")).strip()
-
-
-def _format_european_dates(text: Any) -> str:
-    def repl(match: re.Match[str]) -> str:
-        year, month, day, hour, minute, second = match.groups()
-        formatted = f"{int(day)}.{int(month)}.{year}"
-        if hour and minute:
-            formatted += f" {hour}:{minute}"
-            if second and second != "00":
-                formatted += f":{second}"
-        return formatted
-
-    return _ISO_DATE_RE.sub(repl, str(text or ""))
 
 
 def _normalize_final_answer_text(text: Any) -> str:
-    return _format_european_dates(_strip_answer_tags(text)).strip()
+    return format_european_dates(strip_answer_tags(text)).strip()
 
 
 def _build_date_context(now: datetime) -> str:
@@ -193,8 +168,8 @@ UI KONTEXTU: Kontext může obsahovat ui_focus_hint_cz a pole module/record/reco
 VZORY:
 Dotaz: "kontakty firmy Zlíner"
 → <tool_call>{{"name": "rag_search_tool", "args": {{"query": "Zlíner", "module": "accounts"}}}}</tool_call>
-Po výsledku RAG (account_id=XYZ):
-→ <tool_call>{{"name": "crm_query_tool", "args": {{"module": "Contacts", "filters": "[{{\"field\":\"account_id\",\"op\":\"eq\",\"value\":\"XYZ\"}}]"}}}}</tool_call>
+Po výsledku RAG (skutečné account_id ze záznamu, např. account_id="[REAL_ACCOUNT_ID_Z_VYSLEDKU]"):
+→ <tool_call>{{"name": "crm_query_tool", "args": {{"module": "Contacts", "filters": "[{{\"field\":\"account_id\",\"op\":\"eq\",\"value\":\"[REAL_ACCOUNT_ID_Z_VYSLEDKU]\"}}]"}}}}</tool_call>
 
 Dotaz: "schůzky příští týden"
 → <tool_call>{{"name": "my_meetings_tool", "args": {{"date_from": "pristi_tyden_start", "date_to": "pristi_tyden_end"}}}}</tool_call>
@@ -218,6 +193,8 @@ Dotaz: "Naplánuj schůzku s Lucií Kovářovou na čtvrtek"
 → <tool_call>{{"name": "rag_search_tool", "args": {{"query": "Lucie Kovářová", "module": "contacts"}}}}</tool_call>
 Po výsledku RAG jsou 2 identické kontakty se stejným jménem:
 Model interně vybere první kontakt ze seznamu a pokračuje vytvořením schůzky bez dalšího doptávání.
+
+PRAVIDLO: Data do crm_action_tool musí vycházet pouze z aktuálního vstupu, KONVERZAČNÍ HISTORIE a výsledků nástrojů. Nikdy necopy-paste hodnoty z ukázek.
 """
 
 
@@ -246,11 +223,11 @@ async def run_agent(
     # No bind_tools — LiteLLM strips tool parameter schemas when forwarding to Ollama,
     # so the model sees tools with empty schemas and can't generate tool calls.
     # We describe tools in the system prompt and parse <tool_call> tags from text output.
-    llm = ChatOpenAI(
+    llm = get_chat_llm(
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
         model=settings.llm_model,
-        temperature=0,
+        temperature=0.0,
         max_tokens=4096,
     )
 
@@ -292,7 +269,7 @@ async def run_agent(
             break
 
         raw_content = str(getattr(response, "content", "") or "")
-        content = _clean(raw_content)
+        content = strip_think_tags(raw_content)
 
         if not content:
             logger.warning("tenant=%s Empty/thinking-only response at iteration=%d", tenant_id, iteration)

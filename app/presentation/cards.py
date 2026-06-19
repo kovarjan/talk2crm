@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from app.utils.text import normalize_text
+
 
 
 def safe_text(value: Any) -> str:
@@ -88,7 +90,7 @@ def record_card(module: str, title: str, record_id: str, meta: dict[str, Any]) -
 
 def table_card(*, title: str, tag: str, columns: list[dict[str, str]], rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
-        "id": f"table-{title.lower().replace(' ', '-') or 'crm'}",
+        "id": f"table-{normalize_text(title) or 'crm'}",
         "type": "table",
         "title": title,
         "tag": tag,
@@ -97,10 +99,15 @@ def table_card(*, title: str, tag: str, columns: list[dict[str, str]], rows: lis
     }
 
 
-def meeting_cards(records: list[dict[str, Any]], total_count: int) -> list[dict[str, Any]]:
+def meeting_cards(
+    records: list[dict[str, Any]],
+    total_count: int,
+    *,
+    force_table: bool = False,
+) -> list[dict[str, Any]]:
     if not records:
         return []
-    if total_count <= 4:
+    if total_count <= 4 and not force_table:
         cards = []
         for row in records:
             cards.append(

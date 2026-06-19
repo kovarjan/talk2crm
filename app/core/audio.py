@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import wave
 from pathlib import Path
 
@@ -184,3 +185,27 @@ async def synthesize_to_file(text: str, output_path: str, voice: str | None = No
 
 def synthesize_to_file_sync(text: str, output_path: str, voice: str | None = None) -> None:
     asyncio.run(synthesize_to_file(text=text, output_path=output_path, voice=voice))
+
+
+def cleanup_audio_cache(max_age_hours: float) -> int:
+    """Delete generated TTS files older than max_age_hours; returns count removed."""
+    if max_age_hours <= 0:
+        return 0
+    directory = get_settings().cache_audio_dir
+    if not directory.exists():
+        return 0
+
+    cutoff = time.time() - max_age_hours * 3600
+    removed = 0
+    for path in directory.iterdir():
+        if path.suffix not in {".wav", ".tmp"}:
+            continue
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+                removed += 1
+        except OSError:
+            continue
+    if removed:
+        logger.info("Audio cache cleanup removed %s file(s) from %s", removed, directory)
+    return removed

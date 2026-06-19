@@ -145,6 +145,7 @@ cython_debug/
 
 .qdrant_storage/
 .qdrant_storage_local/
+logs/
 sugar_voice_bridge.db
 sugar_voice_bridge.db*
 

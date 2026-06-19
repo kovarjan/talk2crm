@@ -5,6 +5,7 @@ from typing import TypedDict
 from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.security import verify_hmac_request
 from app.services.tenant_manager import TenantManager
 from database.session import get_db
@@ -30,7 +31,10 @@ async def get_tenant_context(
     db: AsyncSession = Depends(get_db),
 ) -> TenantContext:
     auth_value = authorization or ""
-    if auth_value.lower().startswith("hmac"):
+    has_hmac_header = auth_value.lower().startswith("hmac")
+    if get_settings().require_hmac and not has_hmac_header:
+        raise HTTPException(status_code=401, detail="HMAC authentication required")
+    if has_hmac_header:
         body = await request.body()
         ok = verify_hmac_request(
             method=request.method,

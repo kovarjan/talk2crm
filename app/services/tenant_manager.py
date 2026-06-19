@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import re
+import time
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -26,6 +27,18 @@ class TenantCredentials:
     tenant_id: str
     crm_base_url: str
     crm_token: str
+
+
+# Resolved credentials cached across requests; entries expire after
+# Settings.tenant_cache_ttl_seconds. Keyed by tenant_id.
+_CREDENTIALS_CACHE: dict[str, tuple[float, TenantCredentials]] = {}
+
+
+def invalidate_tenant_cache(tenant_id: str | None = None) -> None:
+    if tenant_id is None:
+        _CREDENTIALS_CACHE.clear()
+    else:
+        _CREDENTIALS_CACHE.pop(tenant_id, None)
 
 
 class TenantManager:
@@ -80,15 +93,31 @@ class TenantManager:
             raise HTTPException(status_code=401, detail="Unknown or inactive tenant")
         return tenant
 
+    def _cached_credentials(self, tenant_id: str) -> TenantCredentials | None:
+        if self.settings.tenant_cache_ttl_seconds <= 0:
+            return None
+        cached = _CREDENTIALS_CACHE.get(tenant_id)
+        if cached and cached[0] > time.monotonic():
+            return cached[1]
+        return None
+
     async def get_credentials(self, tenant_id: str) -> TenantCredentials:
+        cached = self._cached_credentials(tenant_id)
+        if cached is not None:
+            return cached
+
         tenant = await self.get_tenant(tenant_id)
         token = decrypt_tenant_secret(tenant.crm_token_encrypted)
         token = self._resolve_effective_crm_token(token)
-        return TenantCredentials(
+        credentials = TenantCredentials(
             tenant_id=tenant.id,
             crm_base_url=tenant.crm_base_url.rstrip("/"),
             crm_token=token,
         )
+        ttl = self.settings.tenant_cache_ttl_seconds
+        if ttl > 0:
+            _CREDENTIALS_CACHE[tenant_id] = (time.monotonic() + ttl, credentials)
+        return credentials
 
     async def assert_user_access(self, tenant_id: str, user_id: str) -> None:
         # NOTE: User-level authorization is intentionally NOT enforced here.
@@ -99,4 +128,7 @@ class TenantManager:
         # DO NOT expose this API directly to the internet without implementing
         # proper user-level checks here first.
         _ = user_id
+        if self._cached_credentials(tenant_id) is not None:
+            # Credentials are only cached after a successful active-tenant lookup.
+            return
         await self.get_tenant(tenant_id)

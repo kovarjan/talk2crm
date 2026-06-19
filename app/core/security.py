@@ -4,12 +4,36 @@ import base64
 import hashlib
 import hmac
 import re
+import threading
 import time
 from dataclasses import dataclass
 
 from cryptography.fernet import Fernet, InvalidToken
 
 from app.core.config import get_settings
+
+
+# Replay protection: a (key_id, nonce) pair is accepted only once within the
+# timestamp skew window. In-process store — sufficient for single-process
+# deployments; replace with a shared store (e.g. Redis) when running multiple
+# workers behind one endpoint.
+_SEEN_NONCES: dict[tuple[str, str], float] = {}
+_NONCE_LOCK = threading.Lock()
+_NONCE_PRUNE_THRESHOLD = 1024
+
+
+def _register_nonce(key_id: str, nonce: str, ttl_seconds: float) -> bool:
+    """Remember the nonce; returns False when it was already used (replay)."""
+    now = time.time()
+    with _NONCE_LOCK:
+        if len(_SEEN_NONCES) > _NONCE_PRUNE_THRESHOLD:
+            for key in [k for k, expiry in _SEEN_NONCES.items() if expiry <= now]:
+                del _SEEN_NONCES[key]
+        key = (key_id, nonce)
+        if _SEEN_NONCES.get(key, 0.0) > now:
+            return False
+        _SEEN_NONCES[key] = now + ttl_seconds
+        return True
 
 
 HMAC_AUTH_PATTERN = re.compile(
@@ -122,5 +146,9 @@ def verify_hmac_request(
         ).digest()
         expected_b64 = base64.b64encode(expected).decode("utf-8")
         if hmac.compare_digest(expected_b64, parsed.signature_b64):
-            return True
+            # Register the nonce only after a successful verification so that
+            # invalid requests cannot burn nonces for legitimate callers.
+            return _register_nonce(
+                parsed.key_id, nonce, settings.hmac_max_skew_seconds * 2
+            )
     return False

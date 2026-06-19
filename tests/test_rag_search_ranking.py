@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from collections import defaultdict
@@ -128,14 +129,14 @@ def _evaluate_case(case: BenchmarkCase, candidates: list[Candidate]) -> CaseResu
     )
 
 
-def _run_cases(rag_service: TenantRAGService, cases: list[BenchmarkCase]) -> list[CaseResult]:
+async def _run_cases(rag_service: TenantRAGService, cases: list[BenchmarkCase]) -> list[CaseResult]:
     evaluated: list[CaseResult] = []
     for case in cases:
         entity_type = {
             "Contacts": "contact",
             "Accounts": "account",
         }.get(case.expected_module or "", "any")
-        raw_results = rag_service.search_entities(
+        raw_results = await rag_service.search_entities(
             tenant_id=TENANT_ID,
             query=case.query,
             entity_type=entity_type,
@@ -285,12 +286,14 @@ def _require_live_benchmark() -> None:
         pytest.skip("Set RUN_RAG_BENCHMARK=1 to run live RAG benchmark tests.")
 
 
-def _benchmark_service() -> TenantRAGService:
+async def _run_benchmark(cases: list[BenchmarkCase]) -> list[CaseResult]:
+    """Build the service, verify data, and run all cases inside one event loop
+    (the lazily created AsyncQdrantClient is bound to the loop it is built in)."""
     service = TenantRAGService()
-    total = service.count(tenant_id=TENANT_ID)
+    total = await service.count(tenant_id=TENANT_ID)
     if total <= 0:
         pytest.skip(f"Tenant {TENANT_ID!r} has no indexed records.")
-    return service
+    return await _run_cases(service, cases)
 
 
 def test_strip_diacritics_czech_chars():
@@ -450,8 +453,7 @@ def test_benchmark_checks_expected_module_for_positive_cases():
 
 def test_ranking_benchmark_live():
     _require_live_benchmark()
-    service = _benchmark_service()
-    results = _run_cases(service, RANKING_CASES)
+    results = asyncio.run(_run_benchmark(RANKING_CASES))
     summary = _summarize(results)
 
     # Baseline sanity gates for required ranking cases.
@@ -466,8 +468,7 @@ def test_ranking_benchmark_live():
 
 def test_real_command_benchmark_live():
     _require_live_benchmark()
-    service = _benchmark_service()
-    results = _run_cases(service, COMMAND_CASES)
+    results = asyncio.run(_run_benchmark(COMMAND_CASES))
     summary = _summarize(results)
 
     # Baseline sanity gates for CRM command queries.
