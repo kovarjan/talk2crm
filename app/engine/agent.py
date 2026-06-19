@@ -89,8 +89,8 @@ def _format_recent_history(chat_history: list[dict[str, str]] | None, *, limit: 
         content = str(item.get("content") or "").strip().replace("\n", " ")
         if not content:
             continue
-        if len(content) > 500:
-            content = content[:500].rstrip() + "..."
+        if len(content) > 1500:
+            content = content[:1500].rstrip() + "..."
         if role not in {"user", "assistant", "system"}:
             role = "user"
         lines.append(f"{role}: {content}")
@@ -124,6 +124,8 @@ DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
    — podporované moduly pro čtení: Accounts, Contacts, Meetings, Calls, Tasks, Notes, Leads, Opportunities, Quotes, acm_invoices.
    — pro obchodní případy používej module="Opportunities"; pro nabídky používej module="Quotes"; pro faktury používej module="acm_invoices".
      filters je JSON pole [{{"field":"...","op":"eq","value":"..."}}]
+   — fields id/account_id/contact_id a také *.id nebo *|id musí mít jako value jen skutečné CRM UUID, nikdy název firmy/kontaktu to nic nenajde.
+   — pro více konkrétních záznamů můžeš použít pouze {{ "field": "id", "op": "in", "value": ["<CRM_ID_1>", "<CRM_ID_2>"] }}
 
 3. my_meetings_tool(date_from: str|null=null, date_to: str|null=null, limit: int=100)
    — moje schůzky (assigned_user_id = login user)

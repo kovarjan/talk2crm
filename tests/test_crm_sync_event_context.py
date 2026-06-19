@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from app.api.models import ChatMessageItem
 from app.engine.pipeline import (
     build_soft_ui_focus_hint as _build_soft_ui_focus_hint,
     merge_context_with_created_record as _merge_context_with_created_record,
+    merge_context_with_history_selection as _merge_context_with_history_selection,
     with_soft_ui_focus_hint as _with_soft_ui_focus_hint,
 )
 from app.services.chat_service import (
+    chat_message_item_to_agent_history as _chat_message_item_to_agent_history,
     extract_crm_record_created_event as _extract_crm_record_created_event,
+    extract_history_selection as _extract_history_selection,
 )
 
 
@@ -113,3 +124,149 @@ def test_with_soft_ui_focus_hint_adds_hint_once() -> None:
     original_hint = "Uživatel má v CRM otevřen detail schůzky."
     merged_with_existing = _with_soft_ui_focus_hint({**context, "ui_focus_hint_cz": original_hint})
     assert merged_with_existing["ui_focus_hint_cz"] == original_hint
+
+
+def test_extract_history_selection_from_rag_search_options() -> None:
+    metadata = {
+        "agent_result": {
+            "intermediate_steps": [
+                {
+                    "tool": "rag_search_tool",
+                    "observation": [
+                        {
+                            "payload": {
+                                "module": "Accounts",
+                                "record_id": "11111111-2222-3333-4444-555555555555",
+                                "record": {
+                                    "id": "11111111-2222-3333-4444-555555555555",
+                                    "name": "Baumit SK",
+                                    "billing_address_city": "Bratislava",
+                                },
+                            }
+                        },
+                        {
+                            "payload": {
+                                "module": "Accounts",
+                                "record_id": "22222222-2222-3333-4444-555555555555",
+                                "record": {
+                                    "id": "22222222-2222-3333-4444-555555555555",
+                                    "name": "Baumit CZ",
+                                    "billing_address_city": "Brandys nad Labem",
+                                },
+                            }
+                        },
+                    ],
+                }
+            ]
+        }
+    }
+
+    selection = _extract_history_selection(metadata, "2")
+
+    assert selection == {
+        "module": "Accounts",
+        "record_id": "22222222-2222-3333-4444-555555555555",
+        "record_name": "Baumit CZ",
+        "selection_label": "Baumit CZ - Brandys nad Labem",
+    }
+
+
+def test_extract_history_selection_accepts_number_with_text() -> None:
+    metadata = {
+        "agent_result": {
+            "intermediate_steps": [
+                {
+                    "tool": "rag_search_tool",
+                    "observation": [
+                        {
+                            "payload": {
+                                "module": "Accounts",
+                                "record_id": "11111111-2222-3333-4444-555555555555",
+                                "record": {"name": "Baumit SK"},
+                            }
+                        },
+                        {
+                            "payload": {
+                                "module": "Accounts",
+                                "record_id": "22222222-2222-3333-4444-555555555555",
+                                "record": {"name": "Baumit GmbH"},
+                            }
+                        },
+                        {
+                            "payload": {
+                                "module": "Accounts",
+                                "record_id": "7be50eea-d101-ff49-3fa9-5b87dfad2115",
+                                "record": {
+                                    "name": "BAUMIT, spol. s r.o.",
+                                    "billing_address_city": "Brandys nad Labem",
+                                },
+                            }
+                        },
+                    ],
+                }
+            ]
+        }
+    }
+
+    selection = _extract_history_selection(metadata, "3 baumit cz")
+
+    assert selection is not None
+    assert selection["record_id"] == "7be50eea-d101-ff49-3fa9-5b87dfad2115"
+    assert selection["record_name"] == "BAUMIT, spol. s r.o."
+
+
+def test_merge_context_with_history_selection_populates_account_entities() -> None:
+    merged = _merge_context_with_history_selection(
+        context={"module": None, "record": None, "entities": {}},
+        selection={
+            "module": "Accounts",
+            "record_id": "22222222-2222-3333-4444-555555555555",
+            "record_name": "Baumit CZ",
+            "selection_label": "Baumit CZ - Brandys nad Labem",
+        },
+    )
+
+    assert merged["module"] == "Accounts"
+    assert merged["record_id"] == "22222222-2222-3333-4444-555555555555"
+    assert merged["record_name"] == "Baumit CZ"
+    assert merged["selected_option_label"] == "Baumit CZ - Brandys nad Labem"
+    assert merged["selection_source"] == "history_selection"
+    assert merged["entities"]["account_id"] == "22222222-2222-3333-4444-555555555555"
+    assert merged["entities"]["account_name"] == "Baumit CZ"
+
+
+def test_agent_history_includes_compact_tool_memory() -> None:
+    message = ChatMessageItem(
+        role="assistant",
+        content="Nasel jsem vice zaznamu Baumit.",
+        metadata={
+            "agent_result": {
+                "intermediate_steps": [
+                    {
+                        "tool": "rag_search_tool",
+                        "observation": [
+                            {
+                                "payload": {
+                                    "module": "Accounts",
+                                    "record_id": "7be50eea-d101-ff49-3fa9-5b87dfad2115",
+                                    "record": {
+                                        "id": "7be50eea-d101-ff49-3fa9-5b87dfad2115",
+                                        "name": "BAUMIT, spol. s r.o.",
+                                        "billing_address_city": "Brandys nad Labem",
+                                    },
+                                }
+                            }
+                        ],
+                    }
+                ]
+            }
+        },
+    )
+
+    history = _chat_message_item_to_agent_history(message)
+
+    assert history["role"] == "assistant"
+    assert "Relevantni CRM pamet" in history["content"]
+    assert "rag_search_tool" in history["content"]
+    assert "id=7be50eea-d101-ff49-3fa9-5b87dfad2115" in history["content"]
+    assert "BAUMIT, spol. s r.o." in history["content"]

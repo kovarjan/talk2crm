@@ -194,3 +194,60 @@ def test_company_overview_normalizes_amount_fields_with_default_currency_fallbac
     assert result["monetary_values_currency"] == "EUR"
     assert opportunity["amount_currency"] == "EUR"
     assert opportunity["amount_display"] == "1200 EUR"
+
+
+def test_virtual_id_batch_lookup_uses_detail_endpoint_per_id_and_preserves_order() -> None:
+    client = CoripoClient(
+        base_url="http://localhost:2000/public",
+        token="11111111-2222-3333-4444-555555555555",
+    )
+
+    calls: list[tuple[str, str]] = []
+
+    async def fake_coripo_request(
+        self: CoripoClient,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+        require_sid: bool = True,
+    ) -> dict[str, Any]:
+        calls.append((method, path))
+        record_id = path.rsplit("/", 1)[-1]
+        return {
+            "message": {
+                "data": {
+                    "record": {
+                        "id": record_id,
+                        "name": f"Record {record_id[-4:]}",
+                    }
+                }
+            }
+        }
+
+    client._coripo_request = types.MethodType(fake_coripo_request, client)
+
+    result = asyncio.run(
+        client.execute_module_action(
+            module="Accounts",
+            action="list",
+            data={
+                "ids": [
+                    "d03a7eb2-35b9-8671-0738-6422d9c7ceb5",
+                    "27603c33-96ca-a125-1576-641d900c571a",
+                ],
+                "limit": 10,
+            },
+        )
+    )
+
+    assert calls == [
+        ("GET", "detail/Accounts/d03a7eb2-35b9-8671-0738-6422d9c7ceb5"),
+        ("GET", "detail/Accounts/27603c33-96ca-a125-1576-641d900c571a"),
+    ]
+    assert [row["id"] for row in result["records"]] == [
+        "d03a7eb2-35b9-8671-0738-6422d9c7ceb5",
+        "27603c33-96ca-a125-1576-641d900c571a",
+    ]
+    assert result["source_record_count"] == 2

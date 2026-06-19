@@ -25,7 +25,7 @@ class FakeCrmClient:
         return {"records": []}
 
 
-def _make_tools(crm_client=None, crm_mode="on"):
+def _make_tools(crm_client=None, crm_mode="on", request_context=None):
     client = crm_client or FakeCrmClient()
     with patch("app.engine.tools.get_settings") as mock_settings:
         mock_settings.return_value.crm_mode = crm_mode
@@ -34,7 +34,7 @@ def _make_tools(crm_client=None, crm_mode="on"):
             tenant_id="test-tenant",
             user_id="user1",
             input_text="",
-            request_context=None,
+            request_context=request_context,
             crm_client=client,
             rag_service=None,
             action_confirmation=False,
@@ -143,6 +143,65 @@ def test_crm_query_tool_filters_parsed():
     assert filt["operands"][0]["value"] == "Held"
 
 
+def test_crm_query_tool_id_in_filter_uses_virtual_ids_batch_lookup():
+    client = FakeCrmClient()
+    tools = _make_tools(crm_client=client)
+    tool = _get_tool(tools, "crm_query_tool")
+    filters_json = json.dumps(
+        [
+            {
+                "field": "id",
+                "op": "in",
+                "value": [
+                    "d03a7eb2-35b9-8671-0738-6422d9c7ceb5",
+                    "27603c33-96ca-a125-1576-641d900c571a",
+                ],
+            }
+        ]
+    )
+
+    result = json.loads(asyncio.run(tool.ainvoke({"module": "Accounts", "filters": filters_json})))
+
+    assert result["status"] == "ok"
+    assert client.last_call is not None
+    assert client.last_call["module"] == "Accounts"
+    assert client.last_call["action"] == "list"
+    assert client.last_call["data"]["ids"] == [
+        "d03a7eb2-35b9-8671-0738-6422d9c7ceb5",
+        "27603c33-96ca-a125-1576-641d900c571a",
+    ]
+    assert "filter" not in client.last_call["data"]
+
+
+def test_crm_query_tool_rejects_id_in_combined_with_search():
+    tools = _make_tools()
+    tool = _get_tool(tools, "crm_query_tool")
+    filters_json = json.dumps(
+        [
+            {
+                "field": "id",
+                "op": "in",
+                "value": ["d03a7eb2-35b9-8671-0738-6422d9c7ceb5"],
+            }
+        ]
+    )
+
+    result = json.loads(
+        asyncio.run(
+            tool.ainvoke(
+                {
+                    "module": "Accounts",
+                    "search": "365.bank",
+                    "filters": filters_json,
+                }
+            )
+        )
+    )
+
+    assert result["status"] == "tool_validation_error"
+    assert "standalone id filter" in result["message"]
+
+
 def test_crm_query_tool_contacts_account_id_translates_to_relation_filter():
     client = FakeCrmClient()
     tools = _make_tools(crm_client=client)
@@ -165,6 +224,42 @@ def test_crm_query_tool_contacts_account_id_translates_to_relation_filter():
     assert relate_operand["relationship"] == ["accounts"]
     assert relate_operand["filter"]["operands"][0]["field"] == "id"
     assert relate_operand["filter"]["operands"][0]["value"] == "a42333d4-c035-2f73-865c-64ee30906163"
+
+
+def test_crm_query_tool_non_uuid_id_filter_uses_context_id() -> None:
+    client = FakeCrmClient()
+    tools = _make_tools(
+        crm_client=client,
+        request_context={
+            "selection_source": "history_selection",
+            "record_module": "Accounts",
+            "record_id": "a42333d4-c035-2f73-865c-64ee30906163",
+            "record_name": "BAUMIT, spol. s r.o.",
+            "selected_option_label": "BAUMIT, spol. s r.o. - Brandys nad Labem-Stara Boleslav",
+            "entities": {
+                "account_id": "a42333d4-c035-2f73-865c-64ee30906163",
+                "account_name": "BAUMIT, spol. s r.o.",
+            },
+        },
+    )
+    tool = _get_tool(tools, "crm_query_tool")
+    filters_json = json.dumps(
+        [
+            {
+                "field": "account_id",
+                "op": "eq",
+                "value": "BAUMIT, spol. s r.o. - Brandys nad Labem-Stara Boleslav",
+            }
+        ]
+    )
+
+    asyncio.run(tool.ainvoke({"module": "Opportunities", "filters": filters_json}))
+
+    operand = client.last_call["data"]["filter"]["operands"][0]
+    assert operand["field"] == "id"
+    assert operand["fieldModule"] == "Opportunities"
+    assert operand["fieldRel"] == ["accounts"]
+    assert operand["value"] == "a42333d4-c035-2f73-865c-64ee30906163"
 
 
 def test_crm_query_tool_meetings_account_id_translates_to_parent_filter():

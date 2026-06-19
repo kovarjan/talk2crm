@@ -733,6 +733,68 @@ class CoripoClient:
         names = [str(key).strip() for key in defs.keys() if str(key).strip()]
         return list(dict.fromkeys(names))
 
+    @staticmethod
+    def _extract_virtual_ids(data: dict[str, Any]) -> list[str] | None:
+        raw_ids = data.get("ids")
+        if raw_ids is None:
+            return None
+        if not isinstance(raw_ids, list):
+            raise ValueError("Virtual id batch lookup requires ids to be an array.")
+
+        ids = [str(item or "").strip() for item in raw_ids]
+        ids = [item for item in ids if item]
+        if not ids:
+            raise ValueError("Virtual id batch lookup requires at least one id.")
+        return list(dict.fromkeys(ids))
+
+    @staticmethod
+    def _sort_value(value: Any) -> tuple[int, str]:
+        if value is None:
+            return (1, "")
+        if isinstance(value, str):
+            return (0, value.lower())
+        return (0, str(value).lower())
+
+    def _apply_local_order(self, records: list[dict[str, Any]], order: Any) -> list[dict[str, Any]]:
+        if not isinstance(order, list) or not order:
+            return records
+
+        ordered = list(records)
+        for spec in reversed(order):
+            if not isinstance(spec, dict):
+                continue
+            field = str(spec.get("field") or "").strip()
+            if not field:
+                continue
+            reverse = str(spec.get("sort") or "ASC").strip().upper() == "DESC"
+            ordered.sort(key=lambda row: self._sort_value(row.get(field)), reverse=reverse)
+        return ordered
+
+    async def _fetch_records_by_ids(self, module_name: str, ids: list[str]) -> list[dict[str, Any]]:
+        async def _fetch_one(record_id: str) -> dict[str, Any] | None:
+            try:
+                raw = await self._coripo_request(
+                    "GET",
+                    f"detail/{module_name}/{record_id}",
+                    require_sid=True,
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    logger.info("Coripo detail lookup skipped missing %s/%s", module_name, record_id)
+                    return None
+                raise
+
+            record = self._extract_first_record(raw)
+            if record is None:
+                return {"id": record_id}
+            if isinstance(record, dict) and "id" not in record:
+                record = dict(record)
+                record["id"] = record_id
+            return record if isinstance(record, dict) else {"id": record_id}
+
+        results = await asyncio.gather(*(_fetch_one(record_id) for record_id in ids))
+        return [row for row in results if isinstance(row, dict)]
+
     def _sanitize_mutation_response(
         self,
         raw: dict[str, Any],
@@ -844,6 +906,25 @@ class CoripoClient:
             include_fields.add("id")
 
         if normalized_action in {"list", "search"}:
+            requested_ids = self._extract_virtual_ids(data)
+            if requested_ids is not None:
+                total_limit = max(1, min(int(data.get("limit") or len(requested_ids)), 500))
+                records = await self._fetch_records_by_ids(module_name, requested_ids)
+                if clean_records:
+                    records = self._clean_records(records, include_fields=include_fields)
+                total_count = len(records)
+                records = self._apply_local_order(records, data.get("order"))
+                records = records[:total_limit]
+
+                output: dict[str, Any] = {
+                    "records": records,
+                    "source_record_count": total_count,
+                }
+                if include_field_names:
+                    output["column_fields"] = sorted(include_fields) if include_fields else []
+                    output["def_fields"] = []
+                return output
+
             payload = self._build_coripo_list_payload(module_name, data)
             last_exc: Exception | None = None
             for candidate in self._module_candidates(module_name):

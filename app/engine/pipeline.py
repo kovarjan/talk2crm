@@ -159,6 +159,51 @@ def merge_context_with_created_record(
     return merged
 
 
+def merge_context_with_history_selection(
+    context: dict[str, Any] | None,
+    selection: dict[str, str] | None,
+) -> dict[str, Any]:
+    merged = dict(context or {})
+    if not isinstance(selection, dict):
+        return merged
+
+    module = canonical_module_name(selection.get("module"))
+    record_id = str(selection.get("record_id") or "").strip()
+    record_name = str(selection.get("record_name") or "").strip()
+    selection_label = str(selection.get("selection_label") or record_name or "").strip()
+    if not module or not record_id:
+        return merged
+
+    merged["module"] = module
+    merged["record_module"] = module
+    merged["record"] = record_id
+    merged["record_id"] = record_id
+    if record_name:
+        merged["record_name"] = record_name
+    if selection_label:
+        merged["selected_option_label"] = selection_label
+    merged["selection_source"] = "history_selection"
+
+    entities_raw = merged.get("entities")
+    entities = dict(entities_raw) if isinstance(entities_raw, dict) else {}
+    module_lower = module.lower()
+    if module_lower == "accounts":
+        entities["account_id"] = record_id
+        if record_name:
+            entities["account_name"] = record_name
+    elif module_lower == "contacts":
+        entities["contact_id"] = record_id
+        if record_name:
+            entities["contact_name"] = record_name
+    elif module_lower == "leads":
+        entities["lead_id"] = record_id
+        if record_name:
+            entities["lead_name"] = record_name
+    if entities:
+        merged["entities"] = entities
+    return merged
+
+
 def is_read_only_data_query(input_text: str) -> bool:
     lowered = (input_text or "").strip().lower()
     normalized = "".join(
@@ -346,6 +391,15 @@ async def process_input_core(
         effective_context = merge_context_with_pending_action(incoming_context, latest_pending_action)
     else:
         effective_context = incoming_context
+    latest_history_selection = await chat_service.load_latest_history_selection(
+        db,
+        chat_id=chat.id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        input_text=payload.input_text,
+    )
+    if latest_history_selection:
+        effective_context = merge_context_with_history_selection(effective_context, latest_history_selection)
     effective_context = with_soft_ui_focus_hint(effective_context)
     request_context = effective_context or None
 
@@ -406,7 +460,7 @@ async def process_input_core(
                 limit=10,
             )
             recent_history_for_agent = [
-                {"role": item.role, "content": item.content}
+                chat_service.chat_message_item_to_agent_history(item)
                 for item in history_for_agent
             ]
             try:

@@ -197,6 +197,22 @@ def validate_crm_query_call(
     for item in parsed_filters:
         if not isinstance(item, dict):
             return "Invalid filters JSON: every filter must be an object."
+        op = _safe_text(item.get("op")).lower()
+        if op != "in":
+            continue
+
+        field_name = _safe_text(item.get("field")).lower()
+        if field_name != "id":
+            return "Operator 'in' is supported only for field 'id'."
+
+        raw_values = item.get("value")
+        if not isinstance(raw_values, list) or not raw_values:
+            return "Operator 'in' requires a non-empty array of CRM ids."
+        if len(raw_values) > 500:
+            return "Operator 'in' supports at most 500 CRM ids."
+        for value in raw_values:
+            if not _is_valid_crm_id(value):
+                return "Operator 'in' requires valid CRM ids."
 
     if date_from and not _DATE_RE.match(_safe_text(date_from)):
         return "date_from must be in YYYY-MM-DD format."

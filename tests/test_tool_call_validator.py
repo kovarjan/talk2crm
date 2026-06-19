@@ -89,6 +89,31 @@ def test_crm_query_tool_rejects_invalid_module() -> None:
     assert "Unsupported module" in str(result.get("message") or "")
 
 
+def test_crm_query_tool_rejects_in_operator_for_non_id_field() -> None:
+    tools = _make_tools()
+    tool = _get_tool(tools, "crm_query_tool")
+    result = json.loads(
+        asyncio.run(
+            tool.ainvoke(
+                {
+                    "module": "Accounts",
+                    "filters": json.dumps(
+                        [
+                            {
+                                "field": "name",
+                                "op": "in",
+                                "value": ["365.bank"],
+                            }
+                        ]
+                    ),
+                }
+            )
+        )
+    )
+    assert result.get("status") == "tool_validation_error"
+    assert "supported only for field 'id'" in str(result.get("message") or "")
+
+
 def test_crm_action_tool_schema_rejects_unknown_fields() -> None:
     tools = _make_tools()
     tool = _get_tool(tools, "crm_action_tool")

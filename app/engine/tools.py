@@ -13,7 +13,12 @@ from app.engine.rag import TenantRAGService
 from app.services.crm_read_service import CRMReadHelpers, CRMReadService
 from app.services.crm_client import CoripoClient
 from app.services.crm_write_service import CRMWriteService
-from app.engine.filter_builder import FilterSpec, build_filter, build_order
+from app.engine.filter_builder import (
+    FilterSpec,
+    build_filter,
+    build_order,
+    extract_virtual_id_in_values,
+)
 from app.engine.tool_logger import ToolCallLogger
 from app.engine.tool_validator import (
     CrmActionToolArgs,
@@ -248,6 +253,37 @@ def _extract_account_ids_from_query(
         seen.add(clean)
         deduped.append(clean)
     return deduped
+
+
+def _coerce_contextual_id_filters(
+    filters: list[FilterSpec],
+    context: dict[str, Any] | None,
+) -> list[FilterSpec]:
+    if not isinstance(context, dict):
+        return filters
+
+    entities = context.get("entities") if isinstance(context.get("entities"), dict) else {}
+
+    def context_id_for_field(field_name: str) -> str:
+        field = _safe_text(field_name).lower()
+        if field == "id":
+            return _safe_text(context.get("record_id") or context.get("record"))
+        if field.endswith("_id"):
+            return _safe_text(entities.get(field))
+        if field.endswith(".id") or field.endswith("|id"):
+            module_part = re.split(r"[.|]", field, maxsplit=1)[0].rstrip("s")
+            return _safe_text(entities.get(f"{module_part}_id"))
+        return ""
+
+    coerced: list[FilterSpec] = []
+    for spec in filters:
+        value = _safe_text(spec.value)
+        if spec.op == "eq" and value and not _UUID_RE.match(value):
+            context_id = context_id_for_field(spec.field)
+            if _UUID_RE.match(context_id):
+                spec = spec.model_copy(update={"value": context_id})
+        coerced.append(spec)
+    return coerced
 
 
 def _infer_data_query_type(query: str, requested: str = "auto") -> str:
@@ -667,6 +703,8 @@ def build_tools(
         (filter field='account_id'), detail záznamu, počty záznamů.
         Vždy zadej module a filters.
         Parametry: module (str), filters (list[{field, op, value}]), limit (int).
+        Speciální případ: pro více konkrétních záznamů můžeš použít
+        {"field":"id","op":"in","value":["<id1>","<id2>"]}.
         """
         if settings.crm_mode.lower() == "off":
             return json.dumps({"status": "crm-disabled",
@@ -698,26 +736,59 @@ def build_tools(
                                  "cards": []}
                 tcl.set_output(error_payload)
                 return json.dumps(error_payload, ensure_ascii=False)
+            parsed_filters = _coerce_contextual_id_filters(parsed_filters, request_context)
 
-            crm_filter = build_filter(
-                module=module,
-                search=search,
-                filters=parsed_filters,
-                date_from=date_from,
-                date_to=date_to,
-            )
             order = build_order(order_by)
+            has_in_filter = any(spec.op == "in" for spec in parsed_filters)
+            try:
+                virtual_ids = extract_virtual_id_in_values(parsed_filters)
+            except ValueError as exc:
+                error_payload = {"status": "tool_validation_error", "message": str(exc), "cards": []}
+                tcl.set_output(error_payload)
+                return json.dumps(error_payload, ensure_ascii=False)
 
-            # print(f"Built CRM filter: {json.dumps(crm_filter, ensure_ascii=False)}")
+            if has_in_filter and virtual_ids is None:
+                error_payload = {
+                    "status": "tool_validation_error",
+                    "message": "Operator 'in' is supported only as a standalone id filter.",
+                    "cards": [],
+                }
+                tcl.set_output(error_payload)
+                return json.dumps(error_payload, ensure_ascii=False)
 
-            data: dict = {
-                "limit": max(1, min(int(limit), 500)),
-                "offset": 0,
-                "filter": crm_filter,
-                "include_field_names": False,
-            }
-            if order:
-                data["order"] = order
+            if virtual_ids is not None:
+                if search or date_from or date_to:
+                    error_payload = {
+                        "status": "tool_validation_error",
+                        "message": "Operator 'in' can only be used as a standalone id filter.",
+                        "cards": [],
+                    }
+                    tcl.set_output(error_payload)
+                    return json.dumps(error_payload, ensure_ascii=False)
+                data: dict[str, Any] = {
+                    "ids": virtual_ids,
+                    "limit": max(1, min(int(limit), 500)),
+                    "include_field_names": False,
+                }
+                if order:
+                    data["order"] = order
+            else:
+                crm_filter = build_filter(
+                    module=module,
+                    search=search,
+                    filters=parsed_filters,
+                    date_from=date_from,
+                    date_to=date_to,
+                )
+
+                data = {
+                    "limit": max(1, min(int(limit), 500)),
+                    "offset": 0,
+                    "filter": crm_filter,
+                    "include_field_names": False,
+                }
+                if order:
+                    data["order"] = order
 
             try:
                 raw = await crm_client.execute_module_action(

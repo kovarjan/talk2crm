@@ -8,7 +8,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.engine.filter_builder import FilterSpec, build_filter, build_order
+from app.engine.filter_builder import (
+    FilterSpec,
+    build_filter,
+    build_order,
+    extract_virtual_id_in_values,
+)
 
 
 def test_build_filter_search_only():
@@ -61,6 +66,23 @@ def test_build_filter_gte_maps_to_more_than_include():
 def test_build_filter_empty():
     f = build_filter()
     assert f == {"operator": "and", "operands": []}
+
+
+def test_extract_virtual_id_in_values_for_single_id_in_filter():
+    specs = [
+        FilterSpec(
+            field="id",
+            op="in",
+            value=[
+                "a42333d4-c035-2f73-865c-64ee30906163",
+                "1667abd3-3b35-ad3e-bf5e-607fdc94d3da",
+            ],
+        )
+    ]
+    assert extract_virtual_id_in_values(specs) == [
+        "a42333d4-c035-2f73-865c-64ee30906163",
+        "1667abd3-3b35-ad3e-bf5e-607fdc94d3da",
+    ]
 
 
 def test_build_filter_contacts_account_id_uses_relation_filter():

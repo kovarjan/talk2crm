@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import re
 from typing import Any, Literal
-from pydantic import BaseModel
+
+from pydantic import BaseModel, model_validator
 
 from app.utils.crm_id import CRM_ID_RE as _CRM_ID_RE
 
@@ -16,8 +17,23 @@ from app.utils.crm_id import CRM_ID_RE as _CRM_ID_RE
 class FilterSpec(BaseModel):
     """One field condition the LLM can express."""
     field: str
-    op: Literal["eq", "neq", "cont", "starts", "nnull", "null", "gte", "lte", "gt", "lt"]
-    value: str | None = None
+    op: Literal["eq", "neq", "cont", "starts", "nnull", "null", "gte", "lte", "gt", "lt", "in"]
+    value: str | list[str] | None = None
+
+    @model_validator(mode="after")
+    def validate_value_shape(self) -> "FilterSpec":
+        if self.op == "in":
+            if not isinstance(self.value, list) or not self.value:
+                raise ValueError("Operator 'in' requires a non-empty array value.")
+            normalized = [str(item or "").strip() for item in self.value]
+            if any(not item for item in normalized):
+                raise ValueError("Operator 'in' requires non-empty string items.")
+            self.value = normalized
+            return self
+
+        if isinstance(self.value, list):
+            raise ValueError("Array values are supported only for operator 'in'.")
+        return self
 
 
 # Map our simple op names to Coripo API type strings
@@ -96,6 +112,25 @@ _MODULE_ACCOUNT_RELATION_ALIASES: dict[str, tuple[str, str]] = {
     "quotes": ("Quotes", "billing_accounts"),
     "acm_invoices": ("acm_invoices", "acm_invoices_accounts"),
 }
+
+
+def extract_virtual_id_in_values(filters: list[FilterSpec] | None) -> list[str] | None:
+    specs = filters or []
+    if len(specs) != 1:
+        return None
+
+    spec = specs[0]
+    if spec.op != "in":
+        return None
+
+    field_name = (spec.field or "").strip().lower()
+    if field_name != "id":
+        raise ValueError("Operator 'in' is supported only for field 'id'.")
+
+    if not isinstance(spec.value, list) or not spec.value:
+        raise ValueError("Operator 'in' requires a non-empty array of ids.")
+
+    return list(dict.fromkeys(str(item).strip() for item in spec.value if str(item).strip()))
 
 
 def _make_operand(field: str, op_type: str, value: str | None) -> dict[str, Any]:
@@ -225,6 +260,8 @@ def build_filter(
     for spec in (filters or []):
         field_name = (spec.field or "").strip()
         field_lower = field_name.lower()
+        if spec.op == "in":
+            raise ValueError("Operator 'in' must be resolved before building a Coripo filter.")
         coripo_op = _OP_MAP[spec.op]
         activity_parent_operand = _make_activity_parent_operand(
             module_lower=module_lower,
