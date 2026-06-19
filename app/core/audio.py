@@ -4,6 +4,7 @@ import asyncio
 import os
 import time
 import wave
+from collections.abc import Iterator
 from pathlib import Path
 
 from app.core.config import get_settings
@@ -150,6 +151,36 @@ def transcribe(file_path: str, language: str | None = None) -> str:
         text = " ".join(segment.text.strip() for segment in segments).strip()
         logger.info("Transcribed audio file=%s chars=%s (cpu retry)", file_path, len(text))
         return text
+
+
+def transcribe_segments(file_path: str, language: str | None = None) -> Iterator[str]:
+    """Yield each whisper segment's text as it is decoded (lazy iterator).
+
+    Run inside asyncio.to_thread — whisper decode is CPU-bound.
+    """
+    model = _get_whisper_model()
+    try:
+        segments, _ = model.transcribe(file_path, language=language)
+        for segment in segments:
+            text = segment.text.strip()
+            if text:
+                yield text
+    except RuntimeError as exc:
+        settings = get_settings()
+        msg = str(exc).lower()
+        is_cuda_issue = "libcublas" in msg or "cuda" in msg or "cudnn" in msg
+        if not (is_cuda_issue and settings.whisper_allow_cpu_fallback):
+            raise
+        logger.exception(
+            "Whisper CUDA failure in transcribe_segments, retrying on CPU file=%s",
+            file_path,
+        )
+        _reset_whisper_model_to_cpu()
+        segments, _ = _whisper_model.transcribe(file_path, language=language)
+        for segment in segments:
+            text = segment.text.strip()
+            if text:
+                yield text
 
 
 def _write_fallback_silence_wav(output_path: str, seconds: float = 1.0) -> None:

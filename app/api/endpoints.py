@@ -4,6 +4,8 @@ import asyncio
 import json
 import re
 import tempfile
+import uuid as _uuid
+from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,11 +20,11 @@ from fastapi import (
     HTTPException,
     UploadFile,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import TenantContext, get_tenant_context
+from app.api.dependencies import TenantContext, get_stream_token_context, get_tenant_context
 from app.api.models import (
     BaseResponse,
     ChatCreate,
@@ -35,9 +37,10 @@ from app.api.models import (
     SearchRequest,
     UserChatsResponse,
 )
-from app.core.audio import transcribe
+from app.core.audio import transcribe, transcribe_segments
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.engine.events import StreamEvent
 from app.engine.pipeline import process_input_core
 from app.engine.rag import get_rag_service
 from app.services import chat_service
@@ -309,6 +312,195 @@ async def process_input(
         )
 
     return BaseResponse(success=True, response=response)
+
+
+@router.post("/process-input/stream")
+async def process_input_stream(
+    payload: ProcessInputRequest,
+    background_tasks: BackgroundTasks,
+    ctx: TenantContext = Depends(get_stream_token_context),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    queue: asyncio.Queue[StreamEvent | None] = asyncio.Queue()
+
+    async def emit(event: StreamEvent) -> None:
+        await queue.put(event)
+
+    async def run_pipeline() -> None:
+        try:
+            await process_input_core(
+                db=db,
+                ctx=ctx,
+                payload=payload,
+                background_tasks=background_tasks,
+                emit=emit,
+            )
+        except Exception:
+            logger.exception(
+                "Stream pipeline error tenant=%s user=%s",
+                ctx["tenant_id"],
+                ctx["user_id"],
+            )
+            await queue.put(StreamEvent(
+                "error",
+                {"status": 500, "message_to_user": "Nastala chyba při zpracování požadavku."},
+            ))
+        finally:
+            await queue.put(None)
+
+    task = asyncio.create_task(run_pipeline())
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield "event: ping\ndata: {}\n\n"
+                    continue
+                if event is None:
+                    break
+                yield event.to_sse()
+                if event.type in ("result", "error"):
+                    break
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/process-audio/stream")
+async def process_audio_stream(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    chat_id: str | None = Form(None),
+    context: str | None = Form(None),
+    user_locale: str | None = Form("cs"),
+    return_voice: bool = Form(False),
+    x_chat_id: str | None = Header(default=None, alias="X-Chat-Id"),
+    ctx: TenantContext = Depends(get_stream_token_context),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    effective_chat_id = x_chat_id or chat_id
+    parsed_context: dict[str, Any] | None = None
+    if context:
+        normalized_context = context.strip()
+        if normalized_context.lower() not in {"null", "undefined", "[object object]"}:
+            try:
+                parsed_context = json.loads(normalized_context)
+                if not isinstance(parsed_context, dict):
+                    raise ValueError("context must be a JSON object")
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid context JSON: {exc}")
+
+    suffix = Path(file.filename or "upload.webm").suffix or ".webm"
+    raw_bytes = await file.read()
+
+    queue: asyncio.Queue[StreamEvent | None] = asyncio.Queue()
+
+    async def emit(event: StreamEvent) -> None:
+        await queue.put(event)
+
+    async def run_audio_pipeline() -> None:
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(raw_bytes)
+                tmp_path = tmp.name
+
+            full_text_parts: list[str] = []
+            seg_index = 0
+            loop = asyncio.get_event_loop()
+
+            def iter_segments() -> None:
+                nonlocal seg_index
+                for seg_text in transcribe_segments(tmp_path, language=user_locale):
+                    full_text_parts.append(seg_text)
+                    asyncio.run_coroutine_threadsafe(
+                        emit(StreamEvent(
+                            "transcription.partial",
+                            {"text": seg_text, "segment_index": seg_index},
+                        )),
+                        loop,
+                    )
+                    seg_index += 1
+
+            await asyncio.to_thread(iter_segments)
+            input_text = " ".join(full_text_parts).strip()
+            await emit(StreamEvent("transcription.done", {"text": input_text}))
+
+            process_payload = ProcessInputRequest(
+                input_text=input_text,
+                chat_id=effective_chat_id,
+                context=parsed_context,
+                return_voice=return_voice,
+            )
+            await process_input_core(
+                db=db,
+                ctx=ctx,
+                payload=process_payload,
+                background_tasks=background_tasks,
+                emit=emit,
+            )
+        except Exception:
+            logger.exception(
+                "Stream audio pipeline error tenant=%s user=%s",
+                ctx["tenant_id"],
+                ctx["user_id"],
+            )
+            await queue.put(StreamEvent(
+                "error",
+                {"status": 500, "message_to_user": "Nastala chyba při zpracování audia."},
+            ))
+        finally:
+            if tmp_path:
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            await queue.put(None)
+
+    task = asyncio.create_task(run_audio_pipeline())
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield "event: ping\ndata: {}\n\n"
+                    continue
+                if event is None:
+                    break
+                yield event.to_sse()
+                if event.type in ("result", "error"):
+                    break
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/crm/events/record-created/", response_model=BaseResponse)

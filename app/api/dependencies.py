@@ -52,3 +52,40 @@ async def get_tenant_context(
     await tenant_manager.assert_user_access(tenant_id=x_tenant, user_id=x_user_id)
 
     return {"tenant_id": x_tenant, "user_id": x_user_id, "user_name": x_user_name}
+
+
+async def get_stream_token_context(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_tenant: str | None = Header(default=None, alias="X-Tenant"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    x_user_name: str | None = Header(default=None, alias="X-User-Name"),
+    db: AsyncSession = Depends(get_db),
+) -> TenantContext:
+    """Auth dependency for stream endpoints. Accepts Bearer stream tokens.
+    Falls back to plain X-Tenant/X-User-Id headers when require_hmac is False (dev)."""
+    settings = get_settings()
+    auth_value = authorization or ""
+
+    if auth_value.lower().startswith("bearer "):
+        token = auth_value[len("bearer "):].strip()
+        try:
+            from app.core.stream_token import validate_stream_token
+            identity = validate_stream_token(token, hmac_keys=settings.hmac_keys)
+        except ValueError as exc:
+            raise HTTPException(status_code=401, detail=f"Invalid stream token: {exc}")
+        tenant_id = identity["tenant"]
+        user_id = identity["user_id"]
+        user_name = identity["user_name"] or None
+    elif x_tenant and x_user_id and not settings.require_hmac:
+        tenant_id = x_tenant
+        user_id = x_user_id
+        user_name = x_user_name
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail="Authorization: Bearer <stream-token> required",
+        )
+
+    tenant_manager = TenantManager(db)
+    await tenant_manager.assert_user_access(tenant_id=tenant_id, user_id=user_id)
+    return {"tenant_id": tenant_id, "user_id": user_id, "user_name": user_name}

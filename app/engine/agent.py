@@ -8,6 +8,8 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.core.config import get_settings
+from app.engine.answer_stream import AnswerStreamState
+from app.engine.events import EmitFn, StreamEvent, tool_label_cz
 from app.engine.llm import get_chat_llm
 from app.utils.text import format_european_dates, strip_answer_tags, strip_think_tags
 from app.core.logging import (
@@ -208,6 +210,7 @@ async def run_agent(
     context: dict[str, Any] | None,
     tools: list,
     chat_history: list[dict[str, str]] | None = None,
+    emit: EmitFn | None = None,
 ) -> dict[str, Any]:
     log_llm_step(
         logger,
@@ -220,6 +223,10 @@ async def run_agent(
         },
     )
     log_llm_step(logger, LLM_STEP_AGENT_ACTION, {"event": "agent_execution_started"})
+    seq = 0
+    if emit:
+        seq += 1
+        await emit(StreamEvent("agent.started", {"iteration_limit": 6}, seq=seq))
 
     settings = get_settings()
     # No bind_tools — LiteLLM strips tool parameter schemas when forwarding to Ollama,
@@ -265,12 +272,27 @@ async def run_agent(
     # tool-call loops when the LLM fails to emit a final answer.
     for iteration in range(6):
         try:
-            response: AIMessage = await llm.ainvoke(messages)
+            if emit:
+                _stream_state = AnswerStreamState()
+                _raw_parts: list[str] = []
+                async for _chunk in llm.astream(messages):
+                    _chunk_text = str(getattr(_chunk, "content", "") or "")
+                    _raw_parts.append(_chunk_text)
+                    _delta = _stream_state.feed(_chunk_text)
+                    if _delta:
+                        seq += 1
+                        await emit(StreamEvent("answer.delta", {"text": _delta}, seq=seq))
+                _tail = _stream_state.flush()
+                if _tail and not _stream_state.is_suppressed:
+                    seq += 1
+                    await emit(StreamEvent("answer.delta", {"text": _tail}, seq=seq))
+                raw_content = "".join(_raw_parts)
+            else:
+                response: AIMessage = await llm.ainvoke(messages)
+                raw_content = str(getattr(response, "content", "") or "")
         except Exception as exc:
             logger.warning("tenant=%s LLM call failed at iteration=%d: %s", tenant_id, iteration, exc)
             break
-
-        raw_content = str(getattr(response, "content", "") or "")
         content = strip_think_tags(raw_content)
 
         if not content:
@@ -305,6 +327,13 @@ async def run_agent(
                 t_args["data_json"] = _sanitize_data_json_string(t_args["data_json"])
 
             log_llm_step(logger, LLM_STEP_AGENT_ACTION, {"tool": t_name, "tool_input": t_args})
+            if emit:
+                seq += 1
+                await emit(StreamEvent(
+                    "agent.tool_call",
+                    {"seq": seq, "tool": t_name, "label_cz": tool_label_cz(t_name, t_args)},
+                    seq=seq,
+                ))
 
             tool_obj = tools_by_name.get(t_name)
             if tool_obj is None:
@@ -316,6 +345,18 @@ async def run_agent(
                     t_result = json.dumps({"error": str(exc)}, ensure_ascii=False)
 
             log_llm_step(logger, LLM_STEP_TOOL_RESULT, {"tool": t_name, "observation": t_result})
+            if emit:
+                seq += 1
+                try:
+                    _obs_for_status = json.loads(t_result) if isinstance(t_result, str) else t_result
+                    _status = str((_obs_for_status or {}).get("status", "ok")) if isinstance(_obs_for_status, dict) else "ok"
+                except Exception:
+                    _status = "ok"
+                await emit(StreamEvent(
+                    "agent.tool_result",
+                    {"seq": seq, "tool": t_name, "status": _status},
+                    seq=seq,
+                ))
             intermediate_steps.append({"tool": t_name, "tool_input": t_args, "observation": t_result, "log": None})
 
             # Detect confirmation_required and force an immediate answer — no more tool calls.
@@ -362,6 +403,10 @@ async def run_agent(
                 final_answer = str(last_obs)[:500]
 
     final_answer = _normalize_final_answer_text(final_answer)
+
+    if emit and final_answer:
+        seq += 1
+        await emit(StreamEvent("answer.done", {"text": final_answer}, seq=seq))
 
     if not final_answer:
         logger.warning("tenant=%s Agent returned empty output after %d steps", tenant_id, len(intermediate_steps))

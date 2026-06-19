@@ -27,6 +27,7 @@ from app.core.audio import synthesize_to_file
 from app.core.config import get_settings
 from app.core.logging import get_logger, log_llm_trace
 from app.engine.agent import run_agent
+from app.engine.events import EmitFn, StreamEvent
 from app.engine.pending_patch import try_patch_pending_action
 from app.engine.quick_actions import QuickActionResult, try_handle_quick_action
 from app.engine.rag import get_rag_service
@@ -339,6 +340,7 @@ async def process_input_core(
     ctx: TenantContext,
     payload: ProcessInputRequest,
     background_tasks: BackgroundTasks,
+    emit: EmitFn | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     tenant_id = ctx["tenant_id"]
@@ -363,6 +365,9 @@ async def process_input_core(
         )
     else:
         chat = await chat_service.create_chat(db, tenant_id=tenant_id, user_id=user_id, persist=False)
+
+    if emit:
+        await emit(StreamEvent("accepted", {"chat_id": str(chat.id)}))
 
     latest_pending_action = await chat_service.load_latest_pending_action(
         db,
@@ -442,6 +447,8 @@ async def process_input_core(
             agent_result = quick_result.data
         else:
             execution_mode = "agent"
+            if emit:
+                await emit(StreamEvent("pipeline.mode", {"mode": execution_mode}))
             tools = build_tools(
                 tenant_id=tenant_id,
                 user_id=user_id,
@@ -471,6 +478,7 @@ async def process_input_core(
                     context=request_context,
                     tools=tools,
                     chat_history=recent_history_for_agent,
+                    emit=emit,
                 )
                 agent_result = normalize_agent_result_for_ui(agent_result)
             except Exception as exc:
@@ -575,7 +583,7 @@ async def process_input_core(
         chat_history=chat_history_dump,
     )
 
-    return {
+    result_payload = {
         "action_result": agent_result,
         "message_to_user": assistant_text,
         "chat_id": chat.id,
@@ -588,3 +596,9 @@ async def process_input_core(
         "tenant_id": tenant_id,
         "user_id": user_id,
     }
+    if emit:
+        await emit(StreamEvent("result", {
+            **result_payload,
+            "chat_id": str(chat.id),
+        }))
+    return result_payload
