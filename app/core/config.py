@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     log_file_enabled: bool = False
     log_file_path: str = "./logs/talk2crm.log"
     log_file_format: str = "json"
+    crm_wire_log_enabled: bool = True
+    crm_wire_log_path: str = "./logs/crm_wire.log"
+    crm_wire_log_format: str = "pretty"
     log_trace_enabled: bool = True
     log_trace_max_chars: int = 1200
     log_trace_history_messages: int = 10
@@ -83,6 +86,7 @@ class Settings(BaseSettings):
     temporal_v2_enabled: bool = True
     read_service_v2_enabled: bool = True
     write_service_v2_enabled: bool = True
+    aggregate_tools_enabled: bool = True
 
     # Resolver thresholds stay config-driven until calibrated from runtime telemetry.
     resolver_read_confidence_threshold: float = 0.70

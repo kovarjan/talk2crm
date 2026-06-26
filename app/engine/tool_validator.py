@@ -77,6 +77,26 @@ class GetCompanyOverviewToolArgs(BaseModel):
     account_id: str
 
 
+class CrmAggregateToolArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    module: str
+    operation: str
+    metric: str = "amount"
+    account_id: str | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    date_field: str = "date_issued"
+    statuses: list[str] | None = None
+    exclude_cancelled: bool = True
+    assigned_user_id: str | None = None
+
+
+class MathToolArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    numbers: list[float]
+    operation: str
+
+
 
 def _is_valid_crm_id(value: Any) -> bool:
     return bool(_CRM_ID_RE.match(_safe_text(value)))

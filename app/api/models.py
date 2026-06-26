@@ -72,3 +72,9 @@ class ChatReplaceRequest(BaseModel):
     chat_id: str
     history: list[ChatMessageItem] = Field(default_factory=list)
     name: str | None = None
+
+
+class GenerateRequest(BaseModel):
+    prompt: str
+    system_prompt: str | None = None
+    max_tokens: int | None = None

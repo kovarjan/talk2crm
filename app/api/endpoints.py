@@ -32,6 +32,7 @@ from app.api.models import (
     ChatReplaceRequest,
     CrmRecordCreatedEventRequest,
     CreateChatResponse,
+    GenerateRequest,
     ProcessInputRequest,
     RagIngestRequest,
     SearchRequest,
@@ -41,7 +42,9 @@ from app.core.audio import transcribe, transcribe_segments
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.engine.events import StreamEvent
+from app.engine.llm import get_chat_llm
 from app.engine.pipeline import process_input_core
+from langchain_core.messages import HumanMessage, SystemMessage
 from app.engine.rag import get_rag_service
 from app.services import chat_service
 from app.services.chat_titles import fallback_chat_name
@@ -124,6 +127,39 @@ async def health_check() -> BaseResponse:
 @router.get("/ping/", response_model=BaseResponse)
 async def ping() -> BaseResponse:
     return BaseResponse(success=True, response={"status": "ok"})
+
+
+@router.post("/generate/", response_model=BaseResponse)
+async def generate(
+    payload: GenerateRequest,
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> BaseResponse:
+    """Direct LLM call — no agent harness, no tools, no chat history.
+    Intended for automation and simple text generation where the caller
+    supplies all context in the prompts."""
+    settings = get_settings()
+    llm = get_chat_llm(
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
+        temperature=settings.llm_temperature,
+        max_tokens=payload.max_tokens or 2048,
+    )
+    messages: list = []
+    if payload.system_prompt:
+        messages.append(SystemMessage(content=payload.system_prompt))
+    messages.append(HumanMessage(content=payload.prompt))
+
+    result = await llm.ainvoke(messages)
+    text = result.content if hasattr(result, "content") else str(result)
+
+    logger.debug(
+        "generate tenant=%s user=%s chars=%d",
+        ctx["tenant_id"],
+        ctx["user_id"],
+        len(str(text)),
+    )
+    return BaseResponse(success=True, response={"text": str(text)})
 
 
 @router.post("/chats/", response_model=CreateChatResponse)

@@ -21,6 +21,7 @@ from app.utils.modules import canonical_module_name
 
 
 logger = get_logger(__name__)
+crm_wire_logger = get_logger("app.crm_wire")
 
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -172,6 +173,68 @@ class CoripoClient:
         return headers
 
     @staticmethod
+    def _redact_headers(headers: dict[str, str]) -> dict[str, str]:
+        redacted: dict[str, str] = {}
+        for key, value in headers.items():
+            key_lower = key.lower()
+            if key_lower in {"authorization", "sid", "cookie", "set-cookie"}:
+                redacted[key] = "<redacted>"
+                continue
+            if key_lower == "x-nonce":
+                redacted[key] = "<redacted>"
+                continue
+            redacted[key] = value
+        return redacted
+
+    @staticmethod
+    def _response_body_preview(response: httpx.Response) -> Any:
+        try:
+            return CoripoClient._decode_response(response)
+        except Exception:
+            return {"raw": response.text}
+
+    def _log_crm_wire_event(
+        self,
+        *,
+        event: str,
+        method: str,
+        url: str,
+        path: str,
+        params: dict[str, Any] | None,
+        headers: dict[str, str],
+        json_body: dict[str, Any] | None,
+        response: httpx.Response | None = None,
+        response_body: Any = None,
+        duration_ms: float | None = None,
+        attempt: int = 1,
+        require_sid: bool,
+        error: str | None = None,
+    ) -> None:
+        crm_wire_logger.info(
+            event,
+            extra={
+                "crm_http": {
+                    "event": event,
+                    "attempt": attempt,
+                    "method": method,
+                    "url": url,
+                    "path": path,
+                    "params": params or {},
+                    "headers": self._redact_headers(headers),
+                    "json_body": json_body,
+                    "require_sid": require_sid,
+                    "status_code": response.status_code if response is not None else None,
+                    "response_headers": (
+                        self._redact_headers(dict(response.headers)) if response is not None else {}
+                    ),
+                    "response_body": response_body,
+                    "duration_ms": round(duration_ms, 2) if duration_ms is not None else None,
+                    "error": error,
+                }
+            },
+        )
+
+    @staticmethod
     def _decode_response(response: httpx.Response) -> dict[str, Any]:
         if not response.content:
             return {}
@@ -320,24 +383,72 @@ class CoripoClient:
             ).encode("utf-8")
 
         url = f"{self._coripo_api_base()}/{path.lstrip('/')}"
+        attempt = 0
 
-        async def _send() -> httpx.Response:
+        async def _send() -> tuple[httpx.Response, Any]:
+            nonlocal attempt
+            attempt += 1
             headers: dict[str, str] = {"Accept": "application/json"}
             if self._coripo_session_id:
                 headers["sid"] = self._coripo_session_id
             if json_body is not None:
                 headers["Content-Type"] = "application/json"
             headers.update(self._build_coripo_hmac_headers(body_bytes))
-            return await get_shared_http_client().request(
+            self._log_crm_wire_event(
+                event="crm_http_request",
                 method=method,
                 url=url,
-                headers=headers,
+                path=path,
                 params=params,
-                content=body_bytes if json_body is not None else None,
-                timeout=self.timeout,
+                headers=headers,
+                json_body=json_body,
+                attempt=attempt,
+                require_sid=require_sid,
             )
+            started_at = time.perf_counter()
+            try:
+                response = await get_shared_http_client().request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    params=params,
+                    content=body_bytes if json_body is not None else None,
+                    timeout=self.timeout,
+                )
+            except Exception as exc:
+                self._log_crm_wire_event(
+                    event="crm_http_error",
+                    method=method,
+                    url=url,
+                    path=path,
+                    params=params,
+                    headers=headers,
+                    json_body=json_body,
+                    duration_ms=(time.perf_counter() - started_at) * 1000.0,
+                    attempt=attempt,
+                    require_sid=require_sid,
+                    error=str(exc),
+                )
+                raise
 
-        response = await _send()
+            response_body = self._response_body_preview(response)
+            self._log_crm_wire_event(
+                event="crm_http_response",
+                method=method,
+                url=url,
+                path=path,
+                params=params,
+                headers=headers,
+                json_body=json_body,
+                response=response,
+                response_body=response_body,
+                duration_ms=(time.perf_counter() - started_at) * 1000.0,
+                attempt=attempt,
+                require_sid=require_sid,
+            )
+            return response, response_body
+
+        response, decoded = await _send()
 
         if (
             response.status_code in {401, 403}
@@ -349,7 +460,7 @@ class CoripoClient:
             # Drop it and retry once with a freshly negotiated session.
             self._invalidate_cached_sid()
             await self._ensure_coripo_sid()
-            response = await _send()
+            response, decoded = await _send()
 
         if response.status_code >= 400:
             logger.error(
@@ -361,6 +472,8 @@ class CoripoClient:
             )
             response.raise_for_status()
 
+        if isinstance(decoded, dict):
+            return decoded
         return self._decode_response(response)
 
     @staticmethod

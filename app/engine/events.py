@@ -23,6 +23,8 @@ _TOOL_LABELS: dict[str, Callable[[dict[str, Any]], str]] = {
     "crm_action_tool":      lambda _: "Připravuji akci v CRM…",
     "my_meetings_tool":     lambda _: "Načítám schůzky…",
     "get_company_overview": lambda _: "Načítám detail firmy…",
+    "crm_aggregate_tool":   lambda _: "Počítám agregaci v CRM…",
+    "math_tool":            lambda _: "Počítám výsledek…",
 }
 
 

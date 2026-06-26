@@ -99,11 +99,26 @@ def _format_recent_history(chat_history: list[dict[str, str]] | None, *, limit: 
     return "\n".join(lines)
 
 
-def _build_system_prompt(tenant_id: str) -> str:
+def _build_system_prompt(tenant_id: str, tool_names: set[str]) -> str:
     now = datetime.now()
     date_ctx = _build_date_context(now)
     prefix = get_settings().llm_system_prompt_prefix
     prefix_block = f"{prefix}\n" if prefix else ""
+    aggregate_tool_block = ""
+    aggregate_rules = ""
+    if "crm_aggregate_tool" in tool_names:
+        aggregate_tool_block = """
+6. crm_aggregate_tool(module: str, operation: str, metric: str="amount", account_id: str|null=null, date_from: str|null=null, date_to: str|null=null, date_field: str="date_issued", statuses: list[str]|null=null, exclude_cancelled: bool=true)
+   — pro součty, průměry, minima, maxima a počty CRM záznamů.
+   — použij pro reporty nad fakturami, nabídkami a obchodními případy.
+   — moduly: invoices, invoice_items, quotes, quote_items, opportunities.
+
+7. math_tool(numbers: list[number], operation: str)
+   — matematika nad čísly zadanými přímo uživatelem, ne nad CRM daty.
+"""
+        aggregate_rules = """
+- Pro CRM reporty a finanční součty vždy použij crm_aggregate_tool; nepočítej je ručně z textu ani z výsledků crm_query_tool.
+"""
     return f"""{prefix_block}Jsi CRM asistent (muž) (tenant: {tenant_id}). Odpovídej česky. Stručně, bez markdown.
 Používej mužský rod v odpovědích (např. "našel jsem", "připravil jsem").
 Datum: {now.strftime("%Y-%m-%d")} ({now.strftime("%A")}). Rozsahy: {date_ctx}
@@ -144,12 +159,14 @@ DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
    — měna částek je uvedena v default_currency.iso4217, výchozí je vždy Kč (CZK) pokud není uvedeno jinak; platí i pro sloupec amount_usdollar.
    — related_records.Opportunities jsou obchodní případy (opportunities), NE nabídky (quotes).
    — používej pro detail firmy, když máš account_id.
+{aggregate_tool_block}
 
 FORMÁT ODPOVĚDI:
 - Pokud chceš zavolat nástroj: <tool_call>{{"name": "jmeno_nastroje", "args": {{"param": "hodnota"}}}}</tool_call>
 - Pokud máš finální odpověď pro uživatele: <answer>Tvá odpověď česky</answer>
 - Pokud uživatel nezadá dostatečně přesný dotaz, doptej se na upřesnění.
 - Zobrazuj uživateli jenom přeložené názvy modulů jako "Nabídky" ne "Quotes" ani "Nabídky (Quotes)" a podobně.
+{aggregate_rules}
 
 PRAVIDLA VÝBĚRU KONTAKTU/FIRMY:
 - Při výsledku z rag_search_tool vždy nejdřív posuď, zda jde o přesné shody, nebo jen podobné kandidáty.
@@ -241,7 +258,7 @@ async def run_agent(
     )
 
     tools_by_name: dict[str, Any] = {getattr(t, "name", ""): t for t in tools}
-    system_prompt = _build_system_prompt(tenant_id)
+    system_prompt = _build_system_prompt(tenant_id, set(tools_by_name))
     history_block = _format_recent_history(chat_history)
     if context:
         ui_focus_hint = str(context.get("ui_focus_hint_cz") or "").strip()

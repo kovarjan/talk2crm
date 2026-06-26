@@ -30,6 +30,7 @@ def _make_tools():
     with patch("app.engine.tools.get_settings") as mock_settings:
         mock_settings.return_value.crm_mode = "on"
         mock_settings.return_value.tool_call_logging = False
+        mock_settings.return_value.aggregate_tools_enabled = True
         return build_tools(
             tenant_id="test-tenant",
             user_id="user-1",

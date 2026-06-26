@@ -393,6 +393,53 @@ class PrettyFileFormatter(logging.Formatter):
         return "\n".join(rows)
 
 
+class CRMWirePrettyFormatter(logging.Formatter):
+    def __init__(self) -> None:
+        super().__init__("%(message)s", "%Y-%m-%d %H:%M:%S")
+
+    def format(self, record: logging.LogRecord) -> str:
+        line = (
+            f"{self.formatTime(record, self.datefmt)} {record.levelname:<8} "
+            f"{record.name} req={request_id_ctx.get()} {record.getMessage()}"
+        )
+        payload = getattr(record, "crm_http", None)
+        if not isinstance(payload, dict):
+            return line
+
+        rows = [line]
+        for key in (
+            "event",
+            "attempt",
+            "method",
+            "url",
+            "path",
+            "require_sid",
+            "status_code",
+            "duration_ms",
+            "error",
+        ):
+            value = payload.get(key)
+            if value in (None, "", [], {}):
+                continue
+            rows.append(f"  {key}: {value}")
+
+        rows.extend(self._format_block("params", payload.get("params")))
+        rows.extend(self._format_block("request_headers", payload.get("headers")))
+        rows.extend(self._format_block("request_json_body", payload.get("json_body")))
+        rows.extend(self._format_block("response_headers", payload.get("response_headers")))
+        rows.extend(self._format_block("response_body", payload.get("response_body")))
+        return "\n".join(rows)
+
+    def _format_block(self, label: str, value: Any) -> list[str]:
+        if value in (None, "", [], {}):
+            return []
+        rendered = _render_pretty_value(value, compact=False)
+        rows = [f"  {label}:"]
+        for line in rendered.splitlines():
+            rows.append(f"    {line}")
+        return rows
+
+
 def setup_logging(
     debug: bool = False,
     *,
@@ -401,6 +448,9 @@ def setup_logging(
     log_file_enabled: bool = False,
     log_file_path: str = "./logs/talk2crm.log",
     log_file_format: str = "json",
+    crm_wire_log_enabled: bool = True,
+    crm_wire_log_path: str = "./logs/crm_wire.log",
+    crm_wire_log_format: str = "json",
     log_trace_enabled: bool = True,
     log_trace_max_chars: int = 1200,
     log_trace_history_messages: int = 10,
@@ -443,19 +493,30 @@ def setup_logging(
     root.addHandler(console_handler)
 
     if log_file_enabled:
-        file_path = Path(log_file_path).expanduser()
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(file_path, encoding="utf-8")
-        if (log_file_format or "").strip().lower() == "pretty":
-            file_handler.setFormatter(
-                PrettyFileFormatter(
-                    max_chars=_TRACE_MAX_CHARS,
-                    history_messages=_TRACE_HISTORY_MESSAGES,
-                )
-            )
-        else:
-            file_handler.setFormatter(JsonFormatter())
+        file_handler = _build_file_handler(
+            path=log_file_path,
+            file_format=log_file_format,
+            max_chars=_TRACE_MAX_CHARS,
+            history_messages=_TRACE_HISTORY_MESSAGES,
+        )
         root.addHandler(file_handler)
+
+    crm_wire_logger = logging.getLogger("app.crm_wire")
+    crm_wire_logger.handlers.clear()
+    crm_wire_logger.propagate = False
+    crm_wire_logger.setLevel(logging.INFO)
+    if crm_wire_log_enabled:
+        crm_wire_logger.addHandler(
+            _build_file_handler(
+                path=crm_wire_log_path,
+                file_format=crm_wire_log_format,
+                max_chars=_TRACE_MAX_CHARS,
+                history_messages=_TRACE_HISTORY_MESSAGES,
+                wire=True,
+            )
+        )
+    else:
+        crm_wire_logger.addHandler(logging.NullHandler())
 
     # 1) Silence network noise
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -479,6 +540,31 @@ def setup_logging(
 
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
+
+
+def _build_file_handler(
+    *,
+    path: str,
+    file_format: str,
+    max_chars: int,
+    history_messages: int,
+    wire: bool = False,
+) -> logging.Handler:
+    file_path = Path(path).expanduser()
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(file_path, encoding="utf-8")
+    if wire and (file_format or "").strip().lower() == "pretty":
+        file_handler.setFormatter(CRMWirePrettyFormatter())
+    elif (file_format or "").strip().lower() == "pretty":
+        file_handler.setFormatter(
+            PrettyFileFormatter(
+                max_chars=max_chars,
+                history_messages=history_messages,
+            )
+        )
+    else:
+        file_handler.setFormatter(JsonFormatter())
+    return file_handler
 
 
 def summarize_chat_history(

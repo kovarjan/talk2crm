@@ -226,6 +226,7 @@ def build_filter(
     filters: list[FilterSpec] | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    date_field: str | None = None,
 ) -> dict[str, Any]:
     """
     Compose a Coripo filter dict from high-level parameters.
@@ -236,6 +237,7 @@ def build_filter(
         filters:  List of FilterSpec conditions (AND-ed together)
         date_from: ISO date "YYYY-MM-DD" (inclusive lower bound)
         date_to:   ISO date "YYYY-MM-DD" (inclusive upper bound)
+        date_field: explicit CRM date field override
 
     Returns:
         {"operator": "and", "operands": [...]} ready for the CRM API
@@ -249,11 +251,11 @@ def build_filter(
             "operands": [_make_operand("*", "cont", search)],
         })
 
-    date_field = _DATE_FIELD.get(module_lower, "date_entered")
+    resolved_date_field = (date_field or "").strip() or _DATE_FIELD.get(module_lower, "date_entered")
     if date_from:
-        operands.append(_make_operand(date_field, "moreThanInclude", date_from))
+        operands.append(_make_operand(resolved_date_field, "moreThanInclude", date_from))
     if date_to:
-        operands.append(_make_operand(date_field, "lessThanInclude", date_to))
+        operands.append(_make_operand(resolved_date_field, "lessThanInclude", date_to))
 
     account_id_aliases = {"account_id", "accounts.id", "accounts|id"}
 

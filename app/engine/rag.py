@@ -207,6 +207,7 @@ class TenantRAGService:
                     url=self.settings.qdrant_url,
                     api_key=self.settings.qdrant_api_key,
                     timeout=10.0,
+                    # check_compatibility=False,
                 )
             # Connectivity preflight to fail fast on first use.
             await remote.get_collections()

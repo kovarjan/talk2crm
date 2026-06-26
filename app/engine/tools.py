@@ -9,8 +9,10 @@ from langchain_core.tools import tool
 from app.utils.fuzzy import expand_fuzzy_token_variants, fuzzy_tokens, score_lexical_fuzzy
 from app.utils.text import normalize_text as _normalize_text, safe_text as _safe_text
 from app.core.config import get_settings
+from app.domain.aggregate_contracts import AggregateFilters, AggregateRequest
 from app.engine.rag import TenantRAGService
 from app.services.crm_read_service import CRMReadHelpers, CRMReadService
+from app.services.crm_aggregate_service import CRMAggregateService
 from app.services.crm_client import CoripoClient
 from app.services.crm_write_service import CRMWriteService
 from app.engine.filter_builder import (
@@ -21,9 +23,11 @@ from app.engine.filter_builder import (
 )
 from app.engine.tool_logger import ToolCallLogger
 from app.engine.tool_validator import (
+    CrmAggregateToolArgs,
     CrmActionToolArgs,
     CrmQueryToolArgs,
     GetCompanyOverviewToolArgs,
+    MathToolArgs,
     MyMeetingsToolArgs,
     RagSearchToolArgs,
     validate_crm_action_call,
@@ -348,6 +352,150 @@ def _infer_data_query_type(query: str, requested: str = "auto") -> str:
     return "generic_search"
 
 
+def _should_enable_aggregate_tools(input_text: str) -> bool:
+    normalized = _normalize_text(input_text)
+    aggregate_markers = (
+        "soucet",
+        "secti",
+        "sum",
+        "prumer",
+        "average",
+        "avg",
+        "minimum",
+        "maximum",
+        "median",
+        "pocet",
+        "count",
+        "kolik celkem",
+        "celkova hodnota",
+        "celkova castka",
+        "kolik je dohromady",
+        "report",
+        "reporting",
+        "obrat",
+        "trzby",
+    )
+    return any(marker in normalized for marker in aggregate_markers)
+
+
+def _build_crm_aggregate_tool(
+    *,
+    crm_read_service: CRMReadService,
+    settings: Any,
+    tenant_id: str,
+    user_id: str,
+):
+    @tool("crm_aggregate_tool", args_schema=CrmAggregateToolArgs)
+    async def crm_aggregate_tool(
+        module: str,
+        operation: str,
+        metric: str = "amount",
+        account_id: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        date_field: str = "date_issued",
+        statuses: list[str] | None = None,
+        exclude_cancelled: bool = True,
+        assigned_user_id: str | None = None,
+    ) -> str:
+        """
+        Deterministicky počítá agregace nad CRM obchodními a finančními záznamy.
+        Použij pro součty, průměry, minima, maxima a počty faktur, nabídek a obchodních případů.
+        """
+        if settings.crm_mode.lower() == "off":
+            return "CRM je vypnuté."
+
+        async with ToolCallLogger(
+            "crm_aggregate_tool",
+            tenant_id,
+            user_id,
+            inputs={
+                "module": module,
+                "operation": operation,
+                "metric": metric,
+                "account_id": account_id,
+                "date_from": date_from,
+                "date_to": date_to,
+                "date_field": date_field,
+                "statuses": statuses,
+                "exclude_cancelled": exclude_cancelled,
+                "assigned_user_id": assigned_user_id,
+            },
+        ) as tcl:
+            try:
+                request = AggregateRequest(
+                    module=module,
+                    operation=operation,
+                    metric=metric,
+                    filters=AggregateFilters(
+                        account_id=account_id,
+                        date_from=date_from,
+                        date_to=date_to,
+                        date_field=date_field,
+                        statuses=statuses,
+                        exclude_cancelled=exclude_cancelled,
+                        assigned_user_id=assigned_user_id,
+                    ),
+                )
+            except Exception as exc:
+                error_text = f"Neplatný požadavek: {exc}"
+                tcl.set_output({"status": "tool_validation_error", "message": error_text})
+                return error_text
+
+            result = await CRMAggregateService(crm_read_service).aggregate(request)
+            tcl.set_output(
+                {
+                    "success": result.success,
+                    "module": result.module,
+                    "operation": result.operation,
+                    "record_count": result.record_count,
+                }
+            )
+            return result.to_agent_string()
+
+    return crm_aggregate_tool
+
+
+def _build_math_tool():
+    @tool("math_tool", args_schema=MathToolArgs)
+    def math_tool(numbers: list[float], operation: str) -> str:
+        """
+        Počítá základní matematické agregace ze seznamu čísel zadaných přímo uživatelem.
+        Pro CRM data používej crm_aggregate_tool.
+        """
+        from decimal import Decimal
+        from statistics import median as _median
+
+        if not numbers:
+            return "Prázdný seznam čísel."
+
+        vals = [Decimal(str(number)) for number in numbers]
+        op = _safe_text(operation).lower()
+
+        if op == "sum":
+            result = sum(vals, Decimal("0"))
+        elif op == "avg":
+            result = sum(vals, Decimal("0")) / Decimal(len(vals))
+        elif op == "min":
+            result = min(vals)
+        elif op == "max":
+            result = max(vals)
+        elif op == "count":
+            return f"Počet: {len(vals)}"
+        elif op == "median":
+            result = Decimal(str(_median([float(value) for value in vals])))
+        else:
+            return (
+                f"Neznámá operace: {operation}. "
+                "Dostupné: sum, avg, min, max, count, median"
+            )
+
+        formatted = f"{result:,.2f}".replace(",", " ").replace(".", ",")
+        return f"{op.capitalize()}: {formatted}"
+
+    return math_tool
+
+
 def build_tools(
     *,
     tenant_id: str,
@@ -666,7 +814,7 @@ def build_tools(
                 tcl.set_output(error_payload)
                 return json.dumps(error_payload, ensure_ascii=False)
 
-            records = _extract_records(raw)
+            records = CRMReadService._normalize_records(_extract_records(raw))
             total = len(records)
             cards = _meeting_cards(records, total, force_table=True)
 
@@ -801,7 +949,7 @@ def build_tools(
                 tcl.set_output(error_payload)
                 return json.dumps(error_payload, ensure_ascii=False)
 
-            records = _extract_records(raw)
+            records = CRMReadService._normalize_records(_extract_records(raw))
 
             cards: list[dict] = []
             module_lower = module.strip().lower()
@@ -885,4 +1033,15 @@ def build_tools(
             tcl.set_output({"module": "Accounts", "related_modules": 0})
             return json.dumps(wrapped, ensure_ascii=False)
 
-    return [crm_action_tool, rag_search_tool, my_meetings_tool, crm_query_tool, get_company_overview]
+    tools = [crm_action_tool, rag_search_tool, my_meetings_tool, crm_query_tool, get_company_overview]
+    if settings.aggregate_tools_enabled and _should_enable_aggregate_tools(input_text):
+        tools.append(
+            _build_crm_aggregate_tool(
+                crm_read_service=read_service,
+                settings=settings,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
+        )
+        tools.append(_build_math_tool())
+    return tools

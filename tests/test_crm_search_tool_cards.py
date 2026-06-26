@@ -44,6 +44,7 @@ def test_crm_query_tool_returns_cards_and_summary_for_meetings() -> None:
     with patch("app.engine.tools.get_settings") as mock_settings:
         mock_settings.return_value.crm_mode = "on"
         mock_settings.return_value.tool_call_logging = False
+        mock_settings.return_value.aggregate_tools_enabled = True
         tools = build_tools(
             tenant_id="ai-local",
             user_id="1",

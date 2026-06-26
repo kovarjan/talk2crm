@@ -8,6 +8,7 @@ import httpx
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.engine.filter_builder import FilterSpec, build_filter, build_order
 from app.engine.rag import TenantRAGService
 from app.services.crm_client import CoripoClient
 
@@ -73,6 +74,30 @@ class CRMReadService:
         self.h = helpers
 
     @staticmethod
+    def _normalize_amount_field(record: dict[str, Any]) -> dict[str, Any]:
+        if "amount_usdollar" not in record:
+            return record
+
+        normalized = dict(record)
+        raw_value = normalized.pop("amount_usdollar")
+        normalized["_raw_amount_usdollar"] = raw_value
+
+        if "amount" not in normalized:
+            normalized["amount"] = raw_value
+
+        if "amount_currency" not in normalized:
+            normalized["amount_currency"] = "CZK"
+
+        return normalized
+
+    @classmethod
+    def _normalize_records(cls, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [cls._normalize_amount_field(row) for row in records if isinstance(row, dict)]
+
+    def _extract_records(self, payload: Any) -> list[dict[str, Any]]:
+        return self._normalize_records(self.h.extract_records(payload))
+
+    @staticmethod
     def _module_aliases(scope: str) -> set[str]:
         key = (scope or "").strip().lower()
         aliases = {
@@ -109,6 +134,69 @@ class CRMReadService:
     async def execute_structured_list(self, module: str, payload: dict[str, Any]) -> dict[str, Any]:
         data = dict(payload or {})
         return await self.crm_client.execute_module_action(module=module, action="list", data=data)
+
+    async def list_module(
+        self,
+        module: str,
+        *,
+        search: str | None = None,
+        filters: list[FilterSpec | dict[str, Any]] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        date_field: str | None = None,
+        order_by: str | None = None,
+        limit: int = 500,
+        fetch_all: bool = False,
+        response_fields: list[str] | None = None,
+        include_field_names: bool = False,
+    ) -> list[dict[str, Any]]:
+        total_limit = max(1, min(int(limit or 500), 10000 if fetch_all else 500))
+        page_size = min(total_limit, 500)
+        parsed_filters = [
+            item if isinstance(item, FilterSpec) else FilterSpec(**item)
+            for item in (filters or [])
+        ]
+        crm_filter = build_filter(
+            module=module,
+            search=search,
+            filters=parsed_filters,
+            date_from=date_from,
+            date_to=date_to,
+            date_field=date_field,
+        )
+        order = build_order(order_by)
+        records: list[dict[str, Any]] = []
+        offset = 0
+
+        while len(records) < total_limit:
+            remaining = total_limit - len(records)
+            payload: dict[str, Any] = {
+                "limit": min(page_size, remaining),
+                "offset": offset,
+                "filter": crm_filter,
+                "include_field_names": include_field_names,
+            }
+            if response_fields:
+                payload["response_fields"] = response_fields
+            if order:
+                payload["order"] = order
+
+            raw = await self.crm_client.execute_module_action(
+                module=module,
+                action="list",
+                data=payload,
+            )
+            batch = self._extract_records(raw)
+            if not batch:
+                break
+
+            records.extend(batch[:remaining])
+            fetched_count = int((raw or {}).get("source_record_count") or len(batch))
+            if not fetch_all or len(batch) < payload["limit"] or fetched_count < payload["limit"]:
+                break
+            offset += fetched_count
+
+        return records
 
     async def run_search(self, *, query: Any, scope: str = "all", limit: int = 20) -> dict[str, Any]:
         normalized_scope = self.h.safe_text(scope).lower() or "all"
@@ -186,7 +274,7 @@ class CRMReadService:
             result = await self.crm_client.generic_search(query=self.h.safe_text(query), scope=normalized_scope)
 
         if normalized_scope in module_map and isinstance(result, dict):
-            records = self._enforce_scope_purity(self.h.extract_records(result), normalized_scope)
+            records = self._enforce_scope_purity(self._extract_records(result), normalized_scope)
             if normalized_scope == "meetings":
                 ordered = self.h.sort_records_by_datetime(records, "date_start")
                 selected = self.h.dedupe_and_limit(ordered, safe_limit)
@@ -312,7 +400,7 @@ class CRMReadService:
                         ],
                     },
                 )
-                all_records = self.h.extract_records(result)
+                all_records = self._extract_records(result)
 
                 selected: list[dict[str, Any]] = []
                 for row in all_records:
@@ -399,8 +487,8 @@ class CRMReadService:
                 search_result = await self.crm_client.generic_search(query=person_name, scope="contacts")
                 all_records = self.h.merge_records_by_id(
                     rag_candidates,
-                    self.h.filter_valid_contact_records(self.h.extract_records(list_result)),
-                    self.h.filter_valid_contact_records(self.h.extract_records(search_result)),
+                    self.h.filter_valid_contact_records(self._extract_records(list_result)),
+                    self.h.filter_valid_contact_records(self._extract_records(search_result)),
                 )
                 all_records = self._enforce_scope_purity(all_records, "contacts")
                 match = self.h.best_record_match(all_records, person_name)
@@ -454,7 +542,7 @@ class CRMReadService:
                                 "response_fields": ["id", "name", "account_name", "billing_address_city"],
                             },
                         )
-                        resolved_accounts = self.h.extract_records(accounts_by_id)
+                        resolved_accounts = self._extract_records(accounts_by_id)
                     except Exception:
                         resolved_accounts = [{"id": row_id} for row_id in account_ids]
                 else:
@@ -471,7 +559,7 @@ class CRMReadService:
                                 "response_fields": ["id", "name", "account_name", "billing_address_city"],
                             },
                         )
-                        crm_account_candidates = self.h.extract_records(accounts_list_result)
+                        crm_account_candidates = self._extract_records(accounts_list_result)
                         resolved_accounts = self.h.select_account_candidates(company_name, crm_account_candidates, 5, 65)
 
                     account_ids = [
@@ -520,7 +608,7 @@ class CRMReadService:
                             ],
                         },
                     )
-                    relation_contacts = self.h.filter_valid_contact_records(self.h.extract_records(contacts_relation_result))
+                    relation_contacts = self.h.filter_valid_contact_records(self._extract_records(contacts_relation_result))
 
                 contacts: list[dict[str, Any]]
                 used_relation_filter = bool(account_ids)
@@ -550,8 +638,8 @@ class CRMReadService:
                     )
                     contacts_search_result = await self.crm_client.generic_search(query=company_name, scope="contacts")
                     contacts = self.h.merge_records_by_id(
-                        self.h.filter_valid_contact_records(self.h.extract_records(contacts_list_result)),
-                        self.h.filter_valid_contact_records(self.h.extract_records(contacts_search_result)),
+                        self.h.filter_valid_contact_records(self._extract_records(contacts_list_result)),
+                        self.h.filter_valid_contact_records(self._extract_records(contacts_search_result)),
                     )
 
                 contacts = self._enforce_scope_purity(contacts, "contacts")
@@ -636,7 +724,7 @@ class CRMReadService:
                 }
                 for module_key, payload in aggregate.items():
                     module_name = module_map.get(str(module_key).lower(), str(module_key))
-                    for row in self.h.extract_records(payload):
+                    for row in self._extract_records(payload):
                         row["_module_hint"] = module_name
                         merged.append(row)
             merged = self.h.dedupe_and_limit(merged, safe_limit)
