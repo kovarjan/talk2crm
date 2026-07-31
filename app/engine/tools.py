@@ -7,6 +7,7 @@ from typing import Any
 from langchain_core.tools import tool
 
 from app.utils.fuzzy import expand_fuzzy_token_variants, fuzzy_tokens, score_lexical_fuzzy
+from app.utils.modules import canonical_module_name
 from app.utils.text import normalize_text as _normalize_text, safe_text as _safe_text
 from app.core.config import get_settings
 from app.domain.aggregate_contracts import AggregateFilters, AggregateRequest
@@ -857,6 +858,10 @@ def build_tools(
         if settings.crm_mode.lower() == "off":
             return json.dumps({"status": "crm-disabled",
                                "message_to_user": "CRM je vypnuté."}, ensure_ascii=False)
+
+        # Resolve LLM-friendly aliases (orders → acm_orders, quote_lines →
+        # Products) before validation and filter building.
+        module = canonical_module_name(module) or module
 
         async with ToolCallLogger(
             "crm_query_tool", tenant_id, user_id,

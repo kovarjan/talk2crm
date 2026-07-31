@@ -59,6 +59,7 @@ _DATE_FIELD: dict[str, str] = {
     "opportunites": "date_closed",
     "quotes": "date_quote_expected_closed",
     "acm_invoices": "datum_vystaveni",
+    "acm_orders": "datum_vystaveni",
 }
 
 _ACTIVITY_MODULES = {"meetings", "calls", "tasks", "notes"}
@@ -111,6 +112,18 @@ _MODULE_ACCOUNT_RELATION_ALIASES: dict[str, tuple[str, str]] = {
     "opportunites": ("Opportunities", "accounts"),
     "quotes": ("Quotes", "billing_accounts"),
     "acm_invoices": ("acm_invoices", "acm_invoices_accounts"),
+    "acm_orders": ("acm_orders", "acm_orders_accounts"),
+}
+
+# Line-item modules filtered by their parent document id (LLM-friendly alias →
+# link-field relation on the lines module). Products (quote lines) need no
+# entry: quote_id is a direct db column there.
+_MODULE_PARENT_RELATION_ALIASES: dict[str, tuple[set[str], str, str]] = {
+    "acm_orders_lines": (
+        {"order_id", "acm_orders.id", "acm_orders|id", "orders.id", "orders|id"},
+        "acm_orders_lines",
+        "acm_orders_acm_orders_lines",
+    ),
 }
 
 
@@ -279,6 +292,11 @@ def build_filter(
             continue
         if field_lower in account_id_aliases and module_lower in _MODULE_ACCOUNT_RELATION_ALIASES:
             relation_module, relationship = _MODULE_ACCOUNT_RELATION_ALIASES[module_lower]
+            operands.append(_make_module_account_relation_operand(relation_module, relationship, coripo_op, spec.value))
+            continue
+        parent_relation = _MODULE_PARENT_RELATION_ALIASES.get(module_lower)
+        if parent_relation and field_lower in parent_relation[0]:
+            _, relation_module, relationship = parent_relation
             operands.append(_make_module_account_relation_operand(relation_module, relationship, coripo_op, spec.value))
             continue
         operands.append(_make_operand(field_name, coripo_op, spec.value))

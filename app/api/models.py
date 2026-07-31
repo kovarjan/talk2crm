@@ -78,3 +78,10 @@ class GenerateRequest(BaseModel):
     prompt: str
     system_prompt: str | None = None
     max_tokens: int | None = None
+
+
+class RecommendActionsRequest(BaseModel):
+    module: str
+    record_id: str
+    text: str
+    context: dict[str, Any] | None = None

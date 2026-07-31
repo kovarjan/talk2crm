@@ -23,6 +23,9 @@ _READ_MODULES = {
     "opportunites",
     "quotes",
     "acm_invoices",
+    "acm_orders",
+    "acm_orders_lines",
+    "products",
 }
 _RAG_MODULES = {
     "",

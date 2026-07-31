@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
+from app.domain.skill_contracts import BaseSkillInfo, RuntimeSkillContext
 from app.engine.answer_stream import AnswerStreamState
+from app.engine.base_skills import BASE_SKILLS
 from app.engine.events import EmitFn, StreamEvent, tool_label_cz
 from app.engine.llm import get_chat_llm
 from app.utils.text import format_european_dates, strip_answer_tags, strip_think_tags
@@ -80,23 +84,32 @@ def _sanitize_data_json_string(value: str) -> str:
         return value
 
 
-def _format_recent_history(chat_history: list[dict[str, str]] | None, *, limit: int = 10) -> str:
+def _history_to_messages(
+    chat_history: list[dict[str, str]] | None, *, limit: int = 20
+) -> list[Any]:
+    """
+    Converts stored chat history into real alternating chat turns.
+    Small models attend to structured turns far better than to a transcript
+    embedded in the user message, which is critical for multi-turn reference
+    resolution ("ten kód", "ta firma", ...).
+    """
     if not chat_history:
-        return ""
-    lines: list[str] = []
+        return []
+    messages: list[Any] = []
     for item in chat_history[-limit:]:
         if not isinstance(item, dict):
             continue
         role = str(item.get("role") or "").strip().lower()
-        content = str(item.get("content") or "").strip().replace("\n", " ")
+        content = str(item.get("content") or "").strip()
         if not content:
             continue
         if len(content) > 1500:
             content = content[:1500].rstrip() + "..."
-        if role not in {"user", "assistant", "system"}:
-            role = "user"
-        lines.append(f"{role}: {content}")
-    return "\n".join(lines)
+        if role == "assistant":
+            messages.append(AIMessage(content=content))
+        else:
+            messages.append(HumanMessage(content=content))
+    return messages
 
 
 def _build_system_prompt(tenant_id: str, tool_names: set[str]) -> str:
@@ -123,9 +136,12 @@ def _build_system_prompt(tenant_id: str, tool_names: set[str]) -> str:
 Používej mužský rod v odpovědích (např. "našel jsem", "připravil jsem").
 Datum: {now.strftime("%Y-%m-%d")} ({now.strftime("%A")}). Rozsahy: {date_ctx}
 
-PRAVIDLO: Vždy zavolej nástroj. Nikdy neodpovídej z paměti.
-PRAVIDLO: Data do crm_action_tool musí vycházet pouze z aktuálního vstupu, KONVERZAČNÍ HISTORIE a výsledků nástrojů. Nikdy necopy-paste hodnoty z ukázek.
+PRAVIDLO: Pro CRM data vždy zavolej nástroj — o obsahu CRM neodpovídej z paměti modelu.
+  VÝJIMKA: Pokud je odpověď už v předchozích zprávách konverzace nebo v pending_action (např. "jaký byl ten kód?", "jak se jmenovala ta firma?"), odpověz rovnou <answer> bez volání nástroje.
+PRAVIDLO: crm_action_tool volej POUZE když uživatel žádá vytvoření, úpravu nebo smazání záznamu. Otázky ("jednali jsme...?", "kolik...?", "jaký byl...?") jsou ČTECÍ — nikdy na ně nereaguj mutací.
+PRAVIDLO: Data do crm_action_tool musí vycházet pouze z aktuálního vstupu, předchozích zpráv konverzace a výsledků nástrojů. Nikdy necopy-paste hodnoty z ukázek.
 PRAVIDLO PENDING AKCE: Kontext může obsahovat pending_action — návrh akce čekající na potvrzení.
+  Pokud se uživatel jen na něco PTÁ, odpověz na otázku <answer> — NIKDY znovu nevolej crm_action_tool se stejnými daty.
   Pokud pending_action.action == "create": záznam v CRM JEŠTĚ NEEXISTUJE, žádné CRM id není k dispozici.
   Pro úpravu polí (datum, čas, popis, ...): zavolej crm_action_tool s action="create" a KOMPLETNÍMI poli — zkopíruj všechna pole z pending_action.data.fields a přepiš to, co uživatel mění.
   NIKDY nevolej action="update"/"delete" na záznam s pending_action.action="create".
@@ -139,7 +155,6 @@ DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
 2. crm_query_tool(module: str, filters: str="[]", search: str=null, limit: int=20)
    — přesný dotaz do CRM. Pro přesné lookupy jména osoby/firmy použij nejdřív search.
    — podporované moduly pro čtení: Accounts, Contacts, Meetings, Calls, Tasks, Notes, Leads, Opportunities, Quotes, acm_invoices.
-   — pro obchodní případy používej module="Opportunities"; pro nabídky používej module="Quotes"; pro faktury používej module="acm_invoices".
      filters je JSON pole [{{"field":"...","op":"eq","value":"..."}}]
    — fields id/account_id/contact_id a také *.id nebo *|id musí mít jako value jen skutečné CRM UUID, nikdy název firmy/kontaktu to nic nenajde.
    — pro více konkrétních záznamů můžeš použít pouze {{ "field": "id", "op": "in", "value": ["<CRM_ID_1>", "<CRM_ID_2>"] }}
@@ -156,8 +171,6 @@ DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
 5. get_company_overview(account_id: str)
    — vrátí kompaktní AI detail firmy (Accounts) + related_records ze subpanelů.
    — activities i každý related_records subpanel je ve výchozím stavu omezen na 10 nejnovějších záznamů.
-   — měna částek je uvedena v default_currency.iso4217, výchozí je vždy Kč (CZK) pokud není uvedeno jinak; platí i pro sloupec amount_usdollar.
-   — related_records.Opportunities jsou obchodní případy (opportunities), NE nabídky (quotes).
    — používej pro detail firmy, když máš account_id.
 {aggregate_tool_block}
 
@@ -165,22 +178,7 @@ FORMÁT ODPOVĚDI:
 - Pokud chceš zavolat nástroj: <tool_call>{{"name": "jmeno_nastroje", "args": {{"param": "hodnota"}}}}</tool_call>
 - Pokud máš finální odpověď pro uživatele: <answer>Tvá odpověď česky</answer>
 - Pokud uživatel nezadá dostatečně přesný dotaz, doptej se na upřesnění.
-- Zobrazuj uživateli jenom přeložené názvy modulů jako "Nabídky" ne "Quotes" ani "Nabídky (Quotes)" a podobně.
 {aggregate_rules}
-
-PRAVIDLA VÝBĚRU KONTAKTU/FIRMY:
-- Při výsledku z rag_search_tool vždy nejdřív posuď, zda jde o přesné shody, nebo jen podobné kandidáty.
-- Pokud najdeš více IDENTICKÝCH kontaktů (stejné celé jméno a firma), automaticky vyber první záznam ve výsledcích a pokračuj bez doptávání.
-- Pokud najdeš více PODOBNÝCH kandidátů a není jasná 1 volba, doptej se a vypiš max 3 konkrétní možnosti.
-- U každé možnosti uveď dostupné rozlišující údaje: firma (account_name), pozice (title), město/adresa, telefon, email.
-- Nepiš obecné "upřesni prosím". Vždy dej konkrétní výběr možností, aby uživatel mohl odpovědět jednou větou.
-- Když uživatel upřesní firmu nebo město, preferuj výběr z už nalezených kandidátů.
-
-PRAVIDLA PRO SCHŮZKY:
-- Dotaz "poslední schůzky" bez explicitního období: zavolej my_meetings_tool BEZ datumu,
-  s vysokým limitem (300–500). Nepoužívej sérii úzkých denních dotazů.
-- Pokud je aktivní kontext firmy, schůzky té firmy zjišťuj přes crm_query_tool
-  (module="Meetings", filter na account_id) — ne přes my_meetings_tool.
 
 UI KONTEXTU: Kontext může obsahovat ui_focus_hint_cz a pole module/record/record_name/record_id z CRM obrazovky.
   Ber to jako orientační nápovědu (co má uživatel pravděpodobně otevřené), NE jako závazný fakt.
@@ -194,6 +192,16 @@ Po výsledku RAG (skutečné account_id ze záznamu, např. account_id="[REAL_AC
 
 Dotaz: "schůzky příští týden"
 → <tool_call>{{"name": "my_meetings_tool", "args": {{"date_from": "pristi_tyden_start", "date_to": "pristi_tyden_end"}}}}</tool_call>
+
+Dotaz: "jednali jsme někdy s firmou [Firma]?" (ČTECÍ dotaz — žádná mutace!)
+Krok 1 — najdi firmu:
+→ <tool_call>{{"name": "rag_search_tool", "args": {{"query": "[Firma]", "module": "accounts"}}}}</tool_call>
+Krok 2 — zjisti aktivity firmy (account_id z výsledku):
+→ <tool_call>{{"name": "crm_query_tool", "args": {{"module": "Meetings", "filters": "[{{\"field\":\"account_id\",\"op\":\"eq\",\"value\":\"[REAL_ACCOUNT_ID_Z_VYSLEDKU]\"}}]"}}}}</tool_call>
+→ <answer>Shrnutí nalezených schůzek/aktivit — NIKDY nenavrhuj vytvoření schůzky, když se uživatel jen ptá.</answer>
+
+Dotaz: "jaký byl ten kód, co jsem psal?" (odpověď je v konverzaci — žádný nástroj)
+→ <answer>Kód z předchozí zprávy: ...</answer>
 
 Dotaz: "naplánuj schůzku s [Jméno] na úterý ráno"
 Krok 1 — najdi kontakt:
@@ -215,8 +223,53 @@ Dotaz: "Naplánuj schůzku s Lucií Kovářovou na čtvrtek"
 Po výsledku RAG jsou 2 identické kontakty se stejným jménem:
 Model interně vybere první kontakt ze seznamu a pokračuje vytvořením schůzky bez dalšího doptávání.
 
-PRAVIDLO: Data do crm_action_tool musí vycházet pouze z aktuálního vstupu, KONVERZAČNÍ HISTORIE a výsledků nástrojů. Nikdy necopy-paste hodnoty z ukázek.
+PRAVIDLO: Data do crm_action_tool musí vycházet pouze z aktuálního vstupu, předchozích zpráv konverzace a výsledků nástrojů. Nikdy necopy-paste hodnoty z ukázek.
 """
+
+
+def _fallback_base_skills() -> list[BaseSkillInfo]:
+    return [BaseSkillInfo(**skill) for skill in BASE_SKILLS]
+
+
+# Strong references to in-flight capture tasks so they are not garbage-collected
+_capture_tasks: set[asyncio.Task] = set()
+
+
+async def _capture_skill_in_background(
+    user_message: str,
+    agent_response: str,
+    tenant_id: str,
+    user_id: str,
+    request_id: Optional[str],
+    settings: Settings,
+) -> None:
+    # Runs after the response is delivered — the request-scoped session may
+    # already be closed, so open a dedicated one.
+    try:
+        from database.session import AsyncSessionLocal
+        from app.services.skill_service import SkillService
+        from app.services.skill_capture_service import SkillCaptureService
+
+        async with AsyncSessionLocal() as db:
+            skill_svc = SkillService(db, settings)
+            capture_svc = SkillCaptureService(
+                skill_service=skill_svc,
+                settings=settings,
+                llm_base_url=settings.llm_base_url,
+                llm_model=settings.llm_model,
+                llm_api_key=settings.llm_api_key,
+            )
+            await capture_svc.maybe_capture(
+                user_message=user_message,
+                agent_response=agent_response,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                request_id=request_id,
+            )
+    except Exception:
+        logger.exception(
+            "tenant=%s Skill capture background task failed", tenant_id
+        )
 
 
 async def run_agent(
@@ -228,6 +281,9 @@ async def run_agent(
     tools: list,
     chat_history: list[dict[str, str]] | None = None,
     emit: EmitFn | None = None,
+    db: Optional[AsyncSession] = None,
+    system_prompt_override: str | None = None,
+    capture_skills: bool = True,
 ) -> dict[str, Any]:
     log_llm_step(
         logger,
@@ -258,8 +314,38 @@ async def run_agent(
     )
 
     tools_by_name: dict[str, Any] = {getattr(t, "name", ""): t for t in tools}
-    system_prompt = _build_system_prompt(tenant_id, set(tools_by_name))
-    history_block = _format_recent_history(chat_history)
+
+    if system_prompt_override is not None:
+        # Purpose-built callers (e.g. recommend_actions) supply their own
+        # contract and don't want the conversational CRM-command protocol
+        # or per-user/tenant skill overlays mixed in.
+        system_prompt = system_prompt_override
+    else:
+        system_prompt = _build_system_prompt(tenant_id, set(tools_by_name))
+
+        skill_block = ""
+        if db is not None and settings.skills_enabled:
+            try:
+                from app.services.skill_service import SkillService
+                skill_svc = SkillService(db, settings)
+                skill_ctx = await skill_svc.assemble_context(tenant_id, user_id)
+                if not skill_ctx.base_skills:
+                    skill_ctx.base_skills = _fallback_base_skills()
+                skill_block = skill_ctx.to_prompt_block()
+            except Exception:
+                logger.exception("tenant=%s Failed to load skill context", tenant_id)
+        if not skill_block:
+            # Skills disabled, no DB session, or load failure — base rules must
+            # still reach the prompt so agent behavior never degrades.
+            skill_block = RuntimeSkillContext(
+                tenant_id=tenant_id, user_id=user_id,
+                base_skills=_fallback_base_skills(),
+                tenant_overlays=[], user_overlays=[],
+            ).to_prompt_block()
+        if skill_block:
+            system_prompt = system_prompt + "\n\n" + skill_block
+
+    history_messages = _history_to_messages(chat_history)
     if context:
         ui_focus_hint = str(context.get("ui_focus_hint_cz") or "").strip()
         ui_focus_block = (
@@ -271,17 +357,19 @@ async def run_agent(
             f"Vstup: {input_text}\n"
             f"{ui_focus_block}"
             f"Kontext (neautoritativní metadata): {json.dumps(context, ensure_ascii=False)}\n"
-            f"KONVERZAČNÍ HISTORIE (nejnovější dole):\n{history_block or '(prázdná)'}\n"
             f"User ID: {user_id}"
         )
     else:
         human_text = (
             f"Vstup: {input_text}\n"
-            f"KONVERZAČNÍ HISTORIE (nejnovější dole):\n{history_block or '(prázdná)'}\n"
             f"User ID: {user_id}"
         )
 
-    messages: list[Any] = [SystemMessage(content=system_prompt), HumanMessage(content=human_text)]
+    messages: list[Any] = [
+        SystemMessage(content=system_prompt),
+        *history_messages,
+        HumanMessage(content=human_text),
+    ]
     intermediate_steps: list[dict[str, Any]] = []
     final_answer = ""
 
@@ -420,6 +508,20 @@ async def run_agent(
                 final_answer = str(last_obs)[:500]
 
     final_answer = _normalize_final_answer_text(final_answer)
+
+    if capture_skills and settings.skills_enabled and settings.skills_capture_enabled:
+        task = asyncio.create_task(
+            _capture_skill_in_background(
+                user_message=input_text,
+                agent_response=final_answer,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                request_id=None,
+                settings=settings,
+            )
+        )
+        _capture_tasks.add(task)
+        task.add_done_callback(_capture_tasks.discard)
 
     if emit and final_answer:
         seq += 1

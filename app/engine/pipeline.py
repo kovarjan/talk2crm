@@ -44,8 +44,8 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 _FALLBACK_USER_MESSAGE = (
-    "Nerozuměla jsem spolehlivě požadavku. "
-    "Upřesněte prosím akci, modul a čas (např. schůzka v úterý 9:30)."
+    "Omlouvám se, tady se mi nepodařilo připravit odpověď. "
+    "Zkuste prosím dotaz zopakovat nebo přeformulovat."
 )
 
 
@@ -464,7 +464,7 @@ async def process_input_core(
                 chat_id=chat.id,
                 tenant_id=tenant_id,
                 user_id=user_id,
-                limit=10,
+                limit=20,
             )
             recent_history_for_agent = [
                 chat_service.chat_message_item_to_agent_history(item)
@@ -479,6 +479,7 @@ async def process_input_core(
                     tools=tools,
                     chat_history=recent_history_for_agent,
                     emit=emit,
+                    db=db,
                 )
                 agent_result = normalize_agent_result_for_ui(agent_result)
             except Exception as exc:

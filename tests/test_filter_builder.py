@@ -165,6 +165,43 @@ def test_build_filter_acm_invoices_account_id_maps_to_account_relation():
     assert operand["relationField"] is None
 
 
+def test_build_filter_acm_orders_account_id_maps_to_account_relation():
+    specs = [FilterSpec(field="account_id", op="eq", value="a42333d4-c035-2f73-865c-64ee30906163")]
+    f = build_filter(module="acm_orders", filters=specs)
+    operand = f["operands"][0]
+    assert operand["field"] == "id"
+    assert operand["fieldModule"] == "acm_orders"
+    assert operand["fieldRel"] == ["acm_orders_accounts"]
+    assert operand["type"] == "eq"
+    assert operand["value"] == "a42333d4-c035-2f73-865c-64ee30906163"
+    assert operand["relationField"] is None
+
+
+def test_build_filter_acm_orders_date_range_uses_datum_vystaveni():
+    f = build_filter(module="acm_orders", date_from="2026-01-01")
+    assert f["operands"][0]["field"] == "datum_vystaveni"
+
+
+def test_build_filter_order_lines_order_id_maps_to_order_relation():
+    specs = [FilterSpec(field="order_id", op="eq", value="a42333d4-c035-2f73-865c-64ee30906163")]
+    f = build_filter(module="acm_orders_lines", filters=specs)
+    operand = f["operands"][0]
+    assert operand["field"] == "id"
+    assert operand["fieldModule"] == "acm_orders_lines"
+    assert operand["fieldRel"] == ["acm_orders_acm_orders_lines"]
+    assert operand["type"] == "eq"
+    assert operand["value"] == "a42333d4-c035-2f73-865c-64ee30906163"
+
+
+def test_build_filter_products_quote_id_stays_direct_field():
+    # Quote lines are Products records with a direct db quote_id column.
+    specs = [FilterSpec(field="quote_id", op="eq", value="a42333d4-c035-2f73-865c-64ee30906163")]
+    f = build_filter(module="Products", filters=specs)
+    operand = f["operands"][0]
+    assert operand["field"] == "quote_id"
+    assert operand["type"] == "eq"
+
+
 def test_build_filter_date_range_sales_modules():
     opportunity_filter = build_filter(module="Opportunities", date_from="2026-05-01")
     quote_filter = build_filter(module="Quotes", date_to="2026-05-31")

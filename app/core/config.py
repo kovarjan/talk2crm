@@ -94,6 +94,34 @@ class Settings(BaseSettings):
     resolver_ambiguity_gap_threshold: float = 0.08
     resolver_strict_mutation_confirmation: bool = True
 
+    # Skills system
+    skills_enabled: bool = Field(
+        default=True,
+        description="Master switch for the entire skills system.",
+    )
+    skills_modification_enabled: bool = Field(
+        default=True,
+        description=(
+            "Allow creating/updating skill overlays. "
+            "Set to False to freeze the current skill set — skills are still loaded and used."
+        ),
+    )
+    skills_capture_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable automatic correction capture from user messages. "
+            "Requires skills_modification_enabled=True to have any effect."
+        ),
+    )
+    skills_max_per_context: int = Field(
+        default=20,
+        description="Maximum number of skill overlays injected per request.",
+    )
+    skills_min_confidence: float = Field(
+        default=0.5,
+        description="Minimum confidence for auto-captured skills to be saved.",
+    )
+
     quick_action_enabled: bool = False
     quick_action_fallback_on_no_candidates: bool = True
     quick_action_fallback_on_ambiguous: bool = True

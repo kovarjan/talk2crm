@@ -54,11 +54,16 @@ def try_parse_json(text: str) -> dict[str, Any] | None:
 
 
 def looks_like_noise(text: str) -> bool:
+    """
+    Detect raw machine output (JSON blobs, menu dumps) that must never be shown
+    as the assistant message. Length alone is NOT noise — long analytical
+    answers are legitimate final responses.
+    """
     value = (text or "").strip()
     if not value:
         return False
     lower = value.lower()
-    if len(value) > 1400:
+    if value.startswith("{") or value.startswith("["):
         return True
     noisy_patterns = [
         "here's the translation of the menu labels",
@@ -67,6 +72,61 @@ def looks_like_noise(text: str) -> bool:
         "```json",
     ]
     return any(pattern in lower for pattern in noisy_patterns)
+
+
+_MODULE_LABELS_CZ = {
+    "meetings": "schůzka",
+    "calls": "hovor",
+    "tasks": "úkol",
+    "notes": "poznámka",
+    "contacts": "kontakt",
+    "accounts": "firma",
+    "leads": "lead",
+    "opportunities": "obchodní případ",
+    "quotes": "nabídka",
+}
+
+_ACTION_LABELS_CZ = {
+    "create": "vytvoření",
+    "update": "úprava",
+    "delete": "smazání",
+}
+
+_PENDING_SUMMARY_FIELDS = (
+    ("name", None),
+    ("subject", None),
+    ("note_content", "text"),
+    ("description", "popis"),
+    ("date_start", "od"),
+    ("duration_hours", "délka (hod)"),
+    ("contact_name", "kontakt"),
+    ("parent_name", "týká se"),
+)
+
+
+def describe_pending_action_cz(module: str, action: str, data: dict[str, Any]) -> str:
+    """
+    Human-readable summary of a pending mutation. This text is persisted as the
+    assistant chat message, so the LLM can recall in later turns WHAT it
+    proposed — the generic confirmation sentence carries no information.
+    """
+    module_label = _MODULE_LABELS_CZ.get(module.strip().lower(), module or "záznam")
+    action_label = _ACTION_LABELS_CZ.get(action.strip().lower(), action or "akce")
+    fields = data.get("fields") if isinstance(data.get("fields"), dict) else {}
+
+    parts: list[str] = []
+    for key, label in _PENDING_SUMMARY_FIELDS:
+        value = str(fields.get(key) or "").strip()
+        if not value:
+            continue
+        if len(value) > 120:
+            value = value[:120].rstrip() + "..."
+        parts.append(f"{label}: {value}" if label else value)
+
+    summary = f"Připravil jsem k potvrzení: {action_label} ({module_label})"
+    if parts:
+        summary += " — " + "; ".join(parts)
+    return summary + ". Potvrďte prosím provedení."
 
 
 def normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, Any]:
@@ -105,14 +165,13 @@ def normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, Any
             ).strip()
             action = str(pending.get("action") or "").strip()
             data = pending.get("data") if isinstance(pending.get("data"), dict) else {}
-            message = str(
-                obs.get("message")
-                or (
-                    "Akce je připravena a čeká na vaše potvrzení."
-                    if status == "confirmation_required"
-                    else "Pro pokračování potřebuji upřesnit cílový záznam."
-                )
-            ).strip()
+            if status == "confirmation_required":
+                message = describe_pending_action_cz(module, action, data)
+            else:
+                message = str(
+                    obs.get("message")
+                    or "Pro pokračování potřebuji upřesnit cílový záznam."
+                ).strip()
 
             command_payload = {
                 "action": action or "create",
@@ -184,8 +243,8 @@ def normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, Any
     clean = to_user_message(output_text)
     if not clean or looks_like_noise(clean):
         clean = (
-            "Nerozuměla jsem spolehlivě požadavku. "
-            "Upřesněte prosím akci, modul a čas (např. schůzka v úterý 9:30)."
+            "Omlouvám se, tady se mi nepodařilo připravit odpověď. "
+            "Zkuste prosím dotaz zopakovat nebo přeformulovat."
         )
     normalized["message_to_user"] = clean
     return normalized

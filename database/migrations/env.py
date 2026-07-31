@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.core.config import get_settings  # noqa: E402
 from database.models import Base  # noqa: E402
+import database.skill_models  # noqa: E402, F401 — registers skill tables with Base.metadata
 
 target_metadata = Base.metadata
 

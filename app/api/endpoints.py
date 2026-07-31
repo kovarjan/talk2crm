@@ -35,6 +35,7 @@ from app.api.models import (
     GenerateRequest,
     ProcessInputRequest,
     RagIngestRequest,
+    RecommendActionsRequest,
     SearchRequest,
     UserChatsResponse,
 )
@@ -44,11 +45,20 @@ from app.core.logging import get_logger
 from app.engine.events import StreamEvent
 from app.engine.llm import get_chat_llm
 from app.engine.pipeline import process_input_core
+from app.engine.recommendations import recommend_actions
 from langchain_core.messages import HumanMessage, SystemMessage
 from app.engine.rag import get_rag_service
+from app.domain.skill_contracts import (
+    SkillIndexEntry,
+    TenantOverlay,
+    TenantOverlayCreate,
+    UserOverlay,
+    UserOverlayCreate,
+)
 from app.services import chat_service
 from app.services.chat_titles import fallback_chat_name
 from app.services.crm_client import CoripoClient
+from app.services.skill_service import SkillService
 from app.services.tenant_manager import TenantManager
 from app.utils.modules import canonical_module_name
 from database.models import Chat, ChatMessage
@@ -160,6 +170,49 @@ async def generate(
         len(str(text)),
     )
     return BaseResponse(success=True, response={"text": str(text)})
+
+
+@router.post("/recommend-actions/", response_model=BaseResponse)
+async def recommend_actions_endpoint(
+    payload: RecommendActionsRequest,
+    ctx: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db),
+) -> BaseResponse:
+    """Read-only tool-using agent call. Looks up related CRM context (via
+    CRM search/overview tools) to propose follow-up actions, but never
+    writes to the CRM itself — the caller turns suggestions into normal
+    create-command dry-run cards."""
+    tenant_manager = TenantManager(db)
+    credentials = await tenant_manager.get_credentials(ctx["tenant_id"])
+    crm_client = CoripoClient(
+        credentials.crm_base_url,
+        credentials.crm_token,
+        user_id=ctx["user_id"],
+        user_name=ctx["user_name"],
+    )
+    rag_service = get_rag_service()
+
+    actions = await recommend_actions(
+        tenant_id=ctx["tenant_id"],
+        user_id=ctx["user_id"],
+        module=payload.module,
+        record_id=payload.record_id,
+        text=payload.text,
+        context=payload.context,
+        crm_client=crm_client,
+        rag_service=rag_service,
+        db=db,
+    )
+
+    logger.debug(
+        "recommend_actions tenant=%s user=%s module=%s record=%s count=%d",
+        ctx["tenant_id"],
+        ctx["user_id"],
+        payload.module,
+        payload.record_id,
+        len(actions),
+    )
+    return BaseResponse(success=True, response={"actions": actions})
 
 
 @router.post("/chats/", response_model=CreateChatResponse)
@@ -899,6 +952,112 @@ async def rag_status(
             "vector_count": count,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Skill management endpoints
+# ---------------------------------------------------------------------------
+
+
+def _require_skill_modification_enabled() -> None:
+    if not settings.skills_modification_enabled:
+        raise HTTPException(status_code=403, detail="Skill modification is disabled")
+
+
+@router.get("/skills/", response_model=list[SkillIndexEntry])
+async def list_skill_index(
+    x_tenant: str = Header(..., alias="X-Tenant"),
+    x_user_id: str = Header(..., alias="X-User-Id"),
+    db: AsyncSession = Depends(get_db),
+) -> list[SkillIndexEntry]:
+    svc = SkillService(db, settings)
+    return await svc.load_index(x_tenant, x_user_id)
+
+
+@router.get("/skills/tenant/pending/", response_model=list[TenantOverlay])
+async def list_pending_tenant_skills(
+    x_tenant: str = Header(..., alias="X-Tenant"),
+    x_user_id: str = Header(..., alias="X-User-Id"),
+    db: AsyncSession = Depends(get_db),
+) -> list[TenantOverlay]:
+    svc = SkillService(db, settings)
+    return await svc.list_pending_tenant_overlays(x_tenant)
+
+
+@router.post("/skills/tenant/{name}/approve", response_model=TenantOverlay)
+async def approve_tenant_skill(
+    name: str,
+    x_tenant: str = Header(..., alias="X-Tenant"),
+    x_user_id: str = Header(..., alias="X-User-Id"),
+    db: AsyncSession = Depends(get_db),
+) -> TenantOverlay:
+    _require_skill_modification_enabled()
+    svc = SkillService(db, settings)
+    overlay = await svc.approve_tenant_overlay(x_tenant, name)
+    if overlay is None:
+        raise HTTPException(status_code=404, detail="Skill overlay not found")
+    return overlay
+
+
+@router.post("/skills/tenant/", response_model=TenantOverlay)
+async def upsert_tenant_skill(
+    data: TenantOverlayCreate,
+    x_tenant: str = Header(..., alias="X-Tenant"),
+    x_user_id: str = Header(..., alias="X-User-Id"),
+    db: AsyncSession = Depends(get_db),
+) -> TenantOverlay:
+    _require_skill_modification_enabled()
+    data.created_by = x_user_id
+    svc = SkillService(db, settings)
+    overlay = await svc.upsert_tenant_overlay(x_tenant, data)
+    if overlay is None:
+        raise HTTPException(status_code=403, detail="Skill modification is disabled")
+    return overlay
+
+
+@router.delete("/skills/tenant/{name}")
+async def deactivate_tenant_skill(
+    name: str,
+    x_tenant: str = Header(..., alias="X-Tenant"),
+    x_user_id: str = Header(..., alias="X-User-Id"),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    _require_skill_modification_enabled()
+    svc = SkillService(db, settings)
+    ok = await svc.deactivate_tenant_overlay(x_tenant, name)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Skill overlay not found")
+    return {"deleted": True}
+
+
+@router.post("/skills/user/", response_model=UserOverlay)
+async def upsert_user_skill(
+    data: UserOverlayCreate,
+    x_tenant: str = Header(..., alias="X-Tenant"),
+    x_user_id: str = Header(..., alias="X-User-Id"),
+    db: AsyncSession = Depends(get_db),
+) -> UserOverlay:
+    _require_skill_modification_enabled()
+    svc = SkillService(db, settings)
+    overlay = await svc.upsert_user_overlay(x_tenant, x_user_id, data)
+    if overlay is None:
+        raise HTTPException(status_code=403, detail="Skill modification is disabled")
+    return overlay
+
+
+@router.delete("/skills/user/{name}")
+async def deactivate_user_skill(
+    name: str,
+    x_tenant: str = Header(..., alias="X-Tenant"),
+    x_user_id: str = Header(..., alias="X-User-Id"),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    _require_skill_modification_enabled()
+    svc = SkillService(db, settings)
+    ok = await svc.deactivate_user_overlay(x_tenant, x_user_id, name)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Skill overlay not found")
+    return {"deleted": True}
 
 
 @router.get("/audio/{file_id}")

@@ -90,6 +90,17 @@ def test_crm_query_tool_rejects_invalid_module() -> None:
     assert "Unsupported module" in str(result.get("message") or "")
 
 
+@pytest.mark.parametrize(
+    "module",
+    ["acm_orders", "orders", "acm_orders_lines", "order_lines", "Products", "quote_lines"],
+)
+def test_crm_query_tool_accepts_orders_and_line_modules(module: str) -> None:
+    tools = _make_tools()
+    tool = _get_tool(tools, "crm_query_tool")
+    result = json.loads(asyncio.run(tool.ainvoke({"module": module})))
+    assert result.get("status") != "tool_validation_error", result.get("message")
+
+
 def test_crm_query_tool_rejects_in_operator_for_non_id_field() -> None:
     tools = _make_tools()
     tool = _get_tool(tools, "crm_query_tool")

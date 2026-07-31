@@ -32,6 +32,17 @@ MODULE_ALIASES: dict[str, str] = {
     "user": "Users",
     "users": "Users",
     "acm_invoices": "acm_invoices",
+    # Orders and line-item modules (Coripo custom modules; quote lines live in Products)
+    "order": "acm_orders",
+    "orders": "acm_orders",
+    "acm_orders": "acm_orders",
+    "order_line": "acm_orders_lines",
+    "order_lines": "acm_orders_lines",
+    "acm_orders_lines": "acm_orders_lines",
+    "product": "Products",
+    "products": "Products",
+    "quote_line": "Products",
+    "quote_lines": "Products",
 }
 
 
