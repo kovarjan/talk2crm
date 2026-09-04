@@ -85,3 +85,11 @@ class RecommendActionsRequest(BaseModel):
     record_id: str
     text: str
     context: dict[str, Any] | None = None
+
+
+class ExtractFieldsRequest(BaseModel):
+    module: str
+    record_id: str | None = None
+    field_schema: dict[str, Any]
+    current_values: dict[str, Any] = Field(default_factory=dict)
+    messages: list[dict[str, str]] = Field(default_factory=list)

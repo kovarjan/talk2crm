@@ -32,6 +32,7 @@ from app.api.models import (
     ChatReplaceRequest,
     CrmRecordCreatedEventRequest,
     CreateChatResponse,
+    ExtractFieldsRequest,
     GenerateRequest,
     ProcessInputRequest,
     RagIngestRequest,
@@ -46,6 +47,7 @@ from app.engine.events import StreamEvent
 from app.engine.llm import get_chat_llm
 from app.engine.pipeline import process_input_core
 from app.engine.recommendations import recommend_actions
+from app.engine.extraction import extract_fields
 from langchain_core.messages import HumanMessage, SystemMessage
 from app.engine.rag import get_rag_service
 from app.domain.skill_contracts import (
@@ -213,6 +215,51 @@ async def recommend_actions_endpoint(
         len(actions),
     )
     return BaseResponse(success=True, response={"actions": actions})
+
+
+@router.post("/extract-fields/", response_model=BaseResponse)
+async def extract_fields_endpoint(
+    payload: ExtractFieldsRequest,
+    ctx: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db),
+) -> BaseResponse:
+    """Read-only tool-using agent call for Smart Paste. Extracts field values
+    for the given module's live ai_schema from pasted/typed text, resolving
+    relate fields via CRM/RAG tools where possible — never writes to the
+    CRM. The caller (Coripo PHP/FE) applies the result into the currently
+    open form; the user's own Save is what actually persists anything."""
+    tenant_manager = TenantManager(db)
+    credentials = await tenant_manager.get_credentials(ctx["tenant_id"])
+    crm_client = CoripoClient(
+        credentials.crm_base_url,
+        credentials.crm_token,
+        user_id=ctx["user_id"],
+        user_name=ctx["user_name"],
+    )
+    rag_service = get_rag_service()
+
+    result = await extract_fields(
+        tenant_id=ctx["tenant_id"],
+        user_id=ctx["user_id"],
+        module=payload.module,
+        record_id=payload.record_id,
+        field_schema=payload.field_schema,
+        current_values=payload.current_values,
+        messages=payload.messages,
+        crm_client=crm_client,
+        rag_service=rag_service,
+        db=db,
+    )
+
+    logger.debug(
+        "extract_fields tenant=%s user=%s module=%s record=%s fields=%d",
+        ctx["tenant_id"],
+        ctx["user_id"],
+        payload.module,
+        payload.record_id,
+        len(result.get("fields") or {}),
+    )
+    return BaseResponse(success=True, response=result)
 
 
 @router.post("/chats/", response_model=CreateChatResponse)
