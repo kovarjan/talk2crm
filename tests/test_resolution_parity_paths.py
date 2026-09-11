@@ -77,17 +77,22 @@ class DummyCrmClient:
 
 
 
+def _contact_linked(data: dict[str, Any]) -> bool:
+    # Meetings link the person through invitees (Coripo's parent only takes companies).
+    fields = data.get("fields") if isinstance(data.get("fields"), dict) else {}
+    invitees = data.get("invitees") if isinstance(data.get("invitees"), dict) else {}
+    return bool(str(fields.get("contact_id") or "").strip()) or bool(invitees.get("Contacts"))
+
+
 def _outcome_from_quick(result: QuickActionResult) -> str:
     pending = result.data.get("pending_action") if isinstance(result.data.get("pending_action"), dict) else {}
     data = pending.get("data") if isinstance(pending.get("data"), dict) else {}
-    fields = data.get("fields") if isinstance(data.get("fields"), dict) else {}
-    return "resolved" if str(fields.get("parent_type") or "") == "Contacts" else "unresolved"
+    return "resolved" if _contact_linked(data) else "unresolved"
 
 
 
 def _outcome_from_adjustment(result: dict[str, Any]) -> str:
-    fields = result.get("fields") if isinstance(result.get("fields"), dict) else {}
-    return "resolved" if str(fields.get("parent_type") or "") == "Contacts" else "unresolved"
+    return "resolved" if _contact_linked(result) else "unresolved"
 
 
 

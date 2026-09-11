@@ -8,11 +8,16 @@ import httpx
 
 from app.utils.text import normalize_text
 from app.core.config import get_settings
+from app.core.logging import get_logger
 from app.domain.contracts import NormalizedCommand, build_pending_action_envelope
 from app.engine.adjustments import ModuleAdjustmentEngine
 from app.engine.rag import TenantRAGService
 from app.presentation.cards import parse_datetime
 from app.services.crm_client import CoripoClient
+from app.services.schema_write_service import SchemaDrivenWriteService
+
+
+logger = get_logger(__name__)
 
 
 class CRMWriteService:
@@ -201,8 +206,25 @@ class CRMWriteService:
         return best[1] if best is not None else None
 
     async def _execute_crm_action(self, *, module: str, action: str, data: dict[str, Any]) -> dict[str, Any]:
-        result = await self.crm_client.execute_module_action(module=module, action=action, data=data)
         normalized_action = (action or "").strip().lower()
+
+        if normalized_action in {"create", "update", "patch"} and get_settings().ai_write_enabled:
+            schema_result = await self._try_schema_driven_write(module=module, data=data)
+            if schema_result is not None:
+                result = schema_result
+                if normalized_action in {"create", "update", "patch", "delete"} and self.rag_service is not None:
+                    try:
+                        ingested = await self.rag_service.ingest_from_crm(
+                            tenant_id=self.tenant_id,
+                            crm_client=self.crm_client,
+                            module=module,
+                        )
+                        result["_rag_ingested"] = ingested
+                    except Exception:
+                        result["_rag_ingest_error"] = "failed"
+                return result
+
+        result = await self.crm_client.execute_module_action(module=module, action=action, data=data)
         if normalized_action in {"create", "update", "patch", "delete"} and self.rag_service is not None:
             try:
                 ingested = await self.rag_service.ingest_from_crm(
@@ -216,6 +238,83 @@ class CRMWriteService:
                 if isinstance(result, dict):
                     result["_rag_ingest_error"] = "failed"
         return result if isinstance(result, dict) else {"result": result}
+
+    async def _try_schema_driven_write(self, *, module: str, data: dict[str, Any]) -> dict[str, Any] | None:
+        """Attempts the write via Coripo's live ai_schema/ai_write.
+
+        Returns None (never raises) on ANY failure in the new path - unavailable
+        endpoints (older Coripo deployment), an unrecognized module, a CRM client
+        double in tests that doesn't implement get_ai_schema/ai_write, transport
+        errors, anything - so the caller always falls back to the legacy
+        set/{module} path rather than breaking a request. Worst case this behaves
+        exactly like ai_write_enabled=False; it should never behave worse than that.
+        """
+        try:
+            write_service = SchemaDrivenWriteService(crm_client=self.crm_client)
+            result = await write_service.write(module=module, data=data, dry_run=False)
+        except Exception as exc:  # noqa: BLE001 - intentional broad fallback, see docstring
+            logger.info(
+                "schema_driven_write_fallback module=%s error=%s: %s",
+                module,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+
+        if result.success:
+            response: dict[str, Any] = {"status": "ok"}
+            if result.record_id:
+                response["id"] = result.record_id
+            return response
+
+        return {
+            "status": "validation_error",
+            "id": result.record_id,
+            "errors": result.errors,
+            "message": "CRM rejected one or more fields; see errors for the exact field/code/message.",
+        }
+
+    async def _try_precheck_write(
+        self, *, module: str, data: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+        """Dry-run validates a pending create/update against the live CRM schema before
+        the confirmation prompt is shown, so the agent can fix invalid fields instead of
+        only discovering the gap after the user clicks confirm.
+
+        Returns (errors, warnings): errors block the confirmation (unknown/invalid
+        fields), warnings (missing required fields) are advisory and never block a
+        record the user asked for. Returns None if the schema-driven path isn't
+        available for this module - same defensive fallback as
+        _try_schema_driven_write, so unsupported modules just skip pre-validation.
+        """
+        try:
+            write_service = SchemaDrivenWriteService(crm_client=self.crm_client)
+            result = await write_service.write(module=module, data=data, dry_run=True)
+        except Exception as exc:  # noqa: BLE001 - intentional broad fallback, see docstring
+            logger.info(
+                "schema_precheck_fallback module=%s error=%s: %s",
+                module,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+
+        return result.errors, result.warnings
+
+    @staticmethod
+    def _strip_unknown_fields(data: dict[str, Any], errors: list[dict[str, Any]]) -> list[str]:
+        """Drops fields the CRM reported as unknown_field so a typo or a helper key the
+        LLM invented never blocks the whole record. Returns the dropped names."""
+        fields = data.get("fields") if isinstance(data.get("fields"), dict) else None
+        if fields is None:
+            return []
+        dropped: list[str] = []
+        for error in errors:
+            name = str(error.get("field") or "")
+            if error.get("code") == "unknown_field" and name in fields:
+                fields.pop(name, None)
+                dropped.append(name)
+        return dropped
 
     async def execute_action(self, *, module: str, action: str, data_json: str = "{}") -> dict[str, Any]:
         try:
@@ -256,6 +355,38 @@ class CRMWriteService:
                 if not any(str(inv.get("id") or "") == _contact_id for inv in _invitees["Contacts"]):
                     _invitees["Contacts"].append({"id": _contact_id})
 
+        adjustment_notes = list(adjustment.notes)
+        missing_required: list[dict[str, Any]] = []
+        if (
+            normalized_action in {"create", "update", "patch"}
+            and not self.action_confirmation
+            and get_settings().ai_write_enabled
+        ):
+            precheck = await self._try_precheck_write(module=effective_module, data=data)
+            if precheck is not None:
+                errors, warnings = precheck
+                dropped = self._strip_unknown_fields(data, errors)
+                if dropped:
+                    adjustment_notes.append(f"Dropped fields not on the {effective_module} form: {', '.join(dropped)}")
+                    precheck = await self._try_precheck_write(module=effective_module, data=data)
+                    if precheck is not None:
+                        errors, warnings = precheck
+                missing_required = warnings
+                if errors:
+                    return {
+                        "status": "needs_more_info",
+                        "message": (
+                            "The CRM rejected some fields before confirmation. Fix data_json yourself "
+                            "(correct the value, or derive/remove the field) and retry crm_action_tool with "
+                            "the same module/action; ask the user only for information that cannot be "
+                            "derived. Do not present a confirmation prompt yet."
+                        ),
+                        "module": effective_module,
+                        "action": normalized_action,
+                        "field_errors": errors,
+                        "missing_required": warnings,
+                    }
+
         if normalized_action in mutating_actions and not self.action_confirmation:
             pending_action = build_pending_action_envelope(
                 module=module,
@@ -263,22 +394,27 @@ class CRMWriteService:
                 effective_module=effective_module,
                 action=normalized_action,
                 data=data,
-                adjustments=adjustment.notes,
+                adjustments=adjustment_notes,
                 ambiguities=[],
                 requires_confirmation=True,
             )
-            return {
+            response: dict[str, Any] = {
                 "status": "confirmation_required",
                 "message": "Akce mění CRM data a vyžaduje potvrzení uživatele.",
                 "pending_action": pending_action,
-                "adjustments": adjustment.notes,
+                "adjustments": adjustment_notes,
             }
+            if missing_required:
+                # Advisory only: the form marks these as required, but the record is
+                # created without them if the assistant could not derive a value.
+                response["missing_required"] = missing_required
+            return response
 
         data.setdefault("requested_by_user_id", self.user_id)
         try:
             result = await self._execute_crm_action(module=effective_module, action=action, data=data)
-            if adjustment.notes and isinstance(result, dict):
-                result["_adjustments"] = adjustment.notes
+            if adjustment_notes and isinstance(result, dict):
+                result["_adjustments"] = adjustment_notes
             return result
         except httpx.HTTPStatusError as exc:
             body_preview = ""
@@ -490,7 +626,9 @@ class CRMWriteService:
             account_name = str(fields.get("account_name") or raw_account_name).strip()
             parent_type = str(fields.get("parent_type") or "").strip()
             parent_id = str(fields.get("parent_id") or "").strip()
-            has_contact_link = parent_type == "Contacts" and bool(parent_id)
+            # Meetings link the person through invitees (Coripo's parent only takes companies).
+            invitee_contacts = (prepared_data.get("invitees") or {}).get("Contacts") if isinstance(prepared_data.get("invitees"), dict) else None
+            has_contact_link = bool(str(fields.get("contact_id") or "").strip()) or bool(invitee_contacts)
             has_account_link = parent_type == "Accounts" and bool(parent_id)
 
             if raw_contact_name and not has_contact_link:
@@ -534,13 +672,12 @@ class CRMWriteService:
                 confirmation_text += f" s {contact_name}"
             if account_name:
                 confirmation_text += f" ({account_name})"
-            if parent_type and parent_id:
-                if parent_type == "Contacts":
-                    confirmation_text += " [kontakt navázán]"
-                elif parent_type == "Accounts":
-                    confirmation_text += " [firma navázána]"
+            if has_contact_link:
+                confirmation_text += " [kontakt navázán]"
             elif raw_contact_name:
                 confirmation_text += " [kontakt se nepodařilo automaticky dohledat]"
+            if has_account_link:
+                confirmation_text += " [firma navázána]"
             confirmation_text += f" na {when_text}. Potvrďte prosím provedení."
 
             pending_action = build_pending_action_envelope(

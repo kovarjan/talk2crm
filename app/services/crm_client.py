@@ -1156,42 +1156,72 @@ class CoripoClient:
             require_sid=True,
         )
 
-    async def get_dynamic_schema(self, module: str) -> dict[str, Any]:
+    async def get_ai_schema(
+        self,
+        module: str,
+        record_id: str | None = None,
+        *,
+        max_options: int = 200,
+    ) -> dict[str, Any]:
+        """Fetches the live, standardized field schema for a module/record from
+        Coripo's GET /public/ai_schema/{module} endpoint - tabs/panels/rows walked
+        through the same third/custom/intern layout layers the FE detail view uses,
+        merged with current values (or editview defaults when record_id is omitted).
+
+        Response shape: {"module", "record_id", "mode", "sections": [{"group", "fields": [...]}]}.
+        Each field has at least {name, label, type, required, editable, current_value};
+        relate/polymorphic_relate fields add id_field/target_module(s); enum/multi_enum
+        fields add options (or options_count/options_truncated past max_options).
+
+        max_options defaults higher than Coripo's own default (40) since talk2api2 needs
+        the full option list to validate/resolve LLM-proposed enum values, not just to
+        render a form.
+        """
         module_name = self._canonical_module(module)
+        params: dict[str, Any] = {"max_options": max_options}
+        if record_id:
+            params["record_id"] = record_id
+
         raw = await self._coripo_request(
             "GET",
-            f"defs/{module_name}",
+            f"ai_schema/{module_name}",
+            params=params,
             require_sid=True,
         )
+        return raw
 
-        defs: dict[str, Any] | None = None
-        if isinstance(raw.get("defs"), dict):
-            defs = raw["defs"]
-        elif isinstance(raw.get("field_defs"), dict):
-            defs = raw["field_defs"]
-        elif isinstance(raw.get("fields"), dict):
-            defs = raw["fields"]
-        else:
-            data = raw.get("data")
-            if isinstance(data, dict):
-                if isinstance(data.get("defs"), dict):
-                    defs = data["defs"]
-                elif isinstance(data.get("field_defs"), dict):
-                    defs = data["field_defs"]
-                elif isinstance(data.get("fields"), dict):
-                    defs = data["fields"]
-            message = raw.get("message")
-            if defs is None and isinstance(message, dict):
-                inner = message.get("data")
-                if isinstance(inner, dict):
-                    if isinstance(inner.get("defs"), dict):
-                        defs = inner["defs"]
-                    elif isinstance(inner.get("field_defs"), dict):
-                        defs = inner["field_defs"]
-                    elif isinstance(inner.get("fields"), dict):
-                        defs = inner["fields"]
+    async def ai_write(
+        self,
+        module: str,
+        data: dict[str, Any],
+        *,
+        record_id: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Validates and (unless dry_run) persists a write via Coripo's
+        POST /public/ai_write/{module}/{record_id?} endpoint, using the same
+        standardized value shapes get_ai_schema() reports (currency as
+        {amount, currency_code?}, relate as {id}, polymorphic_relate as {module, id},
+        invitee_list as {Users:[{id}], Contacts:[{id}], Leads:[{id}]}).
 
-        return {"module": module_name, "defs": defs or {}}
+        Field-validation failures are NOT raised as HTTP errors - they come back as
+        {"success": false, "errors": [{"field","code","message"}, ...]} with a 200
+        status, since they're expected, structured, agent-actionable outcomes. Only
+        transport-level failures (auth/ACL/module/record-not-found) raise
+        httpx.HTTPStatusError via _coripo_request, same as every other CRM call here.
+        """
+        module_name = self._canonical_module(module)
+        path = f"ai_write/{module_name}/{record_id}" if record_id else f"ai_write/{module_name}"
+        params: dict[str, Any] = {"dry_run": "true" if dry_run else "false"}
+
+        raw = await self._coripo_request(
+            "POST",
+            path,
+            params=params,
+            json_body=data,
+            require_sid=True,
+        )
+        return raw
 
     async def fetch_ai_ingest_dump(self, module: str) -> dict[str, Any]:
         module_name = self._canonical_module(module)

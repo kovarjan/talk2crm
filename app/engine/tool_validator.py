@@ -10,7 +10,7 @@ from app.utils.crm_id import CRM_ID_RE as _CRM_ID_RE
 from app.utils.text import safe_text as _safe_text
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-_WRITE_MODULES = {"meetings", "calls", "tasks", "notes", "contacts", "accounts", "leads"}
+_WRITE_MODULES = {"meetings", "calls", "tasks", "notes", "contacts", "accounts", "leads", "quotes"}
 _READ_MODULES = {
     "meetings",
     "calls",

@@ -264,6 +264,11 @@ class ModuleAdjustmentEngine:
             else:
                 notes.append(f"Contact '{contact_name}' was not resolved in CRM search")
 
+        # A bare contact_id (e.g. from the open CRM record) still needs the company for
+        # the meeting's "Týká se"; fetch the contact so the account can be derived below.
+        if contact_id and not account_id and contact_candidate is None and self._is_valid_crm_id(contact_id):
+            contact_candidate = await self._fetch_contact_by_id(contact_id)
+
         if contact_candidate and not account_id:
             linked_account_id = self._first_nonempty(
                 contact_candidate,
@@ -295,13 +300,17 @@ class ModuleAdjustmentEngine:
             notes.append(f"Ignoring non-CRM account id '{account_id}'")
             account_id = None
 
-        # Always prefer person relation for "Týká se" when available.
-        if contact_id:
-            fields["parent_type"] = "Contacts"
-            fields["parent_id"] = contact_id
-        elif account_id:
+        # Coripo's "Týká se" (parent) on Meetings accepts companies, not people: the
+        # tenant's parent_type_display list has no Contacts entry, so ai_write rejects
+        # parent_type=Contacts. The person is linked as an invitee instead (below).
+        if account_id:
             fields["parent_type"] = "Accounts"
             fields["parent_id"] = account_id
+        else:
+            fields.pop("parent_type", None)
+            fields.pop("parent_id", None)
+            if contact_id:
+                notes.append("No company known for the contact; meeting linked via invitees only")
 
         topic = self._derive_topic(fields, self.input_text)
         contact_display_name = self._record_label(contact_candidate or {}) or contact_name
@@ -331,6 +340,18 @@ class ModuleAdjustmentEngine:
             fields["date_start"] = dt_value
             notes.append(f"Normalized meeting datetime -> {dt_value}")
 
+        # Coripo requires date_end and zapis on Meetings. Both are derivable, so fill
+        # them here instead of bouncing the user with "required field missing".
+        date_end = self._derive_meeting_end(fields)
+        if date_end and not str(fields.get("date_end") or "").strip():
+            fields["date_end"] = date_end
+            notes.append(f"Derived date_end from date_start and duration -> {date_end}")
+        if not str(fields.get("zapis") or "").strip():
+            zapis_source = str(fields.get("description") or topic or fields.get("name") or "").strip()
+            if zapis_source:
+                fields["zapis"] = zapis_source
+                notes.append("Derived zapis from the meeting description")
+
         invitees = self._normalize_invitees(adjusted.get("invitees"))
         if self.user_id and _UUID_RE.match(str(self.user_id).strip()):
             self._ensure_invitee(invitees, "Users", self.user_id)
@@ -345,6 +366,65 @@ class ModuleAdjustmentEngine:
         adjusted["invitees"] = invitees
         adjusted.setdefault("inviteesBackup", copy.deepcopy(invitees))
         return AdjustmentResult(data=adjusted, notes=notes)
+
+    async def _fetch_contact_by_id(self, contact_id: str) -> dict[str, Any] | None:
+        """Best-effort detail lookup; the invitee link works even when this returns None.
+
+        Coripo's detail endpoint nests the bean under message.data.record (next to
+        subpanels that also carry `records` lists), so unwrap that explicitly instead
+        of the generic first-record walk, which can pick a subpanel row.
+        """
+        request = getattr(self.crm_client, "_coripo_request", None)
+        if request is not None:
+            try:
+                raw = await request("GET", f"detail/Contacts/{contact_id}", require_sid=True)
+            except Exception as exc:  # noqa: BLE001 - lookup is best effort
+                logger.info("contact_lookup_failed id=%s error=%s", contact_id, exc)
+                raw = None
+            node: Any = raw
+            for key in ("message", "data"):
+                if isinstance(node, dict) and isinstance(node.get(key), dict):
+                    node = node[key]
+            record = node.get("record") if isinstance(node, dict) else None
+            if isinstance(record, dict) and str(record.get("id") or contact_id).strip() == contact_id:
+                return {**record, "id": contact_id}
+
+        fetch = getattr(self.crm_client, "_fetch_records_by_ids", None)
+        if fetch is None:
+            return None
+        try:
+            records = await fetch("Contacts", [contact_id])
+        except Exception as exc:  # noqa: BLE001 - lookup is best effort
+            logger.info("contact_lookup_failed id=%s error=%s", contact_id, exc)
+            return None
+        for record in records or []:
+            if isinstance(record, dict) and str(record.get("id") or "").strip() == contact_id:
+                return record
+        return None
+
+    @staticmethod
+    def _derive_meeting_end(fields: dict[str, Any]) -> str | None:
+        """date_start + duration (default 1 h) in Coripo's 'YYYY-MM-DD HH:MM:SS' format."""
+        raw_start = str(fields.get("date_start") or "").strip()
+        if not raw_start:
+            return None
+        start = None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
+            try:
+                start = datetime.strptime(raw_start, fmt)
+                break
+            except ValueError:
+                continue
+        if start is None:
+            return None
+        try:
+            hours = int(fields.get("duration_hours") or 0)
+            minutes = int(fields.get("duration_minutes") or 0)
+        except (TypeError, ValueError):
+            hours, minutes = 0, 0
+        if hours == 0 and minutes == 0:
+            hours = 1
+        return (start + timedelta(hours=hours, minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
 
     def _collect_coripo_fields(self, data: dict[str, Any]) -> dict[str, Any]:
         base_fields: dict[str, Any] = {}

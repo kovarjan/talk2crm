@@ -87,6 +87,12 @@ class Settings(BaseSettings):
     read_service_v2_enabled: bool = True
     write_service_v2_enabled: bool = True
     aggregate_tools_enabled: bool = True
+    # Route create/update/patch CRM writes through Coripo's live ai_schema/ai_write
+    # endpoints (SchemaDrivenWriteService) instead of the blind set/{module} POST.
+    # Falls back to the legacy path automatically if ai_schema/ai_write raises for a
+    # module (e.g. one Coripo hasn't rolled the endpoints out for yet), so this can be
+    # left on; only disable if you need to force every write through the legacy path.
+    ai_write_enabled: bool = True
 
     # Resolver thresholds stay config-driven until calibrated from runtime telemetry.
     resolver_read_confidence_threshold: float = 0.70

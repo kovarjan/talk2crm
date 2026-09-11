@@ -127,11 +127,16 @@ class OllamaEmbedder:
         if not text:
             return [0.0] * self.size
         try:
+            # A live embedding backend responds in well under a second; 30s only ever
+            # gets fully spent when the backend is unreachable (network/VPN down, host
+            # offline), in which case every RAG search would stall the full 30s before
+            # falling back below. 5s is generous for a real slow response but stops an
+            # unreachable backend from stalling requests for that long.
             response = await get_shared_http_client().post(
                 f"{self.base_url}/embeddings",
                 json=self._request_body(text),
                 headers=self._headers,
-                timeout=30.0,
+                timeout=5.0,
             )
             response.raise_for_status()
             return response.json()["data"][0]["embedding"]

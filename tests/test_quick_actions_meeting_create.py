@@ -25,6 +25,11 @@ class DummyCrmClient:
     async def execute_module_action(self, module: str, action: str, data: dict[str, Any]) -> dict[str, Any]:
         return {"status": "ok", "id": "d9207f5e-0abc-4b66-96d3-bd4e6ec97200"}
 
+    async def _fetch_records_by_ids(self, module_name: str, ids: list[str]) -> list[dict[str, Any]]:
+        if module_name == "Contacts" and self.contact_id in ids:
+            return [{"id": self.contact_id, "first_name": "Libor", "last_name": "Adamec", "account_id": self.account_id, "account_name": "PANAS, spol. s r.o."}]
+        return []
+
     async def generic_search(self, query: str, scope: str = "all") -> dict[str, Any]:
         if scope == "contacts":
             q = str(query or "").lower()
@@ -161,8 +166,9 @@ def test_quick_action_creates_confirmation_for_meeting_request() -> None:
 
     data = pending.get("data") or {}
     fields = data.get("fields") or {}
-    assert fields.get("parent_type") == "Contacts"
-    assert fields.get("parent_id") == client.contact_id
+    # Coripo meetings relate to the company; the person is an invitee.
+    assert fields.get("parent_type") == "Accounts"
+    assert fields.get("parent_id") == client.account_id
     assert fields.get("contact_name") == "Mimrová"
 
     invitees = data.get("invitees") or {}
@@ -198,8 +204,9 @@ def test_quick_action_resolves_contact_from_non_title_phrase() -> None:
     assert "karl" in str(result.data.get("message_to_user") or "").lower()
 
     # For synthetic dummy dataset, fuzzy resolution picks the available contact.
-    assert fields.get("parent_type") == "Contacts"
-    assert fields.get("parent_id") == client.contact_id
+    # Coripo meetings relate to the company; the person is an invitee.
+    assert fields.get("parent_type") == "Accounts"
+    assert fields.get("parent_id") == client.account_id
     assert str(fields.get("contact_name") or "").strip()
     assert "kontakt navázán" in str(result.data.get("message_to_user") or "").lower()
 
@@ -227,8 +234,9 @@ def test_quick_action_resolves_contact_when_phrase_contains_company_clause() -> 
 
     data = pending.get("data") or {}
     fields = data.get("fields") or {}
-    assert fields.get("parent_type") == "Contacts"
-    assert fields.get("parent_id") == client.contact_id
+    # Coripo meetings relate to the company; the person is an invitee.
+    assert fields.get("parent_type") == "Accounts"
+    assert fields.get("parent_id") == client.account_id
 
 
 def test_quick_action_uses_fallback_list_lookup_when_generic_search_returns_empty() -> None:
@@ -251,8 +259,9 @@ def test_quick_action_uses_fallback_list_lookup_when_generic_search_returns_empt
     pending = result.data.get("pending_action") or {}
     data = pending.get("data") or {}
     fields = data.get("fields") or {}
-    assert fields.get("parent_type") == "Contacts"
-    assert fields.get("parent_id") == client.contact_id
+    # Coripo meetings relate to the company; the person is an invitee.
+    assert fields.get("parent_type") == "Accounts"
+    assert fields.get("parent_id") == client.account_id
 
 
 def test_quick_action_hard_stops_when_contact_cannot_be_resolved() -> None:
@@ -305,9 +314,41 @@ def test_adjust_meeting_normalizes_card_style_contact_id_into_invitees() -> None
 
     fields = (adjusted.data or {}).get("fields") or {}
     assert fields.get("contact_id") == client.contact_id
-    assert fields.get("parent_type") == "Contacts"
-    assert fields.get("parent_id") == client.contact_id
+    # Coripo meetings relate to the company ("Týká se"); the person is an invitee.
+    assert fields.get("parent_type") == "Accounts"
+    assert fields.get("parent_id") == client.account_id
 
     invitees = (adjusted.data or {}).get("invitees") or {}
     contacts = invitees.get("Contacts") or []
     assert any(str(item.get("id") or "").strip() == client.contact_id for item in contacts)
+
+
+def test_adjust_meeting_derives_required_end_and_notes_instead_of_asking() -> None:
+    client = DummyCrmClient()
+    engine = ModuleAdjustmentEngine(
+        tenant_id="ai-local",
+        user_id="1",
+        crm_client=client,  # type: ignore[arg-type]
+        input_text="Naplánuj schůzku ohledně fakturace projektu",
+        request_context={},
+    )
+
+    adjusted = asyncio.run(
+        engine.apply(
+            module="Meetings",
+            action="create",
+            data={
+                "fields": {
+                    "contact_id": client.contact_id,
+                    "date_start": "2026-09-15 14:00:00",
+                    "duration_hours": 2,
+                    "duration_minutes": 0,
+                    "description": "Fakturace projektu",
+                }
+            },
+        )
+    )
+
+    fields = (adjusted.data or {}).get("fields") or {}
+    assert fields.get("date_end") == "2026-09-15 16:00:00"
+    assert fields.get("zapis") == "Fakturace projektu"

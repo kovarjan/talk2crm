@@ -146,6 +146,10 @@ PRAVIDLO PENDING AKCE: Kontext může obsahovat pending_action — návrh akce �
   Pro úpravu polí (datum, čas, popis, ...): zavolej crm_action_tool s action="create" a KOMPLETNÍMI poli — zkopíruj všechna pole z pending_action.data.fields a přepiš to, co uživatel mění.
   NIKDY nevolej action="update"/"delete" na záznam s pending_action.action="create".
   NIKDY nefiltruj Meetings/Calls podle contact_id — použij parametr search.
+PRAVIDLO POVINNÁ POLE: Při vytváření záznamu odvoď sám vše, co jde odvodit z požadavku a kontextu — name (např. "Schůzka - Fakturace projektu"), description i zapis (zápis = totéž co description, pokud uživatel neřekl jinak). Bez zadané délky trvá schůzka 1 hodinu.
+  NIKDY se neptej uživatele na hodnoty, které lze odvodit nebo domyslet. Ptej se jen na informaci, která opravdu chybí (např. termín, nebo který ze dvou kontaktů).
+  Pokud crm_action_tool vrátí "needs_more_info", oprav data_json sám podle field_errors (doplň nebo odstraň pole) a zavolej nástroj znovu; uživatele se ptej až když hodnotu nelze odvodit.
+  Pole v "missing_required" jsou jen varování — vytvoření neblokují. Kontakt u schůzky/hovoru patří do invitees (contact_id stačí uvést, nástroj ho tam přesune); "Týká se" (parent) je firma kontaktu.
 
 DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
 1. rag_search_tool(query: str, module: str="", limit: int=5)
@@ -207,7 +211,7 @@ Dotaz: "naplánuj schůzku s [Jméno] na úterý ráno"
 Krok 1 — najdi kontakt:
 → <tool_call>{{"name": "rag_search_tool", "args": {{"query": "[Jméno]", "module": "contacts"}}}}</tool_call>
 Krok 2 — vytvoř schůzku s contact_id z výsledku (data_json piš jako objekt, NE jako string):
-→ <tool_call>{{"name": "crm_action_tool", "args": {{"module": "Meetings", "action": "create", "data_json": {{"fields": {{"contact_name": "[Jméno z výsledku]", "contact_id": "[REAL_CONTACT_ID_Z_VYSLEDKU]", "date_start": "[REAL_DATETIME]", "description": "..."}}}}}}}}}}</tool_call>
+→ <tool_call>{{"name": "crm_action_tool", "args": {{"module": "Meetings", "action": "create", "data_json": {{"fields": {{"contact_name": "[Jméno z výsledku]", "contact_id": "[REAL_CONTACT_ID_Z_VYSLEDKU]", "name": "Schůzka - [téma]", "date_start": "[REAL_DATETIME]", "description": "[téma]", "zapis": "[téma]"}}}}}}}}}}</tool_call>
 Krok 3 — crm_action_tool vrátí {{"status":"confirmation_required"}}. Okamžitě:
 → <answer>Připraveno: schůzka je připravena. Potvrďte prosím provedení.</answer>
 
