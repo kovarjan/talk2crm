@@ -13,6 +13,16 @@ class BaseResponse(BaseModel):
 
 class ChatCreate(BaseModel):
     user_id: str
+    name: str | None = None
+    tool: str | None = None
+
+
+class ChatUpdateRequest(BaseModel):
+    """Partial update: only the provided fields change."""
+
+    name: str | None = None
+    tool: str | None = None
+    pinned: bool | None = None
 
 
 class ProcessInputRequest(BaseModel):
@@ -60,6 +70,8 @@ class ChatHistoryResponse(BaseModel):
     history: list[ChatMessageItem] = Field(default_factory=list)
     name: str | None = None
     updated_at: datetime | None = None
+    tool: str | None = None
+    pinned: bool = False
 
 
 class UserChatsResponse(BaseModel):
@@ -72,6 +84,7 @@ class ChatReplaceRequest(BaseModel):
     chat_id: str
     history: list[ChatMessageItem] = Field(default_factory=list)
     name: str | None = None
+    tool: str | None = None
 
 
 class GenerateRequest(BaseModel):

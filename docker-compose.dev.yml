@@ -14,6 +14,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/${POSTGRES_DB}
       QDRANT_URL: http://qdrant:6333
+      SEARXNG_URL: http://searxng:8080
       ENVIRONMENT: ${ENVIRONMENT:-dev}
       DEBUG: ${DEBUG:-true}
       WATCHFILES_FORCE_POLLING: ${WATCHFILES_FORCE_POLLING:-true}
@@ -29,6 +30,22 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_started
+      searxng:
+        condition: service_started
+    restart: unless-stopped
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: talk2crm-searxng
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-change-me-talk2crm-searxng-secret}
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    # Uncomment to browse the instance from the host; the gateway reaches it on
+    # the compose network either way.
+    ports:
+      - "8088:8080"
     restart: unless-stopped
 
   postgres:

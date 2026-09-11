@@ -72,6 +72,14 @@ class Settings(BaseSettings):
 
     crm_mode: str = "on"
     crm_timeout_seconds: float = 25.0
+
+    # Web search via a self-hosted SearXNG instance (docker-compose service
+    # `searxng`). Set web_search_enabled=False to hide the tool from the agent.
+    web_search_enabled: bool = True
+    searxng_url: str = "http://searxng:8080"
+    web_search_max_results: int = 5
+    web_search_timeout_seconds: float = 12.0
+
     coripo_hmac_key_id: str = "your-tenant-id"
     coripo_test_token: str = ""
     # How long an HMAC-derived Coripo SID is reused across requests (0 disables

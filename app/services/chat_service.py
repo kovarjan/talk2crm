@@ -343,11 +343,15 @@ async def create_chat(
     tenant_id: str,
     user_id: str,
     persist: bool = True,
+    name: str | None = None,
+    tool: str | None = None,
 ) -> Chat:
     chat = Chat(
         id=uuid.uuid4().hex,
         tenant_id=tenant_id,
         user_id=user_id,
+        name=(name or "").strip()[:255] or None,
+        tool=(tool or "").strip()[:32] or None,
     )
     db.add(chat)
     if not persist:

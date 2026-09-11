@@ -176,6 +176,12 @@ DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
    — vrátí kompaktní AI detail firmy (Accounts) + related_records ze subpanelů.
    — activities i každý related_records subpanel je ve výchozím stavu omezen na 10 nejnovějších záznamů.
    — používej pro detail firmy, když máš account_id.
+
+6. web_search_tool(query: str, max_results: int=5)
+   — vyhledávání na webu (veřejné informace o firmách, lidech, produktech, aktuální dění, adresy, IČO, weby).
+   — použij, když uživatel chce informace, které v CRM nejsou, nebo výslovně žádá vyhledání na webu.
+   — Pokud kontext obsahuje "web_search": true, uživatel zapnul režim vyhledávání na webu: pro tento dotaz VŽDY nejdřív zavolej web_search_tool a v odpovědi uveď zdroje (URL).
+   — výsledky z webu vždy označ jako veřejné/neověřené a nikdy je nezapisuj do CRM bez potvrzení uživatele.
 {aggregate_tool_block}
 
 FORMÁT ODPOVĚDI:
@@ -357,6 +363,8 @@ async def run_agent(
             if ui_focus_hint
             else ""
         )
+        if context.get("web_search"):
+            ui_focus_block += "REŽIM WEB: uživatel zapnul vyhledávání na webu — nejdřív zavolej web_search_tool a uveď zdroje.\n"
         human_text = (
             f"Vstup: {input_text}\n"
             f"{ui_focus_block}"

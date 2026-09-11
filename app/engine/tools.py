@@ -31,12 +31,15 @@ from app.engine.tool_validator import (
     MathToolArgs,
     MyMeetingsToolArgs,
     RagSearchToolArgs,
+    WebSearchToolArgs,
     validate_crm_action_call,
     validate_get_company_overview_call,
     validate_crm_query_call,
     validate_my_meetings_call,
     validate_rag_search_call,
+    validate_web_search_call,
 )
+from app.engine.web_search import search_web
 
 # Helpers relocated to dedicated modules; aliased to keep call sites stable.
 from app.engine.account_resolution import (
@@ -1038,7 +1041,35 @@ def build_tools(
             tcl.set_output({"module": "Accounts", "related_modules": 0})
             return json.dumps(wrapped, ensure_ascii=False)
 
+    @tool("web_search_tool", args_schema=WebSearchToolArgs)
+    async def web_search_tool(query: str, max_results: int = 5) -> str:
+        """
+        Vyhledá na webu (SearXNG) veřejné informace o firmách, kontaktech, produktech nebo
+        aktuálním dění, které nejsou v CRM. Vrací seznam výsledků {title, url, content}.
+        Parametry: query (str), max_results (int, výchozí 5).
+        """
+        async with ToolCallLogger(
+            "web_search_tool", tenant_id, user_id,
+            inputs={"query": query, "max_results": max_results},
+        ) as tcl:
+            validation_error = validate_web_search_call(query=query, max_results=max_results)
+            if validation_error:
+                error_payload = {"status": "tool_validation_error", "message": validation_error, "results": []}
+                tcl.set_output(error_payload)
+                return json.dumps(error_payload, ensure_ascii=False)
+            try:
+                results = await search_web(query=_safe_text(query), max_results=int(max_results))
+            except Exception as exc:  # noqa: BLE001 - the agent must get a usable observation
+                error_payload = {"status": "web_search_unavailable", "message": str(exc), "results": []}
+                tcl.set_output({"status": "web_search_unavailable"})
+                return json.dumps(error_payload, ensure_ascii=False)
+            payload = {"status": "ok", "query": _safe_text(query), "results": results}
+            tcl.set_output({"status": "ok", "results": len(results)})
+            return json.dumps(payload, ensure_ascii=False)
+
     tools = [crm_action_tool, rag_search_tool, my_meetings_tool, crm_query_tool, get_company_overview]
+    if settings.web_search_enabled:
+        tools.append(web_search_tool)
     if settings.aggregate_tools_enabled and _should_enable_aggregate_tools(input_text):
         tools.append(
             _build_crm_aggregate_tool(

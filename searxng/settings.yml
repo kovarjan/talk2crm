@@ -1,0 +1,29 @@
+# SearXNG configuration for the talk2crm stack.
+# Only the JSON API is used by the gateway (app/engine/web_search.py); the
+# instance is not exposed publicly (see docker-compose: no host port by default).
+use_default_settings: true
+
+general:
+  instance_name: "talk2crm search"
+  debug: false
+
+server:
+  # Override with SEARXNG_SECRET in the environment for production.
+  secret_key: "change-me-talk2crm-searxng-secret"
+  limiter: false
+  image_proxy: false
+
+search:
+  safe_search: 1
+  autocomplete: ""
+  default_lang: "cs"
+  formats:
+    - html
+    - json
+
+ui:
+  static_use_hash: true
+
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 10.0

@@ -30,6 +30,7 @@ from app.api.models import (
     ChatCreate,
     ChatHistoryResponse,
     ChatReplaceRequest,
+    ChatUpdateRequest,
     CrmRecordCreatedEventRequest,
     CreateChatResponse,
     ExtractFieldsRequest,
@@ -270,7 +271,13 @@ async def create_chat(
 ) -> CreateChatResponse:
     if body is not None and body.user_id != ctx["user_id"]:
         raise HTTPException(status_code=403, detail="user_id mismatch with auth header")
-    chat = await chat_service.create_chat(db, tenant_id=ctx["tenant_id"], user_id=ctx["user_id"])
+    chat = await chat_service.create_chat(
+        db,
+        tenant_id=ctx["tenant_id"],
+        user_id=ctx["user_id"],
+        name=body.name if body is not None else None,
+        tool=body.tool if body is not None else None,
+    )
     return CreateChatResponse(chat_id=chat.id)
 
 
@@ -298,6 +305,48 @@ async def get_chat(
         history=history,
         name=response_name,
         updated_at=chat.updated_at,
+        tool=chat.tool,
+        pinned=bool(chat.pinned),
+    )
+
+
+@router.patch("/chats/{chat_id}", response_model=ChatHistoryResponse)
+async def patch_chat(
+    chat_id: str,
+    body: ChatUpdateRequest,
+    ctx: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db),
+) -> ChatHistoryResponse:
+    """Rename, pin/unpin or re-tag a chat without touching its messages."""
+    chat = await chat_service.get_chat_or_404(
+        db,
+        chat_id=chat_id,
+        tenant_id=ctx["tenant_id"],
+        user_id=ctx["user_id"],
+    )
+    if body.name is not None:
+        chat.name = body.name.strip()[:255] or None
+    if body.tool is not None:
+        chat.tool = body.tool.strip()[:32] or None
+    if body.pinned is not None:
+        chat.pinned = bool(body.pinned)
+    await db.commit()
+    # Attributes expire on commit; reload them explicitly in the async session.
+    await db.refresh(chat)
+
+    history = await chat_service.load_messages(
+        db,
+        chat_id=chat.id,
+        tenant_id=ctx["tenant_id"],
+        user_id=ctx["user_id"],
+    )
+    return ChatHistoryResponse(
+        chat_id=chat.id,
+        history=history,
+        name=(chat.name or "").strip() or fallback_chat_name(history),
+        updated_at=chat.updated_at,
+        tool=chat.tool,
+        pinned=bool(chat.pinned),
     )
 
 
@@ -320,7 +369,8 @@ async def get_user_chats(
     stmt = (
         select(Chat)
         .where(Chat.tenant_id == ctx["tenant_id"], Chat.user_id == ctx["user_id"])
-        .order_by(Chat.updated_at.desc())
+        # Pinned chats first, then most recently updated.
+        .order_by(Chat.pinned.desc(), Chat.updated_at.desc())
         .limit(effective_limit)
     )
     result = await db.execute(stmt)
@@ -341,6 +391,8 @@ async def get_user_chats(
                 history=history,
                 name=response_name,
                 updated_at=chat.updated_at,
+                tool=chat.tool,
+                pinned=bool(chat.pinned),
             )
         )
 
@@ -385,6 +437,8 @@ async def put_chat(
 
     if body.name is not None:
         chat.name = body.name
+    if body.tool is not None:
+        chat.tool = body.tool.strip()[:32] or None
     chat.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
@@ -400,6 +454,8 @@ async def put_chat(
         history=history,
         name=chat.name,
         updated_at=chat.updated_at,
+        tool=chat.tool,
+        pinned=bool(chat.pinned),
     )
 
 
@@ -415,7 +471,15 @@ async def delete_chat(
         tenant_id=ctx["tenant_id"],
         user_id=ctx["user_id"],
     )
-    await db.delete(chat)
+    # Delete messages with a statement: the ORM cascade would lazy-load the
+    # relationship, which is not allowed in the async session (MissingGreenlet).
+    await db.execute(
+        delete(ChatMessage).where(
+            ChatMessage.chat_id == chat.id,
+            ChatMessage.tenant_id == ctx["tenant_id"],
+        )
+    )
+    await db.execute(delete(Chat).where(Chat.id == chat.id, Chat.tenant_id == ctx["tenant_id"]))
     await db.commit()
     return {"ok": True}
 

@@ -57,6 +57,20 @@ class RagSearchToolArgs(BaseModel):
     module: str = ""
 
 
+class WebSearchToolArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str
+    max_results: int = 5
+
+
+def validate_web_search_call(*, query: str, max_results: int) -> str | None:
+    if not _safe_text(query):
+        return "Query is required."
+    if int(max_results) < 1 or int(max_results) > 20:
+        return "max_results must be between 1 and 20."
+    return None
+
+
 class MyMeetingsToolArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     date_from: str | None = None

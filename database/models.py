@@ -14,6 +14,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -57,6 +58,11 @@ class Chat(Base):
     )
     user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Assistant tool/mode the chat was started with (chat, smart-paste, summarize,
+    # recommend, web-search). Lets the UI reopen the session in the same mode.
+    tool: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Pinned chats stay at the top of the user's history list.
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"), default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
