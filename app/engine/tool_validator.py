@@ -71,6 +71,20 @@ def validate_web_search_call(*, query: str, max_results: int) -> str | None:
     return None
 
 
+class WebFetchToolArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    url: str
+
+
+def validate_web_fetch_call(*, url: str) -> str | None:
+    value = _safe_text(url)
+    if not value:
+        return "URL is required."
+    if not (value.startswith("http://") or value.startswith("https://")):
+        return "Only http/https URLs are supported."
+    return None
+
+
 class MyMeetingsToolArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     date_from: str | None = None

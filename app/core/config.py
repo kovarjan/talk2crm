@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     web_search_max_results: int = 5
     web_search_timeout_seconds: float = 12.0
 
+    # Companion tool: lets the agent open a URL web_search_tool surfaced and
+    # read its text. Same enable flag family, independent timeout/size cap.
+    web_fetch_enabled: bool = True
+    web_fetch_max_chars: int = 6000
+    web_fetch_timeout_seconds: float = 10.0
+
     coripo_hmac_key_id: str = "your-tenant-id"
     coripo_test_token: str = ""
     # How long an HMAC-derived Coripo SID is reused across requests (0 disables

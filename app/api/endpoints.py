@@ -38,6 +38,7 @@ from app.api.models import (
     ProcessInputRequest,
     RagIngestRequest,
     RecommendActionsRequest,
+    ResearchCompanyRequest,
     SearchRequest,
     UserChatsResponse,
 )
@@ -49,6 +50,7 @@ from app.engine.llm import get_chat_llm
 from app.engine.pipeline import process_input_core
 from app.engine.recommendations import recommend_actions
 from app.engine.extraction import extract_fields
+from app.engine.company_research import research_company
 from langchain_core.messages import HumanMessage, SystemMessage
 from app.engine.rag import get_rag_service
 from app.domain.skill_contracts import (
@@ -259,6 +261,50 @@ async def extract_fields_endpoint(
         payload.module,
         payload.record_id,
         len(result.get("fields") or {}),
+    )
+    return BaseResponse(success=True, response=result)
+
+
+@router.post("/research-company/", response_model=BaseResponse)
+async def research_company_endpoint(
+    payload: ResearchCompanyRequest,
+    ctx: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db),
+) -> BaseResponse:
+    """Read-only tool-using agent call that backfills an Accounts record's
+    fields from public web information (company site, search results).
+    Same never-writes-to-CRM contract as /extract-fields/ — the caller
+    applies the result into the currently open form."""
+    tenant_manager = TenantManager(db)
+    credentials = await tenant_manager.get_credentials(ctx["tenant_id"])
+    crm_client = CoripoClient(
+        credentials.crm_base_url,
+        credentials.crm_token,
+        user_id=ctx["user_id"],
+        user_name=ctx["user_name"],
+    )
+    rag_service = get_rag_service()
+
+    result = await research_company(
+        tenant_id=ctx["tenant_id"],
+        user_id=ctx["user_id"],
+        record_id=payload.record_id,
+        field_schema=payload.field_schema,
+        current_values=payload.current_values,
+        company_name=payload.company_name,
+        hint=payload.hint,
+        crm_client=crm_client,
+        rag_service=rag_service,
+        db=db,
+    )
+
+    logger.debug(
+        "research_company tenant=%s user=%s record=%s fields=%d sources=%d",
+        ctx["tenant_id"],
+        ctx["user_id"],
+        payload.record_id,
+        len(result.get("fields") or {}),
+        len(result.get("sources") or []),
     )
     return BaseResponse(success=True, response=result)
 

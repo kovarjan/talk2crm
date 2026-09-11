@@ -57,6 +57,7 @@ def test_build_tools_returns_expected_tools():
         "crm_query_tool",
         "get_company_overview",
         "web_search_tool",
+        "web_fetch_tool",
     }
 
 

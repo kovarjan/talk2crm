@@ -106,3 +106,11 @@ class ExtractFieldsRequest(BaseModel):
     field_schema: dict[str, Any]
     current_values: dict[str, Any] = Field(default_factory=dict)
     messages: list[dict[str, str]] = Field(default_factory=list)
+
+
+class ResearchCompanyRequest(BaseModel):
+    record_id: str | None = None
+    field_schema: dict[str, Any]
+    current_values: dict[str, Any] = Field(default_factory=dict)
+    company_name: str
+    hint: str | None = None
