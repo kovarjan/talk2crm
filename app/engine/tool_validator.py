@@ -10,6 +10,11 @@ from app.utils.crm_id import CRM_ID_RE as _CRM_ID_RE
 from app.utils.text import safe_text as _safe_text
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover
+    from app.services.module_catalog import ModuleCatalog
+
 _WRITE_MODULES = {"meetings", "calls", "tasks", "notes", "contacts", "accounts", "leads", "quotes"}
 _READ_MODULES = {
     "meetings",
@@ -26,6 +31,7 @@ _READ_MODULES = {
     "acm_orders",
     "acm_orders_lines",
     "products",
+    "producttemplates",
 }
 _RAG_MODULES = {
     "",
@@ -40,6 +46,7 @@ _RAG_MODULES = {
     "opportunites",
     "quotes",
     "acm_invoices",
+    "producttemplates",
 }
 
 class CrmActionToolArgs(BaseModel):
@@ -165,10 +172,11 @@ def _load_data_json(data_json: str) -> tuple[dict[str, Any] | None, str | None]:
     return parsed, None
 
 
-def validate_crm_action_call(*, module: str, action: str, data_json: str) -> str | None:
+def validate_crm_action_call(*, module: str, action: str, data_json: str, catalog: "ModuleCatalog | None" = None) -> str | None:
     module_norm = _safe_text(module).lower()
     action_norm = _safe_text(action).lower()
-    if module_norm not in _WRITE_MODULES:
+    allowed_write = catalog.writable() if catalog is not None else _WRITE_MODULES
+    if module_norm not in allowed_write:
         return f"Unsupported module '{module}'."
     if action_norm not in {"create", "update", "patch", "delete"}:
         return f"Unsupported action '{action}'."
@@ -205,12 +213,13 @@ def validate_crm_action_call(*, module: str, action: str, data_json: str) -> str
     return None
 
 
-def validate_rag_search_call(*, query: str, limit: int, module: str) -> str | None:
+def validate_rag_search_call(*, query: str, limit: int, module: str, catalog: "ModuleCatalog | None" = None) -> str | None:
     if not _safe_text(query):
         return "Query is required."
     if int(limit) < 1 or int(limit) > 100:
         return "Limit must be between 1 and 100."
-    if _safe_text(module).lower() not in _RAG_MODULES:
+    allowed_rag = (catalog.rag() | {""}) if catalog is not None else _RAG_MODULES
+    if _safe_text(module).lower() not in allowed_rag:
         return f"Unsupported module filter '{module}'."
     return None
 
@@ -233,8 +242,10 @@ def validate_crm_query_call(
     date_to: str | None,
     limit: int,
     order_by: str | None,
+    catalog: "ModuleCatalog | None" = None,
 ) -> str | None:
-    if _safe_text(module).lower() not in _READ_MODULES:
+    allowed_read = catalog.readable() if catalog is not None else _READ_MODULES
+    if _safe_text(module).lower() not in allowed_read:
         return f"Unsupported module '{module}'."
     if int(limit) < 1 or int(limit) > 500:
         return "Limit must be between 1 and 500."

@@ -35,7 +35,8 @@ Optional HMAC headers (machine-to-machine use):
   - `context.capabilities`: list of capability ids for this turn (`crm` is implied; `web`, `form`). Omitted = defaults (`crm`, `form`). Unknown ids are ignored and echoed in `unknown_capabilities`. Legacy `context.web_search: true` still enables `web`.
   - `context.form`: `{"editable": true, "prefix": "view", "values": {field: scalar}}` — current values of the form open in the CRM; used by the `form` capability tools.
   - returns: command response + `chat_id` + chat history + `capabilities` (enabled ids) + `unknown_capabilities` + `form_patch` (or `null`)
-  - `form_patch`: `{"module", "record", "fields": {name: value | {id, name}}, "lines": {"mode": "append", "rows": []}, "invitees": {}, "sources": [url], "message", "schema": {"sections": [...]}}` — values proposed for the open form; never written by the gateway.
+  - `form_patch`: `{"module", "record", "fields": {name: value | {id, name}}, "lines": {"mode": "append", "line_module": str|null, "rows": [{<editable line column>: value}], "dropped": [{"row", "reason"}]}, "invitees": {}, "sources": [url], "message", "schema": {"sections": [...]}}` — values proposed for the open form; never written by the gateway. `lines.rows` are append-only new rows validated against the schema's `line_items.line_fields` (editable columns only); a product row carries `product_template_id: {id, name}` resolved through `product_lookup_tool`, or `{name}` alone when unresolved.
+  - `context.capabilities` may also include `products` (on by default): adds `product_lookup_tool`. The `crm` capability includes `crm_record_detail_tool(module, record_id, include_lines)` for one record with its line rows and totals.
 
 - `POST /process-input/stream` (SSE): same body; events `accepted`, `pipeline.mode`, `agent.started`, `agent.tool_call`, `answer.delta`, `answer.done`, `form_patch` (payload as above, emitted before `result` when present), `result`, `error`.
 
@@ -55,6 +56,7 @@ Optional HMAC headers (machine-to-machine use):
   - returns scoped or aggregate hybrid search results
 
 ### RAG ingest
+- `modules` accepts `ProductTemplates` (aliases `products`, `producttemplates`); the catalog is ingested through the same `list/{module}` path as other modules.
 - `POST /rag/ingest/`
   - body supports:
     - `modules` list (module names)

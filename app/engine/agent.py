@@ -113,7 +113,15 @@ def _history_to_messages(
     return messages
 
 
-def _build_system_prompt(tenant_id: str, tool_names: set[str], capabilities: set[str] | None = None) -> str:
+DEFAULT_READABLE_MODULES = "Accounts, Contacts, Meetings, Calls, Tasks, Notes, Leads, Opportunities, Quotes, acm_invoices"
+
+
+def _build_system_prompt(
+    tenant_id: str,
+    tool_names: set[str],
+    capabilities: set[str] | None = None,
+    readable_modules: str | None = None,
+) -> str:
     now = datetime.now()
     date_ctx = _build_date_context(now)
     prefix = get_settings().llm_system_prompt_prefix
@@ -141,6 +149,7 @@ def _build_system_prompt(tenant_id: str, tool_names: set[str], capabilities: set
     # Registry blocks carry doubled braces (f-string legacy); they are inserted
     # as a value, not as template text, so render them single here.
     tools_block = "\n\n".join(numbered).replace("{{", "{").replace("}}", "}")
+    tools_block = tools_block.replace("{readable_modules}", readable_modules or DEFAULT_READABLE_MODULES)
     capability_block = prompt_blocks_for(capabilities) if capabilities else ""
     capability_section = f"\n{capability_block}\n" if capability_block else ""
 
@@ -278,6 +287,7 @@ async def run_agent(
     system_prompt_override: str | None = None,
     capture_skills: bool = True,
     capabilities: set[str] | None = None,
+    readable_modules: str | None = None,
 ) -> dict[str, Any]:
     log_llm_step(
         logger,
@@ -315,7 +325,7 @@ async def run_agent(
         # or per-user/tenant skill overlays mixed in.
         system_prompt = system_prompt_override
     else:
-        system_prompt = _build_system_prompt(tenant_id, set(tools_by_name), capabilities=capabilities)
+        system_prompt = _build_system_prompt(tenant_id, set(tools_by_name), capabilities=capabilities, readable_modules=readable_modules)
 
         skill_block = ""
         if db is not None and settings.skills_enabled:

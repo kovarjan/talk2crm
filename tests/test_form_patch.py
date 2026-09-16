@@ -20,7 +20,7 @@ def test_build_form_patch_has_fixed_shape() -> None:
         "module": "Contacts",
         "record": None,
         "fields": {"first_name": "Jan"},
-        "lines": {"mode": "append", "rows": []},
+        "lines": {"mode": "append", "line_module": None, "rows": [], "dropped": []},
         "invitees": {},
         "sources": [],
         "message": "ok",

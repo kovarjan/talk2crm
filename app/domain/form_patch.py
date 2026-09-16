@@ -21,13 +21,17 @@ def build_form_patch(
     schema: dict[str, Any],
     sources: list[str] | None = None,
     message: str = "",
+    lines: dict[str, Any] | None = None,
+    line_module: str | None = None,
 ) -> dict[str, Any]:
     sections = schema.get("sections") if isinstance(schema, dict) else None
+    rows = [r for r in ((lines or {}).get("rows") or []) if isinstance(r, dict)]
+    dropped = [d for d in ((lines or {}).get("dropped") or []) if isinstance(d, dict)]
     return {
         "module": module,
         "record": record_id or None,
         "fields": dict(fields or {}),
-        "lines": {"mode": "append", "rows": []},
+        "lines": {"mode": "append", "line_module": line_module, "rows": rows, "dropped": dropped},
         "invitees": {},
         "sources": [str(url) for url in (sources or [])][:MAX_SOURCES],
         "message": str(message or ""),

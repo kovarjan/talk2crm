@@ -39,10 +39,16 @@ MODULE_ALIASES: dict[str, str] = {
     "order_line": "acm_orders_lines",
     "order_lines": "acm_orders_lines",
     "acm_orders_lines": "acm_orders_lines",
-    "product": "Products",
-    "products": "Products",
     "quote_line": "Products",
     "quote_lines": "Products",
+    # Product catalog (ProductTemplates); "Products" stays the quote-line module and is
+    # reachable by its exact name because unknown names pass through.
+    "product": "ProductTemplates",
+    "products": "ProductTemplates",
+    "producttemplate": "ProductTemplates",
+    "producttemplates": "ProductTemplates",
+    "product_template": "ProductTemplates",
+    "product_templates": "ProductTemplates",
 }
 
 

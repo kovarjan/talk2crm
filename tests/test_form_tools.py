@@ -109,3 +109,45 @@ def test_build_tools_adds_form_tools_only_with_form_capability() -> None:
     )}
     assert {"propose_form_fields_tool", "research_record_tool"} <= with_form
     assert not ({"propose_form_fields_tool", "research_record_tool"} & without)
+
+
+def test_propose_form_fields_passes_lines_into_patch() -> None:
+    schema = {"module": "Quotes", "sections": [{"group": "g", "fields": [
+        {"name": "name", "type": "text"},
+        {"name": "lines", "type": "line_items", "line_module": "Products", "line_fields": [{"name": "name", "type": "text", "editable": True}]},
+    ]}]}
+    crm = StubCrm(schema)
+    fake = AsyncMock(return_value={"message": "ok", "fields": {"name": "N"}, "lines": {"rows": [{"name": "A"}], "dropped": []}})
+    with patch.object(form_tools, "extract_fields", new=fake):
+        tools = build_form_tools(tenant_id="t", user_id="u", request_context={}, crm_client=crm, rag_service=None)
+        raw = asyncio.run(_tool(tools, "propose_form_fields_tool").ainvoke({"module": "Quotes", "record_id": "q1", "instructions": "x"}))
+    patch_out = json.loads(raw)["form_patch"]
+    assert patch_out["lines"]["rows"] == [{"name": "A"}]
+    assert patch_out["lines"]["line_module"] == "Products"
+
+
+def test_action_on_open_record_is_redirected_to_form_patch() -> None:
+    schema = {"module": "ProductTemplates", "sections": [{"group": "g", "fields": [{"name": "description", "type": "textarea"}]}]}
+    crm = StubCrm(schema)
+    ctx = {"module": "ProductTemplates", "record": "p1", "form": {"editable": True, "values": {}}, "capabilities": ["form"]}
+    tools = build_tools(tenant_id="t", user_id="u", input_text="vlož do description", request_context=ctx,
+                        crm_client=crm, rag_service=None, capabilities={"crm", "form"})
+    action = _tool(tools, "crm_action_tool")
+    raw = asyncio.run(action.ainvoke({"module": "ProductTemplates", "action": "update", "record_id": "p1",
+                                      "data_json": json.dumps({"fields": {"description": "Pneumatika", "bogus": 1}})}))
+    out = json.loads(raw)
+    assert out["status"] == "ok" and out["redirected_to_form"] is True
+    assert out["form_patch"]["fields"] == {"description": "Pneumatika"}
+    assert out["form_patch"]["record"] == "p1"
+    assert "bogus" in out["message_to_user"]
+
+
+def test_action_on_another_record_is_not_redirected() -> None:
+    crm = StubCrm()
+    ctx = {"module": "ProductTemplates", "record": "p1", "form": {"editable": True, "values": {}}}
+    tools = build_tools(tenant_id="t", user_id="u", input_text="x", request_context=ctx,
+                        crm_client=crm, rag_service=None, capabilities={"crm", "form"})
+    action = _tool(tools, "crm_action_tool")
+    raw = asyncio.run(action.ainvoke({"module": "ProductTemplates", "action": "update", "record_id": "other",
+                                      "data_json": json.dumps({"fields": {"description": "x"}})}))
+    assert json.loads(raw).get("redirected_to_form") is None

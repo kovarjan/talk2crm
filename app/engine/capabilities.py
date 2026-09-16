@@ -23,10 +23,14 @@ TOOL_PROMPT_BLOCKS: dict[str, str] = {
    — module může být také "opportunities", "quotes" nebo "acm_invoices", pokud hledáš obchodní případy, nabídky nebo faktury.""",
     "crm_query_tool": """crm_query_tool(module: str, filters: str="[]", search: str=null, limit: int=20)
    — přesný dotaz do CRM. Pro přesné lookupy jména osoby/firmy použij nejdřív search.
-   — podporované moduly pro čtení: Accounts, Contacts, Meetings, Calls, Tasks, Notes, Leads, Opportunities, Quotes, acm_invoices.
+   — podporované moduly pro čtení: {{readable_modules}}.
      filters je JSON pole [{{"field":"...","op":"eq","value":"..."}}]
    — fields id/account_id/contact_id a také *.id nebo *|id musí mít jako value jen skutečné CRM UUID, nikdy název firmy/kontaktu to nic nenajde.
    — pro více konkrétních záznamů můžeš použít pouze {{ "field": "id", "op": "in", "value": ["<CRM_ID_1>", "<CRM_ID_2>"] }}""",
+    "crm_record_detail_tool": """crm_record_detail_tool(module: str, record_id: str, include_lines: bool=true)
+   — detail jednoho záznamu včetně položek (řádků) u nabídek, faktur, objednávek a obchodních případů.
+   — pro otázky na položky, součty a slevy VŽDY použij tento nástroj; nikdy nesčítej ručně, součty jsou v totals.
+   — record_id musí být skutečné CRM id (z UI kontextu record/record_id nebo z výsledku jiného nástroje).""",
     "my_meetings_tool": """my_meetings_tool(date_from: str|null=null, date_to: str|null=null, limit: int=100)
    — moje schůzky (assigned_user_id = login user)
    — date_from/date_to jsou volitelné; bez datumu vrací nejnovější schůzky podle limitu""",
@@ -55,11 +59,16 @@ TOOL_PROMPT_BLOCKS: dict[str, str] = {
    — dohledá veřejné informace na webu k subjektu (firma, produkt) a připraví hodnoty polí otevřeného formuláře. NIKDY nezapisuje do CRM.
    — subject: název firmy nebo produktu tak, jak je ve formuláři; hint: upřesnění od uživatele (město, IČO, web, výrobce).
    — po výsledku dej <answer> se shrnutím a uveď zdroje (URL).""",
+    "product_lookup_tool": """product_lookup_tool(query: str, limit: int=5)
+   — hledání v katalogu produktů (ProductTemplates) podle názvu nebo kódu; vrací id, název, kód a katalogovou cenu.
+   — před navržením řádku s produktem VŽDY nejdřív zavolej tento nástroj a použij vrácené id; nikdy si id produktu nevymýšlej.
+   — pokud je více podobných kandidátů, vypiš je a zeptej se uživatele, který má na mysli.""",
 }
 
 TOOL_PROMPT_ORDER: list[str] = [
     "rag_search_tool",
     "crm_query_tool",
+    "crm_record_detail_tool",
     "my_meetings_tool",
     "crm_action_tool",
     "get_company_overview",
@@ -67,6 +76,7 @@ TOOL_PROMPT_ORDER: list[str] = [
     "web_fetch_tool",
     "propose_form_fields_tool",
     "research_record_tool",
+    "product_lookup_tool",
 ]
 
 
@@ -84,6 +94,7 @@ CAPABILITIES: dict[str, Capability] = {
         tool_names=frozenset({
             "rag_search_tool",
             "crm_query_tool",
+            "crm_record_detail_tool",
             "my_meetings_tool",
             "crm_action_tool",
             "get_company_overview",
@@ -104,10 +115,19 @@ CAPABILITIES: dict[str, Capability] = {
         id="form",
         tool_names=frozenset({"propose_form_fields_tool", "research_record_tool"}),
         prompt_block=(
-            "REŽIM FORMULÁŘ: uživatel má otevřený editovatelný formulář (kontext form). Když žádá doplnit, "
-            "vyplnit, připravit nebo dohledat hodnoty pro tento záznam, zavolej propose_form_fields_tool "
-            "nebo research_record_tool. Pro záznam otevřený ve formuláři NIKDY nevolej crm_action_tool."
+            "REŽIM FORMULÁŘ: uživatel má otevřený záznam ve formuláři (kontext form; detail i editace jsou "
+            "editovatelné živě). Když žádá doplnit, vyplnit, vložit, přidat, upravit nebo dohledat hodnoty "
+            "pro TENTO záznam (např. \"vlož do description\", \"přidej popis\"), zavolej propose_form_fields_tool "
+            "(instructions = přesný text a cílová pole) nebo research_record_tool. Nikdy neříkej, že formulář "
+            "nemůžeš vyplnit, a pro otevřený záznam nevolej crm_action_tool — hodnoty se uživateli ukážou ve "
+            "formuláři k potvrzení."
         ),
+        default_on=True,
+    ),
+    "products": Capability(
+        id="products",
+        tool_names=frozenset({"product_lookup_tool"}),
+        prompt_block="",
         default_on=True,
     ),
 }

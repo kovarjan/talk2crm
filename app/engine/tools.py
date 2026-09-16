@@ -44,6 +44,7 @@ from app.engine.tool_validator import (
 from app.engine.web_fetch import fetch_page
 from app.engine.web_search import search_web
 from app.engine.capabilities import tool_names_for
+from app.services.module_catalog import ModuleCatalog
 
 # Helpers relocated to dedicated modules; aliased to keep call sites stable.
 from app.engine.account_resolution import (
@@ -514,6 +515,7 @@ def build_tools(
     rag_service: TenantRAGService | None,
     action_confirmation: bool = False,
     capabilities: set[str] | None = None,
+    module_catalog: "ModuleCatalog | None" = None,
 ) -> list:
     settings = get_settings()
     write_service = CRMWriteService(
@@ -632,7 +634,24 @@ def build_tools(
                 except Exception:
                     pass
 
-            validation_error = validate_crm_action_call(module=module, action=action, data_json=data_json_value)
+            # The record open in the CRM form is never written from the gateway: with the form
+            # capability on, a mutation aimed at it becomes a live form_patch the user applies
+            # in the FE (universal detail scaffolding, same path as smart paste).
+            if capabilities is not None and "form" in capabilities:
+                from app.engine.form_tools import action_as_form_patch, targets_open_form
+
+                try:
+                    parsed_for_form = json.loads(_safe_text(data_json_value) or "{}")
+                except Exception:
+                    parsed_for_form = {}
+                if isinstance(parsed_for_form, dict) and targets_open_form(
+                    request_context=request_context, module=module, action=action, data=parsed_for_form,
+                ):
+                    open_record = str((request_context or {}).get("record_id") or (request_context or {}).get("record") or "").strip() or None
+                    redirected = await action_as_form_patch(module=module, record_id=open_record, data=parsed_for_form, crm_client=crm_client)
+                    tcl.set_output({"status": "redirected_to_form", "module": module, "action": action})
+                    return redirected
+            validation_error = validate_crm_action_call(module=module, action=action, data_json=data_json_value, catalog=module_catalog)
             if validation_error:
                 error_payload = {"status": "tool_validation_error", "message": validation_error}
                 tcl.set_output(error_payload)
@@ -655,13 +674,13 @@ def build_tools(
         Použij pro získání ID záznamu před dotazem do CRM.
         Vrací přibližné shody – vždy porovnej vrácený název s dotazem uživatele
         a upozorni na výrazný rozdíl.
-        Parametry: query (str), module ('accounts'|'contacts'|'meetings'|'opportunities'|'quotes'|'acm_invoices'), limit (int, výchozí 5).
+        Parametry: query (str), module ('accounts'|'contacts'|'meetings'|'opportunities'|'quotes'|'acm_invoices'|'producttemplates'), limit (int, výchozí 5).
         """
         async with ToolCallLogger(
             "rag_search_tool", tenant_id, user_id,
             inputs={"query": query, "limit": limit, "module": module},
         ) as tcl:
-            validation_error = validate_rag_search_call(query=query, limit=limit, module=module)
+            validation_error = validate_rag_search_call(query=query, limit=limit, module=module, catalog=module_catalog)
             if validation_error:
                 error_payload = {"status": "tool_validation_error", "message": validation_error, "results": []}
                 tcl.set_output(error_payload)
@@ -694,6 +713,8 @@ def build_tools(
                     "opportunites": ["Opportunities"],
                     "quotes": ["Quotes"],
                     "acm_invoices": ["acm_invoices"],
+                    "products": ["ProductTemplates"],
+                    "producttemplates": ["ProductTemplates"],
                 }
                 results = await rag_service.search(
                     tenant_id=tenant_id,
@@ -884,6 +905,7 @@ def build_tools(
                 date_to=date_to,
                 limit=limit,
                 order_by=order_by,
+                catalog=module_catalog,
             )
             if validation_error:
                 error_payload = {"status": "tool_validation_error", "message": validation_error, "cards": []}
@@ -1101,6 +1123,9 @@ def build_tools(
             return json.dumps(payload, ensure_ascii=False)
 
     tools = [crm_action_tool, rag_search_tool, my_meetings_tool, crm_query_tool, get_company_overview]
+    from app.engine.record_detail_tool import build_record_detail_tools
+
+    tools.extend(build_record_detail_tools(tenant_id=tenant_id, user_id=user_id, crm_client=crm_client))
     if settings.web_search_enabled:
         tools.append(web_search_tool)
     if settings.web_fetch_enabled:
@@ -1119,6 +1144,10 @@ def build_tools(
             crm_client=crm_client,
             rag_service=rag_service,
         ))
+    if capabilities is not None and "products" in capabilities:
+        from app.engine.product_tools import build_product_tools
+
+        tools.extend(build_product_tools(tenant_id=tenant_id, user_id=user_id, crm_client=crm_client, rag_service=rag_service))
     if settings.aggregate_tools_enabled and _should_enable_aggregate_tools(input_text):
         tools.append(
             _build_crm_aggregate_tool(

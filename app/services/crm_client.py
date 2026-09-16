@@ -1156,6 +1156,22 @@ class CoripoClient:
             require_sid=True,
         )
 
+    async def get_ai_modules(self) -> list[dict[str, Any]]:
+        """Modules the current user may use with the AI (GET ai/modules): ACL-filtered by Coripo."""
+        raw = await self._coripo_request("GET", "ai/modules")
+        for container in (raw.get("data") if isinstance(raw, dict) else None,
+                          (raw.get("message") or {}).get("data") if isinstance(raw, dict) and isinstance(raw.get("message"), dict) else None):
+            if isinstance(container, dict) and isinstance(container.get("modules"), list):
+                return [m for m in container["modules"] if isinstance(m, dict)]
+        return []
+
+    async def get_record_detail(self, module: str, record_id: str) -> dict[str, Any]:
+        """Raw Coripo detail (GET detail/{module}/{id}); the ``data`` dict or the payload itself."""
+        module_name = canonical_module_name(module) or module
+        raw = await self._coripo_request("GET", f"detail/{module_name}/{record_id}")
+        data = raw.get("data") if isinstance(raw, dict) else None
+        return data if isinstance(data, dict) else (raw if isinstance(raw, dict) else {})
+
     async def get_ai_schema(
         self,
         module: str,

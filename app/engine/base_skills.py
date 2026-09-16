@@ -69,7 +69,7 @@ BASE_SKILLS: list[BaseSkillDef] = [
         "id": "crm-module-field-guidance",
         "name": "Mapování CRM modulů a polí",
         "description": "Které CRM moduly a pole použít pro obchodní případy, nabídky, objednávky, faktury, měny a data.",
-        "version": 2,
+        "version": 3,
         "rule_text": (
             "- Pro obchodní případy používej module=\"Opportunities\"; pro nabídky module=\"Quotes\"; "
             "pro faktury module=\"acm_invoices\"; pro objednávky module=\"acm_orders\".\n"
@@ -79,6 +79,9 @@ BASE_SKILLS: list[BaseSkillDef] = [
             "- Pro analýzu sortimentu firmy (\"co kupují\", \"co se přestalo/začalo prodávat\") načti nejdřív objednávky/nabídky "
             "firmy (filter account_id), pak jejich položky přes acm_orders_lines/Products a porovnej je v čase.\n"
             "- U objednávek (acm_orders) používej pro časové filtry datové pole 'datum_vystaveni'.\n"
+            "- Položky OTEVŘENÉHO záznamu (nabídka, faktura, objednávka, obchodní případ) čti přes crm_record_detail_tool(module, record_id); "
+            "crm_query_tool na modulech řádků (Products, acm_invoices_lines, acm_orders_lines) používej jen pro hledání napříč záznamy.\n"
+            "- Produkty do řádků vždy vyhledej přes product_lookup_tool a použij vrácené id.\n"
             "- Opportunities jsou obchodní případy, NE nabídky (Quotes) — platí i pro related_records v přehledu firmy.\n"
             "- Uživateli zobrazuj jenom přeložené názvy modulů jako \"Nabídky\", ne \"Quotes\" ani \"Nabídky (Quotes)\".\n"
             "- Měna částek je uvedena v default_currency.iso4217; výchozí je vždy Kč (CZK), pokud není uvedeno jinak. "

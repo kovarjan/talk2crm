@@ -41,9 +41,9 @@ def test_web_search_alias_enables_web() -> None:
 
 
 def test_unknown_ids_are_reported_not_raised() -> None:
-    enabled, unknown = resolve_capabilities({"capabilities": ["crm", "products", "form", "briefing"]})
+    enabled, unknown = resolve_capabilities({"capabilities": ["crm", "summarize", "form", "briefing"]})
     assert enabled == {"crm", "form"}
-    assert unknown == ["products", "briefing"]
+    assert unknown == ["summarize", "briefing"]
 
 
 def test_non_string_entries_are_ignored() -> None:

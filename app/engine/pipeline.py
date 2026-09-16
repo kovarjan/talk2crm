@@ -38,6 +38,7 @@ from app.presentation.agent_result import normalize_agent_result_for_ui, to_user
 from app.services import chat_service
 from app.services.chat_titles import ensure_chat_name
 from app.services.crm_client import CoripoClient
+from app.services.module_catalog import get_module_catalog
 from app.services.tenant_manager import TenantManager
 from app.utils.modules import canonical_module_name
 
@@ -357,6 +358,7 @@ async def process_input_core(
         user_name=ctx["user_name"],
     )
     rag_service = get_rag_service()
+    module_catalog = await get_module_catalog(crm_client, tenant_id=tenant_id, user_id=user_id)
 
     if payload.chat_id:
         chat = await chat_service.get_chat_or_404(
@@ -461,6 +463,7 @@ async def process_input_core(
                 rag_service=rag_service,
                 action_confirmation=action_confirmation,
                 capabilities=enabled_capabilities,
+                module_catalog=module_catalog,
             )
             available_tools = [str(getattr(tool, "name", "")) for tool in tools if getattr(tool, "name", None)]
             history_for_agent = await chat_service.load_messages(
@@ -485,6 +488,7 @@ async def process_input_core(
                     emit=emit,
                     db=db,
                     capabilities=enabled_capabilities,
+                    readable_modules=", ".join(module_catalog.readable_names()) or None,
                 )
                 agent_result = normalize_agent_result_for_ui(agent_result)
             except Exception as exc:

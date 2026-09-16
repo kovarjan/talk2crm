@@ -26,7 +26,7 @@ from app.engine.agent import run_agent
 from app.engine.tools import build_tools
 from app.services.crm_client import CoripoClient
 
-EXTRACT_FIELDS_ALLOWED_TOOLS = {"rag_search_tool", "crm_query_tool", "get_company_overview"}
+EXTRACT_FIELDS_ALLOWED_TOOLS = {"rag_search_tool", "crm_query_tool", "get_company_overview", "product_lookup_tool"}
 
 EXTRACT_FIELDS_SYSTEM_PROMPT = """\
 Jsi asistent, který z vloženého textu (např. e-mailu od klienta) vyplňuje
@@ -74,6 +74,12 @@ vrať KONEČNOU odpověď výhradně v tagu <answer> obsahujícím JSON objekt:
   "message": "krátká věta pro uživatele o tom, co jsi vyplnil(a) nebo co chybí",
   "fields": {"nazev_pole": hodnota, ...}
 }
+
+POLOŽKY (ŘÁDKY): Pokud schéma obsahuje pole typu "line_items", můžeš vedle "fields" vrátit i
+  "lines": [ {<název_sloupce>: hodnota, ...}, ... ] — pouze NOVÉ řádky k přidání, nikdy úpravy stávajících.
+  Použij jen sloupce z "line_fields" s "editable": true. Sloupce readonly_computed nikdy nevyplňuj.
+  Pro řádek s produktem NEJDŘÍV zavolej product_lookup_tool a do "product_template_id" dej {"id": <id>, "name": <název>};
+  když produkt nenajdeš, dej jen {"name": <text>} a "name". "quantity" bez údaje = 1.
 """
 
 
@@ -140,6 +146,45 @@ def _coerce_field_value(field_type: str, raw_value: Any) -> Any | None:
     if isinstance(raw_value, (dict, list)):
         return None
     return raw_value
+
+
+def _line_field_from_schema(field_schema: dict[str, Any]) -> dict[str, Any] | None:
+    for section in field_schema.get("sections") or []:
+        for field in (section.get("fields") or []) if isinstance(section, dict) else []:
+            if isinstance(field, dict) and field.get("type") == "line_items":
+                return field
+    return None
+
+
+def validate_line_rows(raw_rows: Any, line_field: dict[str, Any] | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep only editable line columns, coerce by type, drop rows without identity."""
+    if not line_field or not isinstance(raw_rows, list):
+        return [], []
+    editable = {
+        str(f["name"]): str(f.get("type") or "text")
+        for f in (line_field.get("line_fields") or [])
+        if isinstance(f, dict) and f.get("name") and f.get("editable")
+    }
+    rows: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_rows):
+        if not isinstance(raw, dict):
+            dropped.append({"row": index, "reason": "row is not an object"})
+            continue
+        row: dict[str, Any] = {}
+        for key, value in raw.items():
+            field_type = editable.get(str(key))
+            if field_type is None:
+                continue
+            coerced = _coerce_field_value(field_type, value)
+            if coerced is None:
+                continue
+            row[str(key)] = coerced
+        if not row.get("name") and not row.get("product_template_id"):
+            dropped.append({"row": index, "reason": "missing name or product_template_id"})
+            continue
+        rows.append(row)
+    return rows, dropped
 
 
 def _validate_fields_against_schema(raw_fields: Any, field_schema: dict[str, Any]) -> dict[str, Any]:
@@ -219,8 +264,11 @@ async def extract_fields(
     raw_output = str(result.get("output") or "")
     parsed = _extract_json_object(raw_output)
     fields = _validate_fields_against_schema(parsed.get("fields"), field_schema)
+    line_rows, dropped = validate_line_rows(parsed.get("lines"), _line_field_from_schema(field_schema))
     message = str(parsed.get("message") or "").strip()
     if not message:
         message = "Aktualizoval(a) jsem pole podle vloženého textu."
+    if dropped:
+        message += f" ({len(dropped)} řádků vynecháno: " + "; ".join(d["reason"] for d in dropped[:3]) + ")"
 
-    return {"message": message, "fields": fields}
+    return {"message": message, "fields": fields, "lines": {"rows": line_rows, "dropped": dropped}}
