@@ -200,7 +200,7 @@ def normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, Any
         if not isinstance(step, dict):
             continue
         tool_name = str(step.get("tool") or "").strip()
-        if tool_name not in {"crm_data_tool", "crm_search_tool", "crm_query_tool", "my_meetings_tool"}:
+        if tool_name not in {"crm_data_tool", "crm_search_tool", "crm_query_tool", "my_meetings_tool", "propose_form_fields_tool", "research_record_tool"}:
             continue
 
         observation = step.get("observation")
@@ -278,4 +278,22 @@ def extract_pending_action_from_agent_result(agent_result: dict[str, Any]) -> di
         pending = obs.get("pending_action")
         if status in {"confirmation_required", "resolution_required"} and isinstance(pending, dict):
             return normalize_pending_action_envelope(pending) or pending
+    return None
+
+
+def extract_form_patch_from_agent_result(agent_result: dict[str, Any]) -> dict[str, Any] | None:
+    steps = (agent_result or {}).get("intermediate_steps") or []
+    for step in reversed(steps if isinstance(steps, list) else []):
+        if not isinstance(step, dict):
+            continue
+        observation = step.get("observation")
+        if isinstance(observation, dict):
+            obs = observation
+        elif isinstance(observation, str):
+            obs = try_parse_json(observation) or {}
+        else:
+            obs = {}
+        patch = obs.get("form_patch") if isinstance(obs, dict) else None
+        if isinstance(patch, dict) and isinstance(patch.get("fields"), dict):
+            return patch
     return None

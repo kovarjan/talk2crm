@@ -85,19 +85,22 @@ async def research_company(
     record_id: str | None,
     field_schema: dict[str, Any],
     current_values: dict[str, Any],
-    company_name: str,
-    hint: str | None,
+    company_name: str | None = None,
+    hint: str | None = None,
     crm_client: CoripoClient,
     rag_service: Any | None,
     db: Any | None = None,
+    subject: str | None = None,
+    subject_label: str = "Firma",
 ) -> dict[str, Any]:
     """Runs the read-only web-research agent and returns validated field
     values plus the source URLs it used. Never mutates the CRM."""
 
+    subject_text = str(subject or company_name or "").strip()
     schema_json = json.dumps(field_schema, ensure_ascii=False)
     current_values_json = json.dumps(current_values or {}, ensure_ascii=False)
     input_text = (
-        f"Firma: {company_name}.\n"
+        f"{subject_label}: {subject_text}.\n"
         f"ID záznamu: {record_id or '(nový záznam)'}.\n"
         + (f"Doplňující info od uživatele: {hint}\n" if hint else "")
         + f"Schéma polí (JSON): {schema_json}\n"

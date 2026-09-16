@@ -373,7 +373,7 @@ async def patch_chat(
     if body.name is not None:
         chat.name = body.name.strip()[:255] or None
     if body.tool is not None:
-        chat.tool = body.tool.strip()[:32] or None
+        chat.tool = body.tool.strip()[:128] or None
     if body.pinned is not None:
         chat.pinned = bool(body.pinned)
     await db.commit()
@@ -484,7 +484,7 @@ async def put_chat(
     if body.name is not None:
         chat.name = body.name
     if body.tool is not None:
-        chat.tool = body.tool.strip()[:32] or None
+        chat.tool = body.tool.strip()[:128] or None
     chat.updated_at = datetime.now(timezone.utc)
 
     await db.commit()

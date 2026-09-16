@@ -32,7 +32,12 @@ Optional HMAC headers (machine-to-machine use):
 ### Input processing
 - `POST /process-input/`
   - body: `input_text`, optional `chat_id`, optional `context`, optional `return_voice`
-  - returns: command response + chat_id + chat history + optional crm_response
+  - `context.capabilities`: list of capability ids for this turn (`crm` is implied; `web`, `form`). Omitted = defaults (`crm`, `form`). Unknown ids are ignored and echoed in `unknown_capabilities`. Legacy `context.web_search: true` still enables `web`.
+  - `context.form`: `{"editable": true, "prefix": "view", "values": {field: scalar}}` — current values of the form open in the CRM; used by the `form` capability tools.
+  - returns: command response + `chat_id` + chat history + `capabilities` (enabled ids) + `unknown_capabilities` + `form_patch` (or `null`)
+  - `form_patch`: `{"module", "record", "fields": {name: value | {id, name}}, "lines": {"mode": "append", "rows": []}, "invitees": {}, "sources": [url], "message", "schema": {"sections": [...]}}` — values proposed for the open form; never written by the gateway.
+
+- `POST /process-input/stream` (SSE): same body; events `accepted`, `pipeline.mode`, `agent.started`, `agent.tool_call`, `answer.delta`, `answer.done`, `form_patch` (payload as above, emitted before `result` when present), `result`, `error`.
 
 - `POST /process-audio/`
   - multipart: `file`, optional `chat_id`/`X-Chat-Id`, optional `context`, locale, `return_voice`

@@ -31,7 +31,9 @@ from app.engine.events import EmitFn, StreamEvent
 from app.engine.pending_patch import try_patch_pending_action
 from app.engine.quick_actions import QuickActionResult, try_handle_quick_action
 from app.engine.rag import get_rag_service
+from app.engine.capabilities import resolve_capabilities
 from app.engine.tools import build_tools
+from app.presentation.agent_result import extract_form_patch_from_agent_result
 from app.presentation.agent_result import normalize_agent_result_for_ui, to_user_message
 from app.services import chat_service
 from app.services.chat_titles import ensure_chat_name
@@ -376,6 +378,7 @@ async def process_input_core(
         user_id=user_id,
     )
     incoming_context = dict(payload.context or {})
+    enabled_capabilities, unknown_capabilities = resolve_capabilities(incoming_context)
     latest_created_record = await chat_service.load_latest_crm_record_created_event(
         db,
         chat_id=chat.id,
@@ -457,6 +460,7 @@ async def process_input_core(
                 crm_client=crm_client,
                 rag_service=rag_service,
                 action_confirmation=action_confirmation,
+                capabilities=enabled_capabilities,
             )
             available_tools = [str(getattr(tool, "name", "")) for tool in tools if getattr(tool, "name", None)]
             history_for_agent = await chat_service.load_messages(
@@ -480,6 +484,7 @@ async def process_input_core(
                     chat_history=recent_history_for_agent,
                     emit=emit,
                     db=db,
+                    capabilities=enabled_capabilities,
                 )
                 agent_result = normalize_agent_result_for_ui(agent_result)
             except Exception as exc:
@@ -512,6 +517,10 @@ async def process_input_core(
     assistant_text = to_user_message(assistant_raw_text)
     if not assistant_text:
         assistant_text = _FALLBACK_USER_MESSAGE
+    form_patch = extract_form_patch_from_agent_result(agent_result)
+    capability_tag = ",".join(sorted(enabled_capabilities - {"crm"})) or None
+    if capability_tag != getattr(chat, "tool", None):
+        chat.tool = capability_tag
     await chat_service.append_message(
         db,
         chat=chat,
@@ -577,6 +586,7 @@ async def process_input_core(
             "crm_mode": settings.crm_mode,
             "rag_available": rag_service is not None,
             "available_tools": available_tools,
+            "capabilities": sorted(enabled_capabilities),
             "return_voice": payload.return_voice,
             "audio_generated": bool(file_id),
             "duration_ms": duration_ms,
@@ -596,8 +606,13 @@ async def process_input_core(
         "audio_url": audio_url,
         "tenant_id": tenant_id,
         "user_id": user_id,
+        "capabilities": sorted(enabled_capabilities),
+        "unknown_capabilities": unknown_capabilities,
+        "form_patch": form_patch,
     }
     if emit:
+        if form_patch:
+            await emit(StreamEvent("form_patch", form_patch))
         await emit(StreamEvent("result", {
             **result_payload,
             "chat_id": str(chat.id),

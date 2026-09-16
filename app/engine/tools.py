@@ -43,6 +43,7 @@ from app.engine.tool_validator import (
 )
 from app.engine.web_fetch import fetch_page
 from app.engine.web_search import search_web
+from app.engine.capabilities import tool_names_for
 
 # Helpers relocated to dedicated modules; aliased to keep call sites stable.
 from app.engine.account_resolution import (
@@ -512,6 +513,7 @@ def build_tools(
     crm_client: CoripoClient,
     rag_service: TenantRAGService | None,
     action_confirmation: bool = False,
+    capabilities: set[str] | None = None,
 ) -> list:
     settings = get_settings()
     write_service = CRMWriteService(
@@ -1103,6 +1105,20 @@ def build_tools(
         tools.append(web_search_tool)
     if settings.web_fetch_enabled:
         tools.append(web_fetch_tool)
+    if capabilities is not None:
+        allowed = tool_names_for(capabilities)
+        tools = [t for t in tools if getattr(t, "name", "") in allowed]
+    if capabilities is not None and "form" in capabilities:
+        # Lazy: form_tools -> extraction -> tools would otherwise be circular.
+        from app.engine.form_tools import build_form_tools
+
+        tools.extend(build_form_tools(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            request_context=request_context,
+            crm_client=crm_client,
+            rag_service=rag_service,
+        ))
     if settings.aggregate_tools_enabled and _should_enable_aggregate_tools(input_text):
         tools.append(
             _build_crm_aggregate_tool(
