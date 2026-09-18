@@ -369,7 +369,9 @@ class CoripoClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
         require_sid: bool = True,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
+        request_timeout = timeout if timeout is not None else self.timeout
         if require_sid and not self._coripo_session_id:
             await self._ensure_coripo_sid()
 
@@ -413,7 +415,7 @@ class CoripoClient:
                     headers=headers,
                     params=params,
                     content=body_bytes if json_body is not None else None,
-                    timeout=self.timeout,
+                    timeout=request_timeout,
                 )
             except Exception as exc:
                 self._log_crm_wire_event(
@@ -1203,6 +1205,7 @@ class CoripoClient:
             f"ai_schema/{module_name}",
             params=params,
             require_sid=True,
+            timeout=get_settings().crm_schema_timeout_seconds,
         )
         return raw
 

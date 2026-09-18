@@ -3,19 +3,21 @@
 # SPDX-License-Identifier: Apache-2.0
 """Product catalog lookup (ProductTemplates) for the ``products`` capability.
 
-Semantic search in the tenant's Qdrant collection re-ranked by the shared fuzzy
-scorer; exact manufacturer part number wins. Prices are catalog prices only —
+Live catalog lookup followed by semantic search in the tenant's Qdrant collection,
+re-ranked by the shared fuzzy scorer; exact codes and names win. Prices are catalog prices only —
 the FE applies price-list pricing when a row is inserted into a quote.
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from app.engine.filter_builder import FilterSpec, build_filter
 from app.presentation.cards import table_card
 from app.utils.fuzzy import score_lexical_fuzzy
 from app.utils.text import normalize_text
@@ -62,6 +64,8 @@ def rank_products(query: str, records: list[dict[str, Any]]) -> list[dict[str, A
         name = normalize_text(str(record.get("name") or ""))
         if part and part == q:
             score = 10.0
+        elif name and name == q:
+            score = 9.0
         else:
             score = max(score_lexical_fuzzy(q, name), score_lexical_fuzzy(q, part) if part else 0.0)
         scored.append((score, record))
@@ -101,25 +105,57 @@ def build_product_tools(*, tenant_id: str, user_id: str, crm_client: Any, rag_se
         records: list[dict[str, Any]] = []
         status = "ok"
         fetch = max(limit * 4, 20)
-        if rag_service is not None:
+        # Vector hits may be non-empty even when the exact catalog product was
+        # never indexed. Always query the authoritative catalog before using RAG.
+        query = query.strip()
+        if not query:
+            return json.dumps({"status": "ok", "results": [], "cards": [], "note": NOTE_CATALOG})
+        try:
+            exact_filter = {
+                "operator": "or",
+                "operands": [build_filter(module=MODULE, filters=[FilterSpec(field=field, op="eq", value=query)])
+                             for field in ("name", "mft_part_num")],
+            }
+            payload = await crm_client.execute_module_action(
+                module=MODULE, action="list",
+                data={"filter": exact_filter, "limit": fetch, "offset": 0},
+            )
+            records = [r for r in (payload.get("records") or []) if isinstance(r, dict)]
+            exact = [r for r in records if normalize_text(query) in (
+                normalize_text(str(r.get("name") or "")), normalize_text(str(r.get("mft_part_num") or "")))]
+            if exact:
+                records = exact
+            else:
+                # AND the name tokens so punctuation/spacing differences do not
+                # hide e.g. "Kompresor KAB, 12V" behind an unrelated first page.
+                tokens = re.findall(r"[^\W_]+", query, flags=re.UNICODE)
+                name_filter = build_filter(module=MODULE, filters=[
+                    FilterSpec(field="name", op="cont", value=token) for token in tokens
+                ])
+                code_filter = build_filter(module=MODULE, filters=[FilterSpec(field="mft_part_num", op="cont", value=query)])
+                payload = await crm_client.execute_module_action(
+                    module=MODULE, action="list",
+                    data={"filter": {"operator": "or", "operands": [name_filter, code_filter]} if tokens else code_filter,
+                          "limit": fetch, "offset": 0},
+                )
+                records = [r for r in (payload.get("records") or []) if isinstance(r, dict)]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("product lookup: crm search failed tenant=%s error=%s", tenant_id, exc)
+            status = "degraded"
+        has_exact = any(normalize_text(query) in (
+            normalize_text(str(r.get("name") or "")), normalize_text(str(r.get("mft_part_num") or ""))) for r in records)
+        if rag_service is not None and not has_exact:
             try:
                 hits = await rag_service.search(tenant_id=tenant_id, query=query, limit=fetch, modules=[MODULE])
-                records = _records_from_hits(hits)
+                # Fresh CRM values take precedence over cached index values.
+                seen = {r.get("id") for r in records}
+                for record in _records_from_hits(hits):
+                    if record.get("id") not in seen:
+                        records.append(record)
+                        seen.add(record.get("id"))
             except Exception as exc:  # noqa: BLE001 - degrade, never fail the turn
                 logger.warning("product lookup: qdrant unavailable tenant=%s error=%s", tenant_id, exc)
                 status = "degraded"
-        if not records:
-            if rag_service is not None:
-                status = "degraded"
-            try:
-                payload = await crm_client.execute_module_action(
-                    module=MODULE, action="list",
-                    data={"query": query, "q": query, "limit": fetch, "offset": 0},
-                )
-                records = [r for r in (payload.get("records") or []) if isinstance(r, dict)]
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("product lookup: crm search failed tenant=%s error=%s", tenant_id, exc)
-                records = []
         ranked = rank_products(query, records)[:limit]
         results = [_to_result(r) for r in ranked if r.get("id")]
         return json.dumps({"status": status, "results": results, "cards": _cards(results), "note": NOTE_CATALOG}, ensure_ascii=False)

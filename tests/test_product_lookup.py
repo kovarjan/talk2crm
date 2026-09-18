@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.engine.capabilities import CAPABILITIES, resolve_capabilities
 from app.engine.product_tools import build_product_tools
+from app.engine.filter_builder import FilterSpec, build_filter
 from app.engine.tools import build_tools
 
 
@@ -81,3 +82,45 @@ def test_products_capability_is_default_on_and_registers_tool() -> None:
         tenant_id="t", user_id="u", input_text="x", request_context=None,
         crm_client=_Crm(), rag_service=_Rag(), capabilities={"crm"})}
     assert "product_lookup_tool" not in names
+
+
+def test_exact_catalog_name_found_even_when_vector_index_has_unrelated_hits() -> None:
+    class Catalog(_Crm):
+        async def execute_module_action(self, module, action, data):
+            self.calls.append((module, action, data))
+            return {"records": [{"id": "kab", "name": "Kompresor KAB, 12V", "list_price": 1265}]}
+
+    class UnusedRag(_Rag):
+        async def search(self, **kwargs):
+            raise AssertionError("An exact catalog match should not need semantic search")
+
+    crm = Catalog()
+    out = _run(build_product_tools(tenant_id="t", user_id="u", crm_client=crm, rag_service=UnusedRag()),
+               {"query": "Kompresor KAB, 12V"})
+    assert out["status"] == "ok"
+    assert [r["id"] for r in out["results"]] == ["kab"]
+    assert out["results"][0]["list_price"] == 1265
+    assert crm.calls[0][2]["filter"]["operator"] == "or"
+    assert len(crm.calls) == 1
+
+
+def test_catalog_name_tokens_handle_missing_comma_and_keep_fresh_prices() -> None:
+    class Catalog(_Crm):
+        async def execute_module_action(self, module, action, data):
+            self.calls.append((module, action, data))
+            if len(self.calls) == 1:
+                return {"records": []}
+            return {"records": [{"id": "kab", "name": "Kompresor KAB, 12V", "list_price": 1265}]}
+
+    crm = Catalog()
+    rag = _Rag([_hit("kab", "Kompresor KAB, 12V", "KAB", 0), _hit("wheel", "Kolo", "X", 5)])
+    out = _run(build_product_tools(tenant_id="t", user_id="u", crm_client=crm, rag_service=rag),
+               {"query": "Kompresor KAB 12V"})
+    assert out["results"][0]["id"] == "kab"
+    assert out["results"][0]["list_price"] == 1265
+    assert sum(r["id"] == "kab" for r in out["results"]) == 1
+    name_filter = crm.calls[1][2]["filter"]["operands"][0]
+    assert name_filter == build_filter(
+        module="ProductTemplates", filters=[
+            FilterSpec(field="name", op="cont", value=t)
+            for t in ["Kompresor", "KAB", "12V"]])

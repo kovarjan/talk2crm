@@ -59,9 +59,9 @@ def _line_module(schema: dict[str, Any]) -> str | None:
 
 
 def _unavailable(module: str, exc: Exception) -> str:
-    logger.warning("ai_schema unavailable module=%s error=%s", module, exc)
+    logger.warning("ai_schema unavailable module=%s error=%s", module, f"{type(exc).__name__}: {exc}")
     return json.dumps(
-        {"status": "form_unavailable", "message": f"Formulář modulu {module} není dostupný pro doplnění ({exc})."},
+        {"status": "form_unavailable", "message": f"Formulář modulu {module} není dostupný pro doplnění ({type(exc).__name__}: {exc})."},
         ensure_ascii=False,
     )
 

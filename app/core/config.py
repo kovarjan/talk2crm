@@ -72,6 +72,8 @@ class Settings(BaseSettings):
 
     crm_mode: str = "on"
     crm_timeout_seconds: float = 25.0
+    # ai_schema walks layouts, vardefs and line items (quotes: product bundles); allow more than a plain list.
+    crm_schema_timeout_seconds: float = 60.0
 
     # Web search via a self-hosted SearXNG instance (docker-compose service
     # `searxng`). Set web_search_enabled=False to hide the tool from the agent.

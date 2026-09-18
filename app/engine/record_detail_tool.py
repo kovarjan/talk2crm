@@ -89,9 +89,9 @@ def build_record_detail_tools(*, tenant_id: str, user_id: str, crm_client: Any) 
         try:
             schema = await crm_client.get_ai_schema(module_name, record_id)
         except Exception as exc:  # noqa: BLE001 - reported to the model, never raised
-            logger.warning("record detail unavailable module=%s id=%s error=%s", module_name, record_id, exc)
+            logger.warning("record detail unavailable module=%s id=%s error=%s", module_name, record_id, f"{type(exc).__name__}: {exc}")
             return json.dumps({"status": "record_unavailable", "module": module_name, "record_id": record_id,
-                               "message": f"Záznam {module_name}/{record_id} není dostupný ({exc})."}, ensure_ascii=False)
+                               "message": f"Záznam {module_name}/{record_id} není dostupný ({type(exc).__name__}: {exc})."}, ensure_ascii=False)
         fields, line_field = _fields_from_schema(schema if isinstance(schema, dict) else {})
         name = str((fields.get("name") or {}).get("value") or record_id)
         lines = summarize_lines(line_field) if (include_lines and line_field) else None
