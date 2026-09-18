@@ -1,7 +1,9 @@
 """Read-only, user-scoped daily briefing, shared by the dashboard and chat tool.
 
-Only the summary uses an LLM. Filters, links, cache ownership and cards are
-constructed deterministically. A failed module never hides successful blocks.
+The summary and focus text are phrased by an LLM from pre-computed, trusted
+counts (never free-text CRM data), each with a deterministic fallback. Filters,
+links, cache ownership and cards are constructed deterministically. A failed
+module never hides successful blocks.
 """
 from __future__ import annotations
 
@@ -200,20 +202,69 @@ async def summarize_briefing(result: dict) -> str:
                                 for i in indices)
 
 
-def focus_summary(result: dict) -> str:
-    """Return a stable, four-sentence focus brief from the scoped CRM results."""
+def _focus_counts(result: dict) -> dict[str, int | None]:
+    """Per-block record counts; None marks a block that failed to load."""
     blocks = {block["key"]: block for block in result["blocks"]}
 
-    def count(key: str) -> str:
+    def count(key: str) -> int | None:
         block = blocks[key]
-        return str(len(block["records"])) if block["status"] == "ok" else "nedostupný počet"
+        return len(block["records"]) if block["status"] == "ok" else None
+
+    return {key: count(key) for key in ("meetings", "calls", "tasks", "closing", "quotes", "overdue", "orders", "leads")}
+
+
+def _focus_summary_fallback(counts: dict[str, int | None], closing_days: int) -> str:
+    """Plain, always-correct sentence used only if the LLM call fails."""
+    def n(key: str) -> str:
+        return "nedostupný počet" if counts[key] is None else str(counts[key])
 
     return " ".join((
-        f"Dnes máte {count('meetings')} schůzek, {count('calls')} hovorů a {count('tasks')} úkolů.",
-        f"V příštích {result['closing_days']} dnech se uzavírá {count('closing')} obchodních případů.",
-        f"Pozornost věnujte {count('quotes')} otevřeným nabídkám a {count('overdue')} fakturám po splatnosti.",
-        f"Vyřiďte {count('orders')} objednávek a prověřte {count('leads')} nových zájemců.",
+        f"Dnes máte {n('meetings')} schůzek, {n('calls')} hovorů a {n('tasks')} úkolů.",
+        f"V příštích {closing_days} dnech se uzavírá {n('closing')} obchodních případů.",
+        f"Pozornost věnujte {n('quotes')} otevřeným nabídkám a {n('overdue')} fakturám po splatnosti.",
+        f"Vyřiďte {n('orders')} objednávek a prověřte {n('leads')} nových zájemců.",
     ))
+
+
+async def focus_summary(result: dict) -> str:
+    """Short, natural-sounding Czech paragraph highlighting today's priorities.
+
+    The model only phrases pre-computed integer counts (never raw CRM text), so
+    there is nothing here for it to hallucinate or for a record to inject into
+    it — unlike summarize_briefing, which does handle untrusted record names.
+    """
+    counts = _focus_counts(result)
+    fallback = _focus_summary_fallback(counts, result["closing_days"])
+
+    def n(key: str):
+        return "nedostupný počet" if counts[key] is None else counts[key]
+
+    try:
+        settings = get_settings()
+        llm = get_chat_llm(base_url=settings.llm_base_url, api_key=settings.llm_api_key,
+                           model=settings.llm_model, max_tokens=220)
+        response = await asyncio.wait_for(llm.ainvoke([
+            ("system", "Napiš 2 až 4 věty přirozenou, gramaticky správnou češtinou (správné skloňování a shoda "
+                       "podmětu s přísudkem podle čísla, např. '1 schůzka', '2 schůzky', '5 schůzek') shrnující "
+                       "dnešní pracovní priority uživatele CRM systému. Použij výhradně čísla z dodaných dat, nic "
+                       "si nevymýšlej ani nedopočítávej. Je-li hodnota 'nedostupný počet', zapiš to tak, aby věta "
+                       "zněla přirozeně (např. 'počet hovorů se nepodařilo načíst'). Piš věcně a stručně, bez "
+                       "emoji, bez nadpisu, jen souvislý text, žádný markdown."),
+            ("human", json.dumps({
+                "schůzky_dnes": n("meetings"), "hovory_dnes": n("calls"), "úkoly_dnes": n("tasks"),
+                "obchodní_případy_uzavírané_v_příštích_x_dnech": result["closing_days"],
+                "obchodní_případy_počet": n("closing"), "otevřené_nabídky": n("quotes"),
+                "faktury_po_splatnosti": n("overdue"), "nevyřízené_objednávky": n("orders"),
+                "noví_zájemci": n("leads"),
+            }, ensure_ascii=False)),
+        ]), timeout=12)
+        text_out = str(response.content).strip()
+        if text_out.startswith("```"):
+            text_out = re.sub(r"^```(?:\w+)?\s*|\s*```$", "", text_out)
+        return text_out or fallback
+    except Exception:
+        logger.info("Focus summary fallback", exc_info=True)
+        return fallback
 
 
 def cache_key(*, tenant_id: str, user_id: str, now: datetime, timezone_name: str,
@@ -257,7 +308,7 @@ async def get_briefing(*, db, crm_client, tenant_id: str, user_id: str,
                 return result
     result = await collect_briefing(crm_client=crm_client, tenant_id=tenant_id, user_id=user_id, now=now,
                                     timezone_name=timezone_name, days=days, statuses=statuses, readable=readable)
-    result["focus_summary"] = focus_summary(result)
+    result["focus_summary"] = await focus_summary(result)
     result["message"] = await summarize_briefing(result)
     chat = await chat_service.create_chat(db, tenant_id=tenant_id, user_id=user_id, persist=False,
                                           name=f"Denní přehled {result['date']}", tool="briefing")

@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -103,10 +104,25 @@ def test_tenant_overrides_only_status_lists_and_validates_shapes():
 
 
 @pytest.mark.asyncio
-async def test_focus_summary_is_four_sentences_and_reports_unavailable_data():
+async def test_focus_summary_uses_llm_and_only_passes_computed_counts():
     result = await collect(CRM(fail="Calls"))
-    summary = service.focus_summary(result)
-    assert summary.count('.') == 4
+    llm = SimpleNamespace(ainvoke=AsyncMock(return_value=SimpleNamespace(content="Dnes vás čeká klidný den.")))
+    with patch.object(service, "get_chat_llm", return_value=llm):
+        summary = await service.focus_summary(result)
+    assert summary == "Dnes vás čeká klidný den."
+    assert llm.ainvoke.await_count == 1
+    sent = json.loads(llm.ainvoke.await_args.args[0][1][1])
+    assert sent["hovory_dnes"] == "nedostupný počet"
+    assert sent["schůzky_dnes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_focus_summary_falls_back_to_deterministic_text_when_llm_fails():
+    result = await collect(CRM(fail="Calls"))
+    llm = SimpleNamespace(ainvoke=AsyncMock(side_effect=RuntimeError("down")))
+    with patch.object(service, "get_chat_llm", return_value=llm):
+        summary = await service.focus_summary(result)
+    assert summary.count(".") == 4
     assert "nedostupný počet hovorů" in summary
 
 
