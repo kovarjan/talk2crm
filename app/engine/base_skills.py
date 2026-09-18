@@ -94,3 +94,17 @@ BASE_SKILLS: list[BaseSkillDef] = [
         ),
     },
 ]
+
+
+# Operational defaults for the daily briefing. An approved tenant overlay named
+# briefing-status-sets may replace individual lists (never ownership/ACL filters).
+BRIEFING_STATUS_SETS = {
+    "meetings": ["Planned"],
+    "calls": ["Planned"],
+    "tasks": ["Not Started", "In Progress", "Pending Input", "Deferred"],
+    "closing": ["Prospecting", "Qualification", "Needs Analysis", "Value Proposition",
+                "Id. Decision Makers", "Perception Analysis", "Proposal/Price Quote", "Negotiation/Review"],
+    "quotes": ["New", "Draft", "Active", "Sent"],
+    "overdue": ["vystavena", "neuhrazeno", "castecne_uhrazena", "po_splatnosti"],
+    "orders": ["new", "accepted"],
+}

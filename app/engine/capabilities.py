@@ -18,6 +18,9 @@ ALWAYS_ON: frozenset[str] = frozenset({"crm"})
 # hardcoded prompt in agent.py; braces are doubled because agent.py still
 # renders the prompt through an f-string.
 TOOL_PROMPT_BLOCKS: dict[str, str] = {
+    "daily_briefing_tool": """daily_briefing_tool(refresh: bool=false, closing_days: int=14)
+   — denní přehled přihlášeného uživatele. Pro dotazy „můj den“, „co mě dnes čeká“, „denní přehled“ vždy použij tento nástroj.
+   — zahrnuje schůzky, hovory, úkoly, nabídky, obchodní případy, faktury, objednávky a zájemce. U částečných výsledků přiznej nedostupné sekce.""",
     "rag_search_tool": """rag_search_tool(query: str, module: str="", limit: int=5)
    — sémantické/fuzzy hledání v RAG indexu. Použij pro získání account_id/contact_id.
    — module může být také "opportunities", "quotes" nebo "acm_invoices", pokud hledáš obchodní případy, nabídky nebo faktury.""",
@@ -66,6 +69,7 @@ TOOL_PROMPT_BLOCKS: dict[str, str] = {
 }
 
 TOOL_PROMPT_ORDER: list[str] = [
+    "daily_briefing_tool",
     "rag_search_tool",
     "crm_query_tool",
     "crm_record_detail_tool",
@@ -89,6 +93,7 @@ class Capability:
 
 
 CAPABILITIES: dict[str, Capability] = {
+    "briefing": Capability(id="briefing", tool_names=frozenset({"daily_briefing_tool"}), prompt_block="", default_on=True),
     "crm": Capability(
         id="crm",
         tool_names=frozenset({

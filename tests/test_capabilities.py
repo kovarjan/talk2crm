@@ -41,9 +41,9 @@ def test_web_search_alias_enables_web() -> None:
 
 
 def test_unknown_ids_are_reported_not_raised() -> None:
-    enabled, unknown = resolve_capabilities({"capabilities": ["crm", "summarize", "form", "briefing"]})
+    enabled, unknown = resolve_capabilities({"capabilities": ["crm", "summarize", "form", "future-capability"]})
     assert enabled == {"crm", "form"}
-    assert unknown == ["summarize", "briefing"]
+    assert unknown == ["summarize", "future-capability"]
 
 
 def test_non_string_entries_are_ignored() -> None:
@@ -107,3 +107,12 @@ def test_build_tools_filters_by_capabilities() -> None:
     assert "crm_query_tool" in names
     assert "web_search_tool" not in names
     assert "web_fetch_tool" not in names
+
+
+def test_daily_briefing_is_default_on_and_registered():
+    enabled, unknown = resolve_capabilities({})
+    assert "briefing" in enabled and not unknown
+    names = _names(build_tools(tenant_id="t", user_id="u", input_text="můj den", request_context=None,
+                               crm_client=_DummyCrmClient(), rag_service=None, capabilities=enabled))
+    assert "daily_briefing_tool" in names
+    assert "daily_briefing_tool" not in tool_names_for({"crm"})

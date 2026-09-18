@@ -63,7 +63,7 @@ class CRMReadService:
         request_context: dict[str, Any] | None,
         crm_client: CoripoClient,
         rag_service: TenantRAGService | None,
-        helpers: CRMReadHelpers,
+        helpers: CRMReadHelpers | None = None,
     ):
         self.tenant_id = tenant_id
         self.user_id = user_id

@@ -200,7 +200,7 @@ def normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, Any
         if not isinstance(step, dict):
             continue
         tool_name = str(step.get("tool") or "").strip()
-        if tool_name not in {"crm_data_tool", "crm_search_tool", "crm_query_tool", "my_meetings_tool", "propose_form_fields_tool", "research_record_tool", "crm_record_detail_tool", "product_lookup_tool"}:
+        if tool_name not in {"crm_data_tool", "crm_search_tool", "crm_query_tool", "my_meetings_tool", "propose_form_fields_tool", "research_record_tool", "crm_record_detail_tool", "product_lookup_tool", "daily_briefing_tool"}:
             continue
 
         observation = step.get("observation")

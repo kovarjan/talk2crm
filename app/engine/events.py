@@ -18,6 +18,7 @@ class StreamEvent:
 EmitFn = Callable[[StreamEvent], Awaitable[None]]
 
 _TOOL_LABELS: dict[str, Callable[[dict[str, Any]], str]] = {
+    "daily_briefing_tool": lambda _: "Připravuji přehled dne…",
     "rag_search_tool":      lambda a: f"Hledám '{a.get('query', '')}'…",
     "crm_query_tool":       lambda a: f"Načítám {a.get('module', '')} z CRM…",
     "crm_action_tool":      lambda _: "Připravuji akci v CRM…",

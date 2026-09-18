@@ -1148,6 +1148,11 @@ def build_tools(
         from app.engine.product_tools import build_product_tools
 
         tools.extend(build_product_tools(tenant_id=tenant_id, user_id=user_id, crm_client=crm_client, rag_service=rag_service))
+    if capabilities is not None and "briefing" in capabilities:
+        from app.engine.briefing_tools import build_briefing_tools
+
+        tools.extend(build_briefing_tools(tenant_id=tenant_id, user_id=user_id, crm_client=crm_client,
+                                           request_context=request_context))
     if settings.aggregate_tools_enabled and _should_enable_aggregate_tools(input_text):
         tools.append(
             _build_crm_aggregate_tool(

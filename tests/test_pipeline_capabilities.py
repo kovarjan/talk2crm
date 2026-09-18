@@ -75,7 +75,7 @@ async def test_pipeline_passes_capabilities_and_emits_form_patch() -> None:
         payload = ProcessInputRequest(
             input_text="doplň kontakt Jan Novák",
             chat_id="c1",
-            context={"module": "Contacts", "capabilities": ["form", "briefing"], "form": {"editable": True, "values": {}}},
+            context={"module": "Contacts", "capabilities": ["form", "future-capability"], "form": {"editable": True, "values": {}}},
         )
         result = await pipeline.process_input_core(
             db=db, ctx={"tenant_id": "t", "user_id": "u", "user_name": None},
@@ -85,7 +85,7 @@ async def test_pipeline_passes_capabilities_and_emits_form_patch() -> None:
     assert captured["build_capabilities"] == {"crm", "form"}
     assert captured["agent_capabilities"] == {"crm", "form"}
     assert result["capabilities"] == ["crm", "form"]
-    assert result["unknown_capabilities"] == ["briefing"]
+    assert result["unknown_capabilities"] == ["future-capability"]
     assert result["form_patch"] == PATCH
     assert chat.tool == "form"
     types = [e.type for e in events]

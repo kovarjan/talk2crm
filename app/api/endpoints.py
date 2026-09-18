@@ -177,6 +177,32 @@ async def generate(
     return BaseResponse(success=True, response={"text": str(text)})
 
 
+@router.get("/briefing/", response_model=BaseResponse)
+async def daily_briefing_endpoint(
+    refresh: bool = False,
+    timezone_name: str = "Europe/Prague",
+    closing_days: int = 14,
+    ctx: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db),
+) -> BaseResponse:
+    """Current user's daily briefing. No caller-supplied user/tenant identity."""
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    from app.services.briefing_service import get_briefing
+
+    try:
+        ZoneInfo(timezone_name)
+        if not 1 <= closing_days <= 90:
+            raise ValueError("closing_days must be between 1 and 90")
+    except (ValueError, ZoneInfoNotFoundError):
+        raise HTTPException(status_code=422, detail="Invalid briefing timezone or closing_days")
+    credentials = await TenantManager(db).get_credentials(ctx["tenant_id"])
+    crm_client = CoripoClient(credentials.crm_base_url, credentials.crm_token,
+                              user_id=ctx["user_id"], user_name=ctx["user_name"])
+    result = await get_briefing(db=db, crm_client=crm_client, tenant_id=ctx["tenant_id"], user_id=ctx["user_id"],
+                               timezone_name=timezone_name, days=closing_days, refresh=refresh)
+    return BaseResponse(success=True, response=result)
+
+
 @router.post("/recommend-actions/", response_model=BaseResponse)
 async def recommend_actions_endpoint(
     payload: RecommendActionsRequest,
