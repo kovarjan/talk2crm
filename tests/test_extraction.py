@@ -38,6 +38,17 @@ class FakeCrmClient:
     mode = "coripo_public"
 
 
+class _FakeToolset:
+    def __init__(self, tools: list) -> None:
+        self._tools = tools
+
+    def agent_tools(self) -> list:
+        return self._tools
+
+    def is_read_only(self, name: str) -> bool:
+        return name != "crm_action_tool"
+
+
 def _fake_tools():
     class _Tool:
         def __init__(self, name: str) -> None:
@@ -62,7 +73,7 @@ async def test_extract_fields_returns_only_schema_fields_and_resolves_relate() -
     }
 
     with (
-        patch("app.engine.extraction.build_tools", return_value=_fake_tools()) as mock_build_tools,
+        patch("app.engine.extraction.build_turn_toolset", new=AsyncMock(return_value=_FakeToolset(_fake_tools()))) as mock_build_tools,
         patch("app.engine.extraction.run_agent", new=AsyncMock(return_value=fake_agent_output)) as mock_run_agent,
     ):
         result = await extract_fields(
@@ -86,7 +97,7 @@ async def test_extract_fields_returns_only_schema_fields_and_resolves_relate() -
     # "phone_mobile" isn't in CONTACT_SCHEMA's fields -> must be dropped, same as "not_in_schema"
     assert "phone_mobile" not in result["fields"]
 
-    # crm_action_tool must never be handed to this agent, even though build_tools() returns it
+    # crm_action_tool must never be handed to this agent, even though build_native_tools() returns it
     passed_tools = mock_run_agent.call_args.kwargs["tools"]
     assert {t.name for t in passed_tools} == {"rag_search_tool", "crm_query_tool", "get_company_overview"}
     assert mock_build_tools.called
@@ -100,7 +111,7 @@ async def test_extract_fields_drops_unresolved_relate_with_no_id() -> None:
     }
 
     with (
-        patch("app.engine.extraction.build_tools", return_value=_fake_tools()),
+        patch("app.engine.extraction.build_turn_toolset", new=AsyncMock(return_value=_FakeToolset(_fake_tools()))),
         patch("app.engine.extraction.run_agent", new=AsyncMock(return_value=fake_agent_output)),
     ):
         result = await extract_fields(

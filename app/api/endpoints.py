@@ -203,6 +203,50 @@ async def daily_briefing_endpoint(
     return BaseResponse(success=True, response=result)
 
 
+async def _describe_tools(ctx: TenantContext, db: AsyncSession, capabilities: list[str] | None) -> dict[str, Any]:
+    from app.tools.toolset import build_turn_toolset, get_manifest_cache, get_tenant_guards
+
+    credentials = await TenantManager(db).get_credentials(ctx["tenant_id"])
+    crm_client = CoripoClient(credentials.crm_base_url, credentials.crm_token,
+                              user_id=ctx["user_id"], user_name=ctx["user_name"])
+    toolset = await build_turn_toolset(
+        tenant_id=ctx["tenant_id"], user_id=ctx["user_id"], input_text="",
+        request_context={"capabilities": capabilities} if capabilities is not None else None,
+        crm_client=crm_client, rag_service=get_rag_service(),
+    )
+    return {
+        **toolset.describe(),
+        "unknown_capabilities": toolset.unknown_capabilities,
+        "manifest_cache": get_manifest_cache().state(ctx["tenant_id"]),
+        "crm_circuit": get_tenant_guards().state(ctx["tenant_id"]),
+    }
+
+
+@router.get("/tools/", response_model=BaseResponse)
+async def tools_endpoint(
+    capabilities: str | None = None,
+    ctx: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db),
+) -> BaseResponse:
+    """Effective tool set for this tenant/user — what the agent would see — plus manifest
+    cache and CRM circuit state. First stop when a tool is "missing". ``capabilities`` is a
+    comma list (FE chips); omitted = defaults."""
+    requested = [c.strip() for c in capabilities.split(",") if c.strip()] if capabilities is not None else None
+    return BaseResponse(success=True, response=await _describe_tools(ctx, db, requested))
+
+
+@router.post("/tools/refresh/", response_model=BaseResponse)
+async def tools_refresh_endpoint(
+    ctx: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db),
+) -> BaseResponse:
+    """Refetch this tenant's CRM tool manifest now (e.g. right after a Coripo deploy)."""
+    from app.tools.toolset import get_manifest_cache
+
+    get_manifest_cache().invalidate(ctx["tenant_id"])
+    return BaseResponse(success=True, response=await _describe_tools(ctx, db, None))
+
+
 @router.post("/recommend-actions/", response_model=BaseResponse)
 async def recommend_actions_endpoint(
     payload: RecommendActionsRequest,

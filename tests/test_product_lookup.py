@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.engine.capabilities import CAPABILITIES, resolve_capabilities
 from app.engine.product_tools import build_product_tools
 from app.engine.filter_builder import FilterSpec, build_filter
-from app.engine.tools import build_tools
+from app.engine.tools import build_native_tools
 
 
 def _hit(id_: str, name: str, part: str, price: float, score: float = 0.5) -> dict[str, Any]:
@@ -74,11 +74,11 @@ def test_products_capability_is_default_on_and_registers_tool() -> None:
     enabled, _ = resolve_capabilities({})
     assert "products" in enabled
     assert CAPABILITIES["products"].tool_names == frozenset({"product_lookup_tool"})
-    names = {getattr(t, "name", "") for t in build_tools(
+    names = {getattr(t, "name", "") for t in build_native_tools(
         tenant_id="t", user_id="u", input_text="x", request_context=None,
         crm_client=_Crm(), rag_service=_Rag(), capabilities={"crm", "products"})}
     assert "product_lookup_tool" in names
-    names = {getattr(t, "name", "") for t in build_tools(
+    names = {getattr(t, "name", "") for t in build_native_tools(
         tenant_id="t", user_id="u", input_text="x", request_context=None,
         crm_client=_Crm(), rag_service=_Rag(), capabilities={"crm"})}
     assert "product_lookup_tool" not in names

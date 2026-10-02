@@ -9,7 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.engine.agent import _build_system_prompt
-from app.engine.tool_validator import validate_crm_action_call, validate_crm_query_call, validate_rag_search_call
+from app.engine.tool_validator import validate_rag_search_call
 from app.services.module_catalog import ModuleCatalog, get_module_catalog, reset_module_catalog_cache
 
 MODULES = [
@@ -30,10 +30,6 @@ class _Crm:
         return MODULES
 
 
-def _query(module: str, catalog=None):
-    return validate_crm_query_call(module=module, filters="[]", date_from=None, date_to=None, limit=5, order_by=None, catalog=catalog)
-
-
 def test_catalog_sets_and_line_module() -> None:
     catalog = ModuleCatalog(MODULES)
     assert catalog.readable() == {"quotes", "acm_custom_thing"}
@@ -43,15 +39,11 @@ def test_catalog_sets_and_line_module() -> None:
     assert not catalog.is_empty
 
 
-def test_validators_use_catalog_when_given() -> None:
+def test_rag_validator_uses_catalog_when_given() -> None:
     catalog = ModuleCatalog(MODULES)
-    assert _query("acm_custom_thing", catalog) is None
-    assert _query("Contacts", catalog) is not None
-    assert validate_crm_action_call(module="acm_custom_thing", action="create", data_json="{}", catalog=catalog) is not None
     assert validate_rag_search_call(query="x", limit=5, module="quotes", catalog=catalog) is None
     assert validate_rag_search_call(query="x", limit=5, module="", catalog=catalog) is None
-    # legacy behaviour without a catalog is unchanged
-    assert _query("Contacts") is None
+    assert validate_rag_search_call(query="x", limit=5, module="acm_custom_thing", catalog=catalog) is not None
 
 
 def test_get_module_catalog_caches_and_falls_back() -> None:
@@ -67,6 +59,6 @@ def test_get_module_catalog_caches_and_falls_back() -> None:
 
 def test_prompt_lists_catalog_modules() -> None:
     prompt = _build_system_prompt("t", {"crm_query_tool"}, capabilities={"crm"}, readable_modules="Quotes, acm_custom_thing")
-    assert "podporované moduly pro čtení: Quotes, acm_custom_thing" in prompt
+    assert "Moduly CRM dostupné pro čtení: Quotes, acm_custom_thing." in prompt
     prompt = _build_system_prompt("t", {"crm_query_tool"}, capabilities={"crm"})
-    assert "podporované moduly pro čtení: Accounts, Contacts" in prompt
+    assert "Moduly CRM dostupné pro čtení: Accounts, Contacts" in prompt

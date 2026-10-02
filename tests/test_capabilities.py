@@ -15,7 +15,7 @@ from app.engine.capabilities import (
     resolve_capabilities,
     tool_names_for,
 )
-from app.engine.tools import build_tools
+from app.engine.tools import build_native_tools
 
 
 def test_crm_is_always_enabled_even_when_omitted() -> None:
@@ -54,8 +54,8 @@ def test_non_string_entries_are_ignored() -> None:
 
 def test_tool_names_follow_enabled_capabilities() -> None:
     names = tool_names_for({"crm"})
-    assert "crm_query_tool" in names
-    assert "crm_action_tool" in names
+    # CRM data tools are published by the tenant's Coripo, not listed here.
+    assert names == {"rag_search_tool"}
     assert "web_search_tool" not in names
     assert "propose_form_fields_tool" not in names
     names = tool_names_for({"crm", "web", "form"})
@@ -73,7 +73,8 @@ def test_prompt_blocks_only_for_enabled() -> None:
 def test_every_registered_tool_has_a_prompt_block_in_order() -> None:
     all_tools = set().union(*(cap.tool_names for cap in CAPABILITIES.values()))
     assert all_tools <= set(TOOL_PROMPT_BLOCKS)
-    assert set(TOOL_PROMPT_ORDER) == set(TOOL_PROMPT_BLOCKS)
+    # The order also places the CRM manifest tools; every native block is ordered.
+    assert set(TOOL_PROMPT_BLOCKS) <= set(TOOL_PROMPT_ORDER)
 
 
 class _DummyCrmClient:
@@ -90,21 +91,22 @@ def _names(tools: list) -> set[str]:
     return {str(getattr(t, "name", "")) for t in tools}
 
 
-def test_build_tools_without_capabilities_keeps_legacy_full_set() -> None:
-    names = _names(build_tools(
+def test_native_tools_without_capabilities_keeps_legacy_full_set() -> None:
+    names = _names(build_native_tools(
         tenant_id="t", user_id="u", input_text="ahoj", request_context=None,
-        crm_client=_DummyCrmClient(), rag_service=None, action_confirmation=False,
+        crm_client=_DummyCrmClient(), rag_service=None,
     ))
-    assert {"crm_query_tool", "crm_action_tool", "web_search_tool"} <= names
+    assert {"rag_search_tool", "web_search_tool"} <= names
+    assert not names & {"crm_query_tool", "crm_action_tool"}  # CRM-owned since the tool registry
 
 
-def test_build_tools_filters_by_capabilities() -> None:
-    names = _names(build_tools(
+def test_native_tools_filter_by_capabilities() -> None:
+    names = _names(build_native_tools(
         tenant_id="t", user_id="u", input_text="ahoj", request_context=None,
-        crm_client=_DummyCrmClient(), rag_service=None, action_confirmation=False,
+        crm_client=_DummyCrmClient(), rag_service=None,
         capabilities={"crm"},
     ))
-    assert "crm_query_tool" in names
+    assert "rag_search_tool" in names
     assert "web_search_tool" not in names
     assert "web_fetch_tool" not in names
 
@@ -112,7 +114,7 @@ def test_build_tools_filters_by_capabilities() -> None:
 def test_daily_briefing_is_default_on_and_registered():
     enabled, unknown = resolve_capabilities({})
     assert "briefing" in enabled and not unknown
-    names = _names(build_tools(tenant_id="t", user_id="u", input_text="můj den", request_context=None,
+    names = _names(build_native_tools(tenant_id="t", user_id="u", input_text="můj den", request_context=None,
                                crm_client=_DummyCrmClient(), rag_service=None, capabilities=enabled))
     assert "daily_briefing_tool" in names
     assert "daily_briefing_tool" not in tool_names_for({"crm"})

@@ -8,6 +8,7 @@ Multi-tenant FastAPI gateway for voice/text-to-action workflows against Coripo C
 
 - FastAPI (Python 3.11+)
 - LangChain + OpenAI-compatible LLM endpoint (Qwen via Ollama/vLLM)
+- CRM tools published by each Coripo instance (MCP-shaped `coripo-tools/1` manifest)
 - Qdrant for tenant-scoped RAG retrieval
 - faster-whisper for STT
 - edge-tts for TTS
@@ -30,28 +31,24 @@ app/
     logging.py         # structured JSON/pretty logging
   domain/
     contracts.py       # shared dataclasses, pending action envelopes
-    entity_resolver.py # fuzzy CRM entity resolution
-    resolver_policy.py # threshold config for entity resolver
-    temporal_resolver.py # natural language date/time resolution
   engine/
     agent.py           # LangChain AgentExecutor loop
-    tools.py           # five LangChain tools (CRM query/action, RAG, meetings, overview)
+    tools.py           # gateway-native tools (RAG, web, forms, products, briefing, aggregates)
     tool_validator.py  # Pydantic arg validation for tools
     tool_logger.py     # structured tool-call logging
     rag.py             # TenantRAGService (Qdrant)
-    adjustments.py     # pre-mutation pipeline (name→ID, Czech inflections, defaults)
     filter_builder.py  # LLM-friendly → Coripo REST filter translation
     pending_patch.py   # in-conversation edit detection without LLM round-trip
-    quick_actions.py   # fast NLU path (currently disabled, threshold=1.0)
-  nlu/
-    command_parser.py  # regex-based intent parser for quick actions
   presentation/
     cards.py           # contact/record card rendering
   services/
     tenant_manager.py  # tenant DB lookup, credential decryption
     crm_client.py      # Coripo REST client (HMAC + session-ID auth)
     crm_read_service.py
-    crm_write_service.py
+  tools/               # AI tool registry: CRM tools from each tenant's Coripo manifest
+    toolset.py         # per-turn tool set = CRM manifest tools + native tools
+    crm_provider.py    # ai/tools/call with per-tenant breaker, concurrency, timeouts
+    manifest_cache.py  # per-tenant manifest cache (ETag, stale fallback, DB snapshot)
   utils/
     text.py            # normalize_text, safe_text (shared across modules)
     crm_id.py          # CRM_ID_RE regex, is_valid_crm_id (shared across modules)
@@ -61,6 +58,7 @@ database/
   migrations/001_init.sql
 scripts/
   create_tenant.py
+  check_tool_manifests.py  # cutover readiness: every tenant serves ai/tools
 requirements.txt
 requirements.gpu.txt   # NVIDIA wheels — install only on GPU hosts
 environment.yml        # Conda environment spec
@@ -296,7 +294,7 @@ Optional machine-to-machine HMAC headers:
 ```bash
 source .venv/bin/activate
 pytest tests/                              # all tests
-pytest tests/test_entity_resolver_calibration.py   # single file
+pytest tests/test_toolset.py   # single file
 pytest tests/test_tool_call_validator.py::test_name  # single test
 ```
 

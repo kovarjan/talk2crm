@@ -104,3 +104,17 @@ class ChatMessage(Base):
     )
 
     chat: Mapped[Chat] = relationship(back_populates="messages")
+
+
+class TenantToolManifest(Base):
+    """Last good coripo-tools/1 manifest per tenant, so a fresh worker can serve CRM
+    tools while that tenant's Coripo is unreachable (see app/tools/manifest_cache.py)."""
+
+    __tablename__ = "tenant_tool_manifests"
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(100), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    manifest_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    manifest_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.api.endpoints import _normalize_ingest_modules
 from app.engine.tool_validator import validate_rag_search_call
-from app.engine.tools import build_tools
+from app.engine.tools import build_native_tools
 from app.utils.modules import canonical_module_name
 
 
@@ -53,7 +53,7 @@ def test_rag_validator_allows_product_templates() -> None:
 
 def test_rag_search_tool_filters_to_product_templates() -> None:
     rag = _Rag()
-    tools = build_tools(tenant_id="t", user_id="u", input_text="x", request_context=None,
+    tools = build_native_tools(tenant_id="t", user_id="u", input_text="x", request_context=None,
                         crm_client=_Crm(), rag_service=rag, capabilities={"crm"})
     tool = next(t for t in tools if getattr(t, "name", "") == "rag_search_tool")
     asyncio.run(tool.ainvoke({"query": "vrtačka", "module": "producttemplates", "limit": 3}))

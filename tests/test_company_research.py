@@ -34,6 +34,17 @@ class FakeCrmClient:
     mode = "coripo_public"
 
 
+class _FakeToolset:
+    def __init__(self, tools: list) -> None:
+        self._tools = tools
+
+    def agent_tools(self) -> list:
+        return self._tools
+
+    def is_read_only(self, name: str) -> bool:
+        return name != "crm_action_tool"
+
+
 def _fake_tools():
     class _Tool:
         def __init__(self, name: str) -> None:
@@ -64,7 +75,7 @@ async def test_research_company_returns_only_schema_fields_and_sources() -> None
     }
 
     with (
-        patch("app.engine.company_research.build_tools", return_value=_fake_tools()) as mock_build_tools,
+        patch("app.engine.company_research.build_turn_toolset", new=AsyncMock(return_value=_FakeToolset(_fake_tools()))) as mock_build_tools,
         patch("app.engine.company_research.run_agent", new=AsyncMock(return_value=fake_agent_output)) as mock_run_agent,
     ):
         result = await research_company(
@@ -88,7 +99,7 @@ async def test_research_company_returns_only_schema_fields_and_sources() -> None
     assert "not_in_schema" not in result["fields"]
     assert result["sources"] == ["https://acme.cz", "https://acme.cz/o-nas"]
 
-    # crm_action_tool must never reach this agent, even though build_tools() returns it
+    # crm_action_tool must never reach this agent, even though the tool set contains it
     passed_tools = mock_run_agent.call_args.kwargs["tools"]
     assert {t.name for t in passed_tools} == {"web_search_tool", "web_fetch_tool", "crm_query_tool", "get_company_overview"}
     assert mock_build_tools.called
@@ -101,7 +112,7 @@ async def test_research_company_defaults_message_when_nothing_found() -> None:
     fake_agent_output = {"output": '{"fields": {}}', "intermediate_steps": []}
 
     with (
-        patch("app.engine.company_research.build_tools", return_value=_fake_tools()),
+        patch("app.engine.company_research.build_turn_toolset", new=AsyncMock(return_value=_FakeToolset(_fake_tools()))),
         patch("app.engine.company_research.run_agent", new=AsyncMock(return_value=fake_agent_output)),
     ):
         result = await research_company(

@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from app.engine import web_fetch
-from app.engine.tools import build_tools
+from app.engine.tools import build_native_tools
 from app.engine.web_fetch import WebFetchError, _TextExtractor, _validate_url
 
 
@@ -71,14 +71,13 @@ def test_web_fetch_tool_extracts_page_text(monkeypatch) -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     monkeypatch.setattr(web_fetch, "get_shared_http_client", lambda: client)
 
-    tools = build_tools(
+    tools = build_native_tools(
         tenant_id="ai-local",
         user_id="1",
         input_text="precti stranku acme.cz",
         request_context={},
         crm_client=DummyCrmClient(),  # type: ignore[arg-type]
         rag_service=None,
-        action_confirmation=False,
     )
     tool = next(item for item in tools if getattr(item, "name", "") == "web_fetch_tool")
     payload = json.loads(asyncio.run(tool.ainvoke({"url": "https://acme.cz/o-nas"})))
@@ -89,14 +88,13 @@ def test_web_fetch_tool_extracts_page_text(monkeypatch) -> None:
 
 
 def test_web_fetch_tool_rejects_private_url() -> None:
-    tools = build_tools(
+    tools = build_native_tools(
         tenant_id="ai-local",
         user_id="1",
         input_text="precti localhost",
         request_context={},
         crm_client=DummyCrmClient(),  # type: ignore[arg-type]
         rag_service=None,
-        action_confirmation=False,
     )
     tool = next(item for item in tools if getattr(item, "name", "") == "web_fetch_tool")
     payload = json.loads(asyncio.run(tool.ainvoke({"url": "http://127.0.0.1/secret"})))

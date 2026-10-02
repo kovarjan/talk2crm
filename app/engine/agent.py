@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +26,9 @@ from app.core.logging import (
     log_llm_step,
 )
 
+
+if TYPE_CHECKING:
+    from app.tools.toolset import ToolSet
 
 logger = get_logger(__name__)
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
@@ -121,16 +124,25 @@ def _build_system_prompt(
     tool_names: set[str],
     capabilities: set[str] | None = None,
     readable_modules: str | None = None,
+    tool_blocks: list[str] | None = None,
+    capability_block: str | None = None,
+    crm_available: bool = True,
 ) -> str:
+    """System prompt for a chat turn. ``tool_blocks``/``capability_block`` come from the
+    turn's ToolSet (CRM tools rendered from the tenant manifest); without them the legacy
+    gateway-native blocks for ``tool_names`` are used."""
     now = datetime.now()
     date_ctx = _build_date_context(now)
     prefix = get_settings().llm_system_prompt_prefix
     prefix_block = f"{prefix}\n" if prefix else ""
 
     numbered: list[str] = []
-    for name in TOOL_PROMPT_ORDER:
-        if name in tool_names:
-            numbered.append(f"{len(numbered) + 1}. {TOOL_PROMPT_BLOCKS[name]}")
+    if tool_blocks is not None:
+        numbered = [f"{i}. {block}" for i, block in enumerate(tool_blocks, start=1)]
+    else:
+        for name in TOOL_PROMPT_ORDER:
+            if name in tool_names and name in TOOL_PROMPT_BLOCKS:
+                numbered.append(f"{len(numbered) + 1}. {TOOL_PROMPT_BLOCKS[name]}")
     aggregate_rules = ""
     if "crm_aggregate_tool" in tool_names:
         numbered.append(
@@ -149,8 +161,14 @@ def _build_system_prompt(
     # Registry blocks carry doubled braces (f-string legacy); they are inserted
     # as a value, not as template text, so render them single here.
     tools_block = "\n\n".join(numbered).replace("{{", "{").replace("}}", "}")
-    tools_block = tools_block.replace("{readable_modules}", readable_modules or DEFAULT_READABLE_MODULES)
-    capability_block = prompt_blocks_for(capabilities) if capabilities else ""
+    tools_block += f"\n\nModuly CRM dostupné pro čtení: {readable_modules or DEFAULT_READABLE_MODULES}."
+    if not crm_available:
+        tools_block += (
+            "\nPOZOR: CRM je teď nedostupné — nástroje pro práci s daty CRM nejsou k dispozici. "
+            "Řekni to uživateli a nabídni zkusit to za chvíli; nic si nevymýšlej."
+        )
+    if capability_block is None:
+        capability_block = prompt_blocks_for(capabilities) if capabilities else ""
     capability_section = f"\n{capability_block}\n" if capability_block else ""
 
     return f"""{prefix_block}Jsi CRM asistent (muž) (tenant: {tenant_id}). Odpovídej česky. Stručně, bez markdown.
@@ -169,7 +187,7 @@ PRAVIDLO PENDING AKCE: Kontext může obsahovat pending_action — návrh akce �
   NIKDY nefiltruj Meetings/Calls podle contact_id — použij parametr search.
 PRAVIDLO POVINNÁ POLE: Při vytváření záznamu odvoď sám vše, co jde odvodit z požadavku a kontextu — name (např. "Schůzka - Fakturace projektu"), description i zapis (zápis = totéž co description, pokud uživatel neřekl jinak). Bez zadané délky trvá schůzka 1 hodinu.
   NIKDY se neptej uživatele na hodnoty, které lze odvodit nebo domyslet. Ptej se jen na informaci, která opravdu chybí (např. termín, nebo který ze dvou kontaktů).
-  Pokud crm_action_tool vrátí "needs_more_info", oprav data_json sám podle field_errors (doplň nebo odstraň pole) a zavolej nástroj znovu; uživatele se ptej až když hodnotu nelze odvodit.
+  Pokud nástroj vrátí "tool_validation_error", oprav argumenty sám podle field_errors (path ukazuje na chybné pole; doplň, oprav nebo odstraň) a zavolej nástroj znovu; uživatele se ptej až když hodnotu nelze odvodit.
   Pole v "missing_required" jsou jen varování — vytvoření neblokují. Kontakt u schůzky/hovoru patří do invitees (contact_id stačí uvést, nástroj ho tam přesune); "Týká se" (parent) je firma kontaktu.
 
 DOSTUPNÉ NÁSTROJE — volaj přes <tool_call> tag:
@@ -280,7 +298,7 @@ async def run_agent(
     user_id: str,
     input_text: str,
     context: dict[str, Any] | None,
-    tools: list,
+    tools: list | None = None,
     chat_history: list[dict[str, str]] | None = None,
     emit: EmitFn | None = None,
     db: Optional[AsyncSession] = None,
@@ -288,7 +306,14 @@ async def run_agent(
     capture_skills: bool = True,
     capabilities: set[str] | None = None,
     readable_modules: str | None = None,
+    toolset: "ToolSet | None" = None,
 ) -> dict[str, Any]:
+    """Tool-using agent loop. Chat turns pass ``toolset`` (tenant CRM + native tools, and
+    their prompt blocks); purpose-built helpers pass a plain ``tools`` list together with
+    their own ``system_prompt_override``."""
+    if toolset is not None and tools is None:
+        tools = toolset.agent_tools()
+    tools = tools or []
     log_llm_step(
         logger,
         LLM_STEP_USER_INPUT,
@@ -325,7 +350,15 @@ async def run_agent(
         # or per-user/tenant skill overlays mixed in.
         system_prompt = system_prompt_override
     else:
-        system_prompt = _build_system_prompt(tenant_id, set(tools_by_name), capabilities=capabilities, readable_modules=readable_modules)
+        system_prompt = _build_system_prompt(
+            tenant_id,
+            set(tools_by_name),
+            capabilities=capabilities,
+            readable_modules=readable_modules,
+            tool_blocks=toolset.prompt_blocks() if toolset is not None else None,
+            capability_block=toolset.capability_prompt() if toolset is not None else None,
+            crm_available=toolset.crm_available if toolset is not None else True,
+        )
 
         skill_block = ""
         if db is not None and settings.skills_enabled:
@@ -427,12 +460,9 @@ async def run_agent(
             t_name = str(call.get("name", ""))
             t_args = call.get("args", {}) or {}
 
-            # data_json must reach the tool as a JSON string.
-            # Models reliably produce a native object — serialize it.
-            # If the model passed a string, sanitize it (strip stray newlines, attempt repair).
-            if isinstance(t_args.get("data_json"), (dict, list)):
-                t_args["data_json"] = json.dumps(t_args["data_json"], ensure_ascii=False)
-            elif isinstance(t_args.get("data_json"), str):
+            # Objects stay objects (tool schemas declare them); a stringified object is
+            # sanitized here and decoded by the ToolSet's argument coercion.
+            if isinstance(t_args.get("data_json"), str):
                 t_args["data_json"] = _sanitize_data_json_string(t_args["data_json"])
 
             log_llm_step(logger, LLM_STEP_AGENT_ACTION, {"tool": t_name, "tool_input": t_args})

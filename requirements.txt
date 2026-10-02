@@ -103,6 +103,11 @@ yarl==1.22.0
 zstandard==0.25.0
 loguru==0.7.3
 json-repair==0.58.7
+# AI tool registry: validates CRM tool arguments against the manifest inputSchema
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==2026.6.3
 
 # dev / test
 iniconfig==2.3.0

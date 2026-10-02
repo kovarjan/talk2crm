@@ -4,13 +4,14 @@
 
 """Core text-to-action pipeline behind /process-input/ and /process-audio/.
 
-Flow: pending-action patch → quick action → LLM agent, with chat persistence,
+Flow: confirmed pending tool call → pending-action patch → LLM agent, with chat persistence,
 context merging (pending actions, CRM-created records, UI focus) and optional
 TTS response generation.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import time
 import unicodedata
@@ -29,10 +30,7 @@ from app.core.logging import get_logger, log_llm_trace
 from app.engine.agent import run_agent
 from app.engine.events import EmitFn, StreamEvent
 from app.engine.pending_patch import try_patch_pending_action
-from app.engine.quick_actions import QuickActionResult, try_handle_quick_action
 from app.engine.rag import get_rag_service
-from app.engine.capabilities import resolve_capabilities
-from app.engine.tools import build_tools
 from app.presentation.agent_result import extract_form_patch_from_agent_result
 from app.presentation.agent_result import normalize_agent_result_for_ui, to_user_message
 from app.services import chat_service
@@ -40,6 +38,7 @@ from app.services.chat_titles import ensure_chat_name
 from app.services.crm_client import CoripoClient
 from app.services.module_catalog import get_module_catalog
 from app.services.tenant_manager import TenantManager
+from app.tools.toolset import build_turn_toolset
 from app.utils.modules import canonical_module_name
 
 
@@ -337,6 +336,15 @@ async def synthesize_to_final_path(
         temp_path.unlink(missing_ok=True)
 
 
+def _tool_step_result(tool_name: str, observation: dict[str, Any]) -> dict[str, Any]:
+    """Agent-result shape for a tool call the pipeline made itself (no LLM turn)."""
+    message = str(observation.get("message_to_user") or observation.get("message") or observation.get("summary") or "").strip()
+    return normalize_agent_result_for_ui({
+        "output": message,
+        "intermediate_steps": [{"tool": tool_name, "tool_input": {}, "observation": json.dumps(observation, ensure_ascii=False, default=str), "log": None}],
+    })
+
+
 async def process_input_core(
     *,
     db: AsyncSession,
@@ -380,7 +388,6 @@ async def process_input_core(
         user_id=user_id,
     )
     incoming_context = dict(payload.context or {})
-    enabled_capabilities, unknown_capabilities = resolve_capabilities(incoming_context)
     latest_created_record = await chat_service.load_latest_crm_record_created_event(
         db,
         chat_id=chat.id,
@@ -413,6 +420,20 @@ async def process_input_core(
     effective_context = with_soft_ui_focus_hint(effective_context)
     request_context = effective_context or None
 
+    # One tool set per turn: this tenant's CRM tools (manifest) + the gateway's own tools,
+    # for the capabilities the FE sent (context.capabilities).
+    toolset = await build_turn_toolset(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        input_text=payload.input_text,
+        request_context=request_context,
+        crm_client=crm_client,
+        rag_service=rag_service,
+        module_catalog=module_catalog,
+    )
+    enabled_capabilities = toolset.enabled_capabilities
+    unknown_capabilities = toolset.unknown_capabilities
+
     await chat_service.append_message(
         db,
         chat=chat,
@@ -423,49 +444,40 @@ async def process_input_core(
     )
 
     action_confirmation = bool(effective_context.get("confirm_action", False))
-    execution_mode = "quick_action"
-    available_tools: list[str] = []
+    execution_mode = "agent"
+    available_tools: list[str] = toolset.names()
 
     pending_for_patch = (
         effective_context.get("pending_action") if isinstance(effective_context.get("pending_action"), dict) else None
     ) or latest_pending_action
-    pending_patch_result = None
-    if isinstance(pending_for_patch, dict) and not action_confirmation:
-        pending_patch_result = try_patch_pending_action(
-            input_text=payload.input_text,
-            pending_action=pending_for_patch,
-        )
 
-    if pending_patch_result is not None:
-        execution_mode = "pending_patch"
-        agent_result = pending_patch_result
+    if action_confirmation and isinstance(pending_for_patch, dict) and pending_for_patch.get("confirmation_token"):
+        # Explicit confirmation of a previewed CRM tool call: run exactly that call with
+        # its token — no LLM, nothing re-derived.
+        execution_mode = "confirmed_tool_call"
+        observation = await toolset.execute_pending(pending_for_patch)
+        agent_result = _tool_step_result(str(pending_for_patch.get("tool") or ""), observation)
     else:
-        quick_result: QuickActionResult | None = None
-        if settings.quick_action_enabled:
-            quick_result = await try_handle_quick_action(
+        pending_patch_result = None
+        if isinstance(pending_for_patch, dict) and not action_confirmation:
+            pending_patch_result = try_patch_pending_action(
                 input_text=payload.input_text,
-                crm_client=crm_client,
-                user_id=user_id,
-                action_confirmation=action_confirmation,
+                pending_action=pending_for_patch,
             )
-        if quick_result is not None and not quick_result.should_fallback:
-            agent_result = quick_result.data
+
+        if pending_patch_result is not None:
+            execution_mode = "pending_patch"
+            agent_result = pending_patch_result
+            patched = pending_patch_result.get("pending_action") if isinstance(pending_patch_result.get("pending_action"), dict) else None
+            if patched is not None and pending_for_patch.get("tool"):
+                # The token only covers the previewed arguments: preview the edit again.
+                observation = await toolset.repreview_pending(pending_for_patch, patched.get("data") or {})
+                agent_result = _tool_step_result(str(pending_for_patch.get("tool")), observation)
+                if agent_result.get("status") == "confirmation_required":
+                    agent_result["message_to_user"] = pending_patch_result.get("message_to_user") or agent_result.get("message_to_user")
         else:
-            execution_mode = "agent"
             if emit:
                 await emit(StreamEvent("pipeline.mode", {"mode": execution_mode}))
-            tools = build_tools(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                input_text=payload.input_text,
-                request_context=request_context,
-                crm_client=crm_client,
-                rag_service=rag_service,
-                action_confirmation=action_confirmation,
-                capabilities=enabled_capabilities,
-                module_catalog=module_catalog,
-            )
-            available_tools = [str(getattr(tool, "name", "")) for tool in tools if getattr(tool, "name", None)]
             history_for_agent = await chat_service.load_messages(
                 db,
                 chat_id=chat.id,
@@ -483,7 +495,7 @@ async def process_input_core(
                     user_id=user_id,
                     input_text=payload.input_text,
                     context=request_context,
-                    tools=tools,
+                    toolset=toolset,
                     chat_history=recent_history_for_agent,
                     emit=emit,
                     db=db,
@@ -590,6 +602,11 @@ async def process_input_core(
             "crm_mode": settings.crm_mode,
             "rag_available": rag_service is not None,
             "available_tools": available_tools,
+            "tool_manifest": {
+                "hash": toolset.manifest.hash if toolset.manifest else None,
+                "stale": toolset.manifest.stale if toolset.manifest else None,
+                "crm_available": toolset.crm_available,
+            },
             "capabilities": sorted(enabled_capabilities),
             "return_voice": payload.return_voice,
             "audio_generated": bool(file_id),

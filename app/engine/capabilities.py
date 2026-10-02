@@ -10,13 +10,16 @@ always present. Unknown ids are ignored and reported back, never rejected.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Any
+
+from app.tools.contracts import CapabilitySpec
 
 ALWAYS_ON: frozenset[str] = frozenset({"crm"})
 
-# Tool descriptions for the system prompt. Text is verbatim from the former
-# hardcoded prompt in agent.py; braces are doubled because agent.py still
-# renders the prompt through an f-string.
+# Prompt blocks of the gateway-native tools. CRM tools (crm_query_tool, crm_action_tool, …)
+# are not here: each tenant's Coripo publishes them with their descriptions in its tool
+# manifest (app/tools). Braces are doubled for historical f-string rendering.
 TOOL_PROMPT_BLOCKS: dict[str, str] = {
     "daily_briefing_tool": """daily_briefing_tool(refresh: bool=false, closing_days: int=14)
    — denní přehled přihlášeného uživatele. Pro dotazy „můj den“, „co mě dnes čeká“, „denní přehled“ vždy použij tento nástroj.
@@ -24,27 +27,6 @@ TOOL_PROMPT_BLOCKS: dict[str, str] = {
     "rag_search_tool": """rag_search_tool(query: str, module: str="", limit: int=5)
    — sémantické/fuzzy hledání v RAG indexu. Použij pro získání account_id/contact_id.
    — module může být také "opportunities", "quotes" nebo "acm_invoices", pokud hledáš obchodní případy, nabídky nebo faktury.""",
-    "crm_query_tool": """crm_query_tool(module: str, filters: str="[]", search: str=null, limit: int=20)
-   — přesný dotaz do CRM. Pro přesné lookupy jména osoby/firmy použij nejdřív search.
-   — podporované moduly pro čtení: {{readable_modules}}.
-     filters je JSON pole [{{"field":"...","op":"eq","value":"..."}}]
-   — fields id/account_id/contact_id a také *.id nebo *|id musí mít jako value jen skutečné CRM UUID, nikdy název firmy/kontaktu to nic nenajde.
-   — pro více konkrétních záznamů můžeš použít pouze {{ "field": "id", "op": "in", "value": ["<CRM_ID_1>", "<CRM_ID_2>"] }}""",
-    "crm_record_detail_tool": """crm_record_detail_tool(module: str, record_id: str, include_lines: bool=true)
-   — detail jednoho záznamu včetně položek (řádků) u nabídek, faktur, objednávek a obchodních případů.
-   — pro otázky na položky, součty a slevy VŽDY použij tento nástroj; nikdy nesčítej ručně, součty jsou v totals.
-   — record_id musí být skutečné CRM id (z UI kontextu record/record_id nebo z výsledku jiného nástroje).""",
-    "my_meetings_tool": """my_meetings_tool(date_from: str|null=null, date_to: str|null=null, limit: int=100)
-   — moje schůzky (assigned_user_id = login user)
-   — date_from/date_to jsou volitelné; bez datumu vrací nejnovější schůzky podle limitu""",
-    "crm_action_tool": """crm_action_tool(module: str, action: str, data_json: str="{{}}")
-   — mutace: create/update/delete. Pouze po potvrzení uživatele.
-   — pro update/delete vždy pošli cílové ID do data_json.id (record_id je jen kompatibilní fallback).
-   POZOR: pokud vrátí {{"status": "confirmation_required"}}, OKAMŽITĚ dej <answer> s textem z "message_to_user". Nevolej žádný další nástroj.""",
-    "get_company_overview": """get_company_overview(account_id: str)
-   — vrátí kompaktní AI detail firmy (Accounts) + related_records ze subpanelů.
-   — activities i každý related_records subpanel je ve výchozím stavu omezen na 10 nejnovějších záznamů.
-   — používej pro detail firmy, když máš account_id.""",
     "web_search_tool": """web_search_tool(query: str, max_results: int=5)
    — vyhledávání na webu (veřejné informace o firmách, lidech, produktech, aktuální dění, adresy, IČO, weby).
    — použij, když uživatel chce informace, které v CRM nejsou, nebo výslovně žádá vyhledání na webu.
@@ -68,6 +50,8 @@ TOOL_PROMPT_BLOCKS: dict[str, str] = {
    — pokud je více podobných kandidátů, vypiš je a zeptej se uživatele, který má na mysli.""",
 }
 
+# Preferred order of tools in the prompt; names not listed (e.g. client tools) follow
+# alphabetically. Includes CRM tool names so the prompt keeps its familiar order.
 TOOL_PROMPT_ORDER: list[str] = [
     "daily_briefing_tool",
     "rag_search_tool",
@@ -94,16 +78,11 @@ class Capability:
 
 CAPABILITIES: dict[str, Capability] = {
     "briefing": Capability(id="briefing", tool_names=frozenset({"daily_briefing_tool"}), prompt_block="", default_on=True),
+    # CRM tools themselves come from the tenant manifest (annotations.capability = "crm");
+    # this lists only the gateway-native tools of the always-on CRM capability.
     "crm": Capability(
         id="crm",
-        tool_names=frozenset({
-            "rag_search_tool",
-            "crm_query_tool",
-            "crm_record_detail_tool",
-            "my_meetings_tool",
-            "crm_action_tool",
-            "get_company_overview",
-        }),
+        tool_names=frozenset({"rag_search_tool"}),
         prompt_block="",
         default_on=True,
     ),
@@ -138,14 +117,23 @@ CAPABILITIES: dict[str, Capability] = {
 }
 
 
-def resolve_capabilities(context: dict[str, Any] | None) -> tuple[set[str], list[str]]:
-    """Return (enabled ids, unknown ids). ``crm`` is always enabled."""
+def resolve_capabilities(
+    context: dict[str, Any] | None,
+    extra: Mapping[str, CapabilitySpec] | None = None,
+) -> tuple[set[str], list[str]]:
+    """Return (enabled ids, unknown ids). ``crm`` is always enabled.
+
+    ``extra`` are capabilities a tenant's CRM publishes in its tool manifest (e.g. a
+    client's custom tool group); they behave exactly like the gateway-native ones.
+    """
     ctx = context if isinstance(context, dict) else {}
+    extra = extra or {}
     enabled: set[str] = set(ALWAYS_ON)
     unknown: list[str] = []
     requested = ctx.get("capabilities")
     if requested is None:
         enabled.update(cap.id for cap in CAPABILITIES.values() if cap.default_on)
+        enabled.update(cap.id for cap in extra.values() if cap.default_on)
     else:
         for item in requested if isinstance(requested, list) else []:
             if not isinstance(item, str):
@@ -153,7 +141,7 @@ def resolve_capabilities(context: dict[str, Any] | None) -> tuple[set[str], list
             cap_id = item.strip()
             if not cap_id:
                 continue
-            if cap_id in CAPABILITIES:
+            if cap_id in CAPABILITIES or cap_id in extra:
                 enabled.add(cap_id)
             elif cap_id not in unknown:
                 unknown.append(cap_id)
@@ -163,6 +151,7 @@ def resolve_capabilities(context: dict[str, Any] | None) -> tuple[set[str], list
 
 
 def tool_names_for(enabled: set[str]) -> set[str]:
+    """Gateway-native tools of the enabled capabilities (CRM tools carry their own capability)."""
     names: set[str] = set()
     for cap_id in enabled:
         cap = CAPABILITIES.get(cap_id)
@@ -171,10 +160,12 @@ def tool_names_for(enabled: set[str]) -> set[str]:
     return names
 
 
-def prompt_blocks_for(enabled: set[str]) -> str:
-    blocks = [
-        CAPABILITIES[cap_id].prompt_block
-        for cap_id in sorted(enabled)
-        if cap_id in CAPABILITIES and CAPABILITIES[cap_id].prompt_block
-    ]
+def prompt_blocks_for(enabled: set[str], extra: Mapping[str, CapabilitySpec] | None = None) -> str:
+    extra = extra or {}
+    blocks: list[str] = []
+    for cap_id in sorted(enabled):
+        if cap_id in CAPABILITIES and CAPABILITIES[cap_id].prompt_block:
+            blocks.append(CAPABILITIES[cap_id].prompt_block)
+        elif cap_id in extra and extra[cap_id].prompt:
+            blocks.append(extra[cap_id].prompt)
     return "\n".join(blocks)

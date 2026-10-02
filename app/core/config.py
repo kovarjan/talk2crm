@@ -97,24 +97,19 @@ class Settings(BaseSettings):
     # DB row is consulted again (0 disables the cache). Deactivating a tenant
     # can take up to this long to propagate.
     tenant_cache_ttl_seconds: float = 60.0
+    # AI tool registry (app/tools): CRM tools come from each tenant's GET ai/tools manifest.
+    # Manifests are revalidated (ETag) after the TTL; if the CRM is unreachable the last
+    # good copy is served for up to stale_max. Concurrency/breaker limits are per tenant
+    # and per worker process.
+    tool_manifest_ttl_seconds: float = 300.0
+    tool_manifest_stale_max_seconds: float = 86400.0
+    tool_manifest_retry_seconds: float = 30.0
+    tool_tenant_max_concurrency: int = 8
+    tool_breaker_failure_threshold: int = 5
+    tool_breaker_reset_seconds: float = 30.0
     engine_v2_enabled: bool = True
-    resolver_v2_enabled: bool = True
-    temporal_v2_enabled: bool = True
     read_service_v2_enabled: bool = True
-    write_service_v2_enabled: bool = True
     aggregate_tools_enabled: bool = True
-    # Route create/update/patch CRM writes through Coripo's live ai_schema/ai_write
-    # endpoints (SchemaDrivenWriteService) instead of the blind set/{module} POST.
-    # Falls back to the legacy path automatically if ai_schema/ai_write raises for a
-    # module (e.g. one Coripo hasn't rolled the endpoints out for yet), so this can be
-    # left on; only disable if you need to force every write through the legacy path.
-    ai_write_enabled: bool = True
-
-    # Resolver thresholds stay config-driven until calibrated from runtime telemetry.
-    resolver_read_confidence_threshold: float = 0.70
-    resolver_mutation_confidence_threshold: float = 0.70
-    resolver_ambiguity_gap_threshold: float = 0.08
-    resolver_strict_mutation_confirmation: bool = True
 
     # Skills system
     skills_enabled: bool = Field(
@@ -144,16 +139,6 @@ class Settings(BaseSettings):
         description="Minimum confidence for auto-captured skills to be saved.",
     )
 
-    quick_action_enabled: bool = False
-    quick_action_fallback_on_no_candidates: bool = True
-    quick_action_fallback_on_ambiguous: bool = True
-    quick_action_fallback_on_exception: bool = True
-    # Intentionally set to 1.0 to disable quick actions entirely.
-    # CommandParser emits confidence=0.95 for all matches, so this threshold
-    # is never met. Quick actions caused more false-positive mutations than they
-    # saved LLM round-trips; the LLM agent path handles these intents correctly.
-    # To re-enable, lower this to 0.94 or below.
-    quick_action_min_confidence: float = 1.0
 
     hmac_keys_json: str = Field(default="{}")
     hmac_max_skew_seconds: int = 300
@@ -227,20 +212,8 @@ class Settings(BaseSettings):
         return parsed if isinstance(parsed, dict) else {}
 
     @property
-    def resolver_v2_active(self) -> bool:
-        return bool(self.engine_v2_enabled and self.resolver_v2_enabled)
-
-    @property
-    def temporal_v2_active(self) -> bool:
-        return bool(self.engine_v2_enabled and self.temporal_v2_enabled)
-
-    @property
     def read_service_v2_active(self) -> bool:
         return bool(self.engine_v2_enabled and self.read_service_v2_enabled)
-
-    @property
-    def write_service_v2_active(self) -> bool:
-        return bool(self.engine_v2_enabled and self.write_service_v2_enabled)
 
 
 @lru_cache(maxsize=1)

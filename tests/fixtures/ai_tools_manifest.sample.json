@@ -1,0 +1,290 @@
+{
+    "protocol": "coripo-tools/1",
+    "manifest_hash": "sha256:315f6874a687fc799d6bfc792942df343dfe0cc1841491b0a9d0d839bad81b84",
+    "coripo_version": "2.32.1",
+    "capabilities": [
+        {
+            "id": "crm",
+            "title": "CRM",
+            "prompt": "",
+            "default_on": true
+        }
+    ],
+    "tools": [
+        {
+            "name": "crm_action_tool",
+            "version": "1.0.0",
+            "title": "Změna v CRM",
+            "description": "mutace: create/update/delete jednoho záznamu. Nic nezapíše bez potvrzení uživatele.\ndata_json = {\"fields\": {...}, \"invitees\": {\"Users\":[{\"id\":..}],\"Contacts\":[{\"id\":..}]}}; jména kontaktů/firem můžeš dát do fields.contact_name / fields.account_name, CRM je dohledá.\npro update/delete vždy pošli cílové ID do data_json.id (record_id je jen kompatibilní fallback).\nPOZOR: pokud vrátí {\"status\": \"confirmation_required\"}, OKAMŽITĚ dej <answer> s krátkým shrnutím návrhu. Nevolej žádný další nástroj.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "module": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "create",
+                            "update",
+                            "delete"
+                        ]
+                    },
+                    "data_json": {
+                        "type": "object",
+                        "default": [],
+                        "properties": {
+                            "id": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ]
+                            },
+                            "fields": {
+                                "type": "object"
+                            },
+                            "invitees": {
+                                "type": "object"
+                            }
+                        }
+                    },
+                    "record_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "module",
+                    "action"
+                ],
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "requiresConfirmation": true,
+                "capability": "crm",
+                "timeoutSeconds": 30
+            }
+        },
+        {
+            "name": "crm_query_tool",
+            "version": "1.0.0",
+            "title": "Dotaz do CRM",
+            "description": "přesný dotaz do CRM. Pro přesné lookupy jména osoby/firmy použij nejdřív search.\nfilters je pole [{\"field\":\"...\",\"op\":\"eq\",\"value\":\"...\"}].\nfields id/account_id/contact_id a také *.id nebo *|id musí mít jako value jen skutečné CRM UUID, nikdy název firmy/kontaktu – to nic nenajde.\npro více konkrétních záznamů můžeš použít pouze {\"field\": \"id\", \"op\": \"in\", \"value\": [\"<CRM_ID_1>\", \"<CRM_ID_2>\"]}.\ndate_from/date_to filtrují přirozené datum modulu (schůzky/hovory date_start, úkoly date_due, obchody date_closed, faktury datum_vystaveni).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "module": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "CRM modul, např. Contacts, Accounts, Meetings, Opportunities, Quotes, acm_invoices, acm_orders"
+                    },
+                    "filters": {
+                        "type": "array",
+                        "default": [],
+                        "maxItems": 20,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "field": {
+                                    "type": "string",
+                                    "minLength": 1
+                                },
+                                "op": {
+                                    "type": "string",
+                                    "enum": [
+                                        "eq",
+                                        "neq",
+                                        "cont",
+                                        "starts",
+                                        "nnull",
+                                        "null",
+                                        "gte",
+                                        "lte",
+                                        "gt",
+                                        "lt",
+                                        "in"
+                                    ]
+                                },
+                                "value": {
+                                    "type": [
+                                        "string",
+                                        "number",
+                                        "array",
+                                        "null"
+                                    ]
+                                }
+                            },
+                            "required": [
+                                "field",
+                                "op"
+                            ],
+                            "additionalProperties": false
+                        }
+                    },
+                    "search": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "fulltext přes všechna pole"
+                    },
+                    "date_from": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                        "description": "YYYY-MM-DD včetně"
+                    },
+                    "date_to": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                        "description": "YYYY-MM-DD včetně"
+                    },
+                    "order_by": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "pattern": "^[A-Za-z0-9_.]+:(asc|desc|ASC|DESC)$",
+                        "description": "pole:asc|desc"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 500,
+                        "default": 20
+                    }
+                },
+                "required": [
+                    "module"
+                ],
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "requiresConfirmation": false,
+                "capability": "crm",
+                "timeoutSeconds": 15
+            }
+        },
+        {
+            "name": "crm_record_detail_tool",
+            "version": "1.1.0",
+            "title": "Detail záznamu",
+            "description": "detail jednoho záznamu včetně položek (řádků) u nabídek, faktur, objednávek a obchodních případů.\npro otázky na položky, součty a slevy VŽDY použij tento nástroj; nikdy nesčítej ručně, součty jsou v lines.totals.\nrecord_id musí být skutečné CRM id (z UI kontextu record/record_id nebo z výsledku jiného nástroje).\nuživatel uvidí kartu záznamu s tlačítkem „Otevřít v CRM“; když chce záznam ukázat nebo otevřít v CRM, zavolej tento nástroj.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "module": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "CRM modul, např. Quotes, acm_invoices, acm_orders, Opportunities"
+                    },
+                    "record_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Skutečné CRM id záznamu"
+                    },
+                    "include_lines": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Zahrnout položky (řádky)"
+                    }
+                },
+                "required": [
+                    "module",
+                    "record_id"
+                ],
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "requiresConfirmation": false,
+                "capability": "crm",
+                "timeoutSeconds": 15
+            }
+        },
+        {
+            "name": "get_company_overview",
+            "version": "1.1.0",
+            "title": "Přehled firmy",
+            "description": "vrátí kompaktní AI detail firmy (Accounts) + related_records ze subpanelů.\nactivities i každý related_records subpanel je ve výchozím stavu omezen na 10 nejnovějších záznamů.\nměna částek je v monetary_values_currency (platí i pro amount).\npoužívej pro detail firmy, když máš account_id.\nuživatel uvidí kartu firmy s tlačítkem „Otevřít v CRM“; když chce firmu ukázat nebo otevřít v CRM, zavolej tento nástroj.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "account_id": {
+                        "type": "string",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32})$",
+                        "description": "CRM id firmy"
+                    }
+                },
+                "required": [
+                    "account_id"
+                ],
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "requiresConfirmation": false,
+                "capability": "crm",
+                "timeoutSeconds": 30
+            }
+        },
+        {
+            "name": "my_meetings_tool",
+            "version": "1.0.0",
+            "title": "Moje schůzky",
+            "description": "moje schůzky (assigned_user_id = přihlášený uživatel), od nejnovější.\ndate_from/date_to jsou volitelné (YYYY-MM-DD nebo YYYY-MM-DD HH:MM); bez datumu vrací nejnovější schůzky podle limitu.\npoužij i pro kontrolu kolize termínu před založením nové schůzky.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "date_from": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}([ T]\\d{2}:\\d{2}(:\\d{2})?)?$"
+                    },
+                    "date_to": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}([ T]\\d{2}:\\d{2}(:\\d{2})?)?$"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 500,
+                        "default": 100
+                    }
+                },
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "requiresConfirmation": false,
+                "capability": "crm",
+                "timeoutSeconds": 15
+            }
+        }
+    ]
+}

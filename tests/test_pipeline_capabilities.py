@@ -50,9 +50,22 @@ async def test_pipeline_passes_capabilities_and_emits_form_patch() -> None:
     )
     captured: dict[str, Any] = {}
 
-    def fake_build_tools(**kwargs):
-        captured["build_capabilities"] = kwargs.get("capabilities")
-        return []
+    async def fake_build_turn_toolset(**kwargs):
+        from _tool_fakes import FakeTransport
+        from app.tools.crm_provider import CrmToolProvider
+        from app.tools.manifest_cache import ManifestCache
+        from app.tools.resilience import TenantGuards
+        from app.tools.toolset import ToolSet
+
+        def natives(enabled):
+            captured["build_capabilities"] = enabled
+            return []
+
+        provider = CrmToolProvider(tenant_id="t", transport=FakeTransport(), cache=ManifestCache(), guards=TenantGuards())
+        return await ToolSet.build(
+            tenant_id="t", user_id="u", request_context=kwargs["request_context"], crm_client=None,
+            native_tools=natives, provider=provider,
+        )
 
     async def fake_run_agent(**kwargs):
         captured["agent_capabilities"] = kwargs.get("capabilities")
@@ -64,7 +77,7 @@ async def test_pipeline_passes_capabilities_and_emits_form_patch() -> None:
         patch.object(pipeline, "get_rag_service", return_value=None),
         patch.object(pipeline, "get_module_catalog", new=AsyncMock(return_value=ModuleCatalog.static_fallback())),
         patch.object(pipeline, "chat_service", chat_service),
-        patch.object(pipeline, "build_tools", side_effect=fake_build_tools),
+        patch.object(pipeline, "build_turn_toolset", side_effect=fake_build_turn_toolset),
         patch.object(pipeline, "run_agent", side_effect=fake_run_agent),
         patch.object(pipeline, "ensure_chat_name", new=AsyncMock()),
         patch.object(pipeline, "maybe_generate_voice", new=AsyncMock(return_value=(None, None))),

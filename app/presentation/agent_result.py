@@ -10,7 +10,7 @@ import json
 import re
 from typing import Any
 
-from app.domain.contracts import normalize_pending_action_envelope
+from app.domain.contracts import TOOL_CALL_KEYS, normalize_pending_action_envelope
 from app.utils.text import format_european_dates, strip_answer_tags, strip_think_tags
 
 
@@ -129,6 +129,12 @@ def describe_pending_action_cz(module: str, action: str, data: dict[str, Any]) -
     return summary + ". Potvrďte prosím provedení."
 
 
+_RESULT_TOOLS = frozenset({
+    "crm_query_tool", "my_meetings_tool", "crm_record_detail_tool", "propose_form_fields_tool",
+    "research_record_tool", "product_lookup_tool", "daily_briefing_tool",
+})
+
+
 def normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(agent_result or {})
     steps = normalized.get("intermediate_steps") or []
@@ -179,6 +185,10 @@ def normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, Any
                 "data_json": json.dumps(data, ensure_ascii=False),
                 "message_to_user": message,
             }
+            # AI tool registry: the CRM confirms by running exactly this tool call.
+            for key in TOOL_CALL_KEYS:
+                if pending.get(key) is not None:
+                    command_payload[key] = pending[key]
             normalized["status"] = status
             normalized["pending_action"] = pending
             normalized["output"] = json.dumps(command_payload, ensure_ascii=False)
@@ -200,9 +210,6 @@ def normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, Any
         if not isinstance(step, dict):
             continue
         tool_name = str(step.get("tool") or "").strip()
-        if tool_name not in {"crm_data_tool", "crm_search_tool", "crm_query_tool", "my_meetings_tool", "propose_form_fields_tool", "research_record_tool", "crm_record_detail_tool", "product_lookup_tool", "daily_briefing_tool"}:
-            continue
-
         observation = step.get("observation")
         if isinstance(observation, dict):
             obs = observation
@@ -211,6 +218,10 @@ def normalize_agent_result_for_ui(agent_result: dict[str, Any]) -> dict[str, Any
         else:
             obs = {}
         if not obs:
+            continue
+        # Tools whose result is the answer (cards, a summary): the known native ones, and
+        # any CRM tool — core or a client's custom one — that returned cards.
+        if tool_name not in _RESULT_TOOLS and not isinstance(obs.get("cards"), list):
             continue
 
         cards = obs.get("cards")

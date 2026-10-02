@@ -78,6 +78,7 @@ def record_card(module: str, title: str, record_id: str, meta: dict[str, Any]) -
         "actions": [
             {
                 "label": "Otevrit v CRM",
+                "label_key": "LBL_AI_OPEN",
                 "intent": "primary",
                 "action": "link",
                 "url": crm_detail_link(module, record_id),

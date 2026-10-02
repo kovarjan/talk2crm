@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.engine import form_tools
 from app.engine.form_tools import build_form_tools
-from app.engine.tools import build_tools
+from app.engine.tools import build_native_tools
 
 SCHEMA = {"module": "Contacts", "sections": [{"group": "g", "fields": [
     {"name": "first_name", "type": "text"},
@@ -99,11 +99,11 @@ def test_schema_failure_is_reported_not_raised() -> None:
 
 def test_build_tools_adds_form_tools_only_with_form_capability() -> None:
     crm = StubCrm()
-    with_form = {getattr(t, "name", "") for t in build_tools(
+    with_form = {getattr(t, "name", "") for t in build_native_tools(
         tenant_id="t", user_id="u", input_text="x", request_context=None,
         crm_client=crm, rag_service=None, capabilities={"crm", "form"},
     )}
-    without = {getattr(t, "name", "") for t in build_tools(
+    without = {getattr(t, "name", "") for t in build_native_tools(
         tenant_id="t", user_id="u", input_text="x", request_context=None,
         crm_client=crm, rag_service=None, capabilities={"crm"},
     )}
@@ -126,28 +126,39 @@ def test_propose_form_fields_passes_lines_into_patch() -> None:
     assert patch_out["lines"]["line_module"] == "Products"
 
 
+def _toolset(ctx: dict, crm: StubCrm, transport=None):
+    from _tool_fakes import FakeTransport
+    from app.tools.crm_provider import CrmToolProvider
+    from app.tools.manifest_cache import ManifestCache
+    from app.tools.resilience import TenantGuards
+    from app.tools.toolset import ToolSet
+
+    transport = transport or FakeTransport()
+    provider = CrmToolProvider(tenant_id="t", transport=transport, cache=ManifestCache(), guards=TenantGuards())
+    return transport, asyncio.run(ToolSet.build(
+        tenant_id="t", user_id="u", request_context=ctx, crm_client=crm,
+        native_tools=lambda enabled: [], capabilities={"crm", "form"}, provider=provider,
+    ))
+
+
 def test_action_on_open_record_is_redirected_to_form_patch() -> None:
     schema = {"module": "ProductTemplates", "sections": [{"group": "g", "fields": [{"name": "description", "type": "textarea"}]}]}
-    crm = StubCrm(schema)
     ctx = {"module": "ProductTemplates", "record": "p1", "form": {"editable": True, "values": {}}, "capabilities": ["form"]}
-    tools = build_tools(tenant_id="t", user_id="u", input_text="vlož do description", request_context=ctx,
-                        crm_client=crm, rag_service=None, capabilities={"crm", "form"})
-    action = _tool(tools, "crm_action_tool")
-    raw = asyncio.run(action.ainvoke({"module": "ProductTemplates", "action": "update", "record_id": "p1",
-                                      "data_json": json.dumps({"fields": {"description": "Pneumatika", "bogus": 1}})}))
+    transport, toolset = _toolset(ctx, StubCrm(schema))
+    raw = asyncio.run(toolset.invoke("crm_action_tool", {"module": "ProductTemplates", "action": "update", "record_id": "p1",
+                                                         "data_json": json.dumps({"fields": {"description": "Pneumatika", "bogus": 1}})}))
     out = json.loads(raw)
     assert out["status"] == "ok" and out["redirected_to_form"] is True
     assert out["form_patch"]["fields"] == {"description": "Pneumatika"}
     assert out["form_patch"]["record"] == "p1"
     assert "bogus" in out["message_to_user"]
+    assert transport.calls == []  # never reached the CRM
 
 
 def test_action_on_another_record_is_not_redirected() -> None:
-    crm = StubCrm()
     ctx = {"module": "ProductTemplates", "record": "p1", "form": {"editable": True, "values": {}}}
-    tools = build_tools(tenant_id="t", user_id="u", input_text="x", request_context=ctx,
-                        crm_client=crm, rag_service=None, capabilities={"crm", "form"})
-    action = _tool(tools, "crm_action_tool")
-    raw = asyncio.run(action.ainvoke({"module": "ProductTemplates", "action": "update", "record_id": "other",
-                                      "data_json": json.dumps({"fields": {"description": "x"}})}))
+    transport, toolset = _toolset(ctx, StubCrm())
+    raw = asyncio.run(toolset.invoke("crm_action_tool", {"module": "ProductTemplates", "action": "update", "record_id": "other",
+                                                         "data_json": json.dumps({"fields": {"description": "x"}})}))
     assert json.loads(raw).get("redirected_to_form") is None
+    assert transport.calls[0]["mode"] == "preview"  # a real CRM write proposal instead

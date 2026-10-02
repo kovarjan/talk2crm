@@ -31,7 +31,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.core.config import get_settings
 from app.engine.agent import run_agent
 from app.engine.rag import TenantRAGService
-from app.engine.tools import build_tools
+from app.engine.tools import build_native_tools
+from app.tools.crm_provider import CrmToolProvider
+from app.tools.manifest_cache import ManifestCache
+from app.tools.resilience import TenantGuards
+from app.tools.toolset import ToolSet
+from app.tools.validation import validate_arguments
 from app.services.crm_client import CoripoClient
 
 # ---------------------------------------------------------------------------
@@ -201,13 +206,47 @@ def _debug_json_enabled() -> bool:
     return str(os.environ.get("LLM_EVAL_DEBUG_JSON", "")).strip().lower() in _TRUE_VALUES
 
 
+_SAMPLE_MANIFEST = json.loads((Path(__file__).parent / "fixtures" / "ai_tools_manifest.sample.json").read_text(encoding="utf-8"))
+_ACTION_SCHEMA = next(t["inputSchema"] for t in _SAMPLE_MANIFEST["tools"] if t["name"] == "crm_action_tool")
+
+
 def _schema_valid_action(tool_input: dict) -> bool:
-    from app.engine.tool_validator import CrmActionToolArgs
-    try:
-        CrmActionToolArgs(**tool_input)
-        return True
-    except Exception:
-        return False
+    return not validate_arguments(tool_input, _ACTION_SCHEMA)[1]
+
+
+class _StubCrmTransport:
+    """Serves the sample CRM manifest and answers CRM tool calls from the test's stubbed
+    execute_module_action, so scenarios exercise the real ToolSet path."""
+
+    def __init__(self, crm) -> None:
+        self.crm = crm
+
+    async def fetch_manifest(self, etag):
+        return False, _SAMPLE_MANIFEST
+
+    async def call(self, *, name, arguments, mode, confirmation_token, request_id, timeout):
+        ok = lambda structured, meta=None: {"content": [{"type": "text", "text": "ok"}], "structuredContent": structured, "isError": False, "meta": meta or {}}
+        if name == "crm_action_tool":
+            return ok({"status": "confirmation_required", "module": arguments.get("module"), "action": arguments.get("action")},
+                      {"confirmation": {"required": True, "token": "eval-token", "arguments": arguments}})
+        if name == "get_company_overview":
+            raw = await self.crm.execute_module_action(module="Accounts", action="company_overview", data={"id": arguments.get("account_id")})
+            return ok({"status": "ok", "module": "Accounts", **(raw if isinstance(raw, dict) else {})})
+        module = arguments.get("module") or "Meetings"
+        raw = await self.crm.execute_module_action(module=module, action="list", data=arguments)
+        records = raw.get("records", []) if isinstance(raw, dict) else []
+        return ok({"status": "ok", "module": module, "total": len(records), "records": records})
+
+
+def _eval_toolset(*, tenant_id, user_id, input_text, request_context, crm_client, rag_service, capabilities=None, **_ignored) -> ToolSet:
+    provider = CrmToolProvider(tenant_id=tenant_id, transport=_StubCrmTransport(crm_client), cache=ManifestCache(), guards=TenantGuards())
+
+    def natives(enabled):
+        return build_native_tools(tenant_id=tenant_id, user_id=user_id, input_text=input_text, request_context=request_context,
+                                  crm_client=crm_client, rag_service=rag_service, capabilities=enabled)
+
+    return asyncio.run(ToolSet.build(tenant_id=tenant_id, user_id=user_id, request_context=request_context, crm_client=crm_client,
+                                     native_tools=natives, capabilities=capabilities or {"crm", "web"}, provider=provider))
 
 
 def _serialize_json(value: object) -> str:
@@ -376,14 +415,13 @@ def test_a1_intent_routing_my_meetings():
     crm.execute_module_action = AsyncMock(return_value=_meetings_stub())
     rag = _make_rag_service()
 
-    tools = build_tools(
+    tools = _eval_toolset(
         tenant_id=TENANT_ID,
         user_id=USER_ID,
         input_text=input_text,
         request_context=None,
         crm_client=crm,
         rag_service=rag,
-        action_confirmation=False,
     )
 
     empty_responses: list[int] = [0]
@@ -405,7 +443,7 @@ def test_a1_intent_routing_my_meetings():
                 user_id=USER_ID,
                 input_text=input_text,
                 context=None,
-                tools=tools,
+                toolset=tools,
             )
         )
     finally:
@@ -450,14 +488,13 @@ def test_a2_intent_routing_company_search():
     )
     rag = _make_rag_service(_account_rag_stub())
 
-    tools = build_tools(
+    tools = _eval_toolset(
         tenant_id=TENANT_ID,
         user_id=USER_ID,
         input_text=input_text,
         request_context=None,
         crm_client=crm,
         rag_service=rag,
-        action_confirmation=False,
     )
 
     empty_responses: list[int] = [0]
@@ -478,7 +515,7 @@ def test_a2_intent_routing_company_search():
                 user_id=USER_ID,
                 input_text=input_text,
                 context=None,
-                tools=tools,
+                toolset=tools,
             )
         )
     finally:
@@ -579,14 +616,13 @@ def test_a3_invoice_status_check():
     crm.execute_module_action = AsyncMock(side_effect=_bank_crm_side_effect)
     rag = _make_rag_service(_bank_rag_stub())
 
-    tools = build_tools(
+    tools = _eval_toolset(
         tenant_id=TENANT_ID,
         user_id=USER_ID,
         input_text=input_text,
         request_context=None,
         crm_client=crm,
         rag_service=rag,
-        action_confirmation=False,
     )
 
     empty_responses: list[int] = [0]
@@ -607,7 +643,7 @@ def test_a3_invoice_status_check():
                 user_id=USER_ID,
                 input_text=input_text,
                 context=None,
-                tools=tools,
+                toolset=tools,
             )
         )
     finally:
@@ -660,14 +696,13 @@ def test_b1_temporal_extraction_schedule_meeting():
     crm.execute_module_action = AsyncMock(side_effect=_smart_crm_side_effect)
     rag = _make_rag_service(_contact_rag_stub())
 
-    tools = build_tools(
+    tools = _eval_toolset(
         tenant_id=TENANT_ID,
         user_id=USER_ID,
         input_text=input_text,
         request_context=None,
         crm_client=crm,
         rag_service=rag,
-        action_confirmation=False,
     )
 
     empty_responses: list[int] = [0]
@@ -688,7 +723,7 @@ def test_b1_temporal_extraction_schedule_meeting():
                 user_id=USER_ID,
                 input_text=input_text,
                 context=None,
-                tools=tools,
+                toolset=tools,
             )
         )
     finally:
@@ -756,14 +791,13 @@ def test_c1_multi_turn_context_memory():
     crm1 = _make_crm_client()
     rag1 = _make_rag_service()
 
-    tools_t1 = build_tools(
+    tools_t1 = _eval_toolset(
         tenant_id=TENANT_ID,
         user_id=USER_ID,
         input_text=input_t1,
         request_context=None,
         crm_client=crm1,
         rag_service=rag1,
-        action_confirmation=False,
     )
 
     result_t1 = asyncio.run(
@@ -772,7 +806,7 @@ def test_c1_multi_turn_context_memory():
             user_id=USER_ID,
             input_text=input_t1,
             context=None,
-            tools=tools_t1,
+            toolset=tools_t1,
         )
     )
 
@@ -815,14 +849,13 @@ def test_c1_multi_turn_context_memory():
     crm2 = _make_crm_client()
     rag2 = _make_rag_service()
 
-    tools_t2 = build_tools(
+    tools_t2 = _eval_toolset(
         tenant_id=TENANT_ID,
         user_id=USER_ID,
         input_text=input_t2,
         request_context=context_t2,
         crm_client=crm2,
         rag_service=rag2,
-        action_confirmation=False,
     )
 
     empty_responses: list[int] = [0]
@@ -843,7 +876,7 @@ def test_c1_multi_turn_context_memory():
                 user_id=USER_ID,
                 input_text=input_t2,
                 context=context_t2,
-                tools=tools_t2,
+                toolset=tools_t2,
                 chat_history=chat_history,
             )
         )
@@ -956,14 +989,13 @@ def test_d1_error_recovery():
     crm.execute_module_action = AsyncMock(side_effect=_smart_crm_side_effect)
     rag = _make_rag_service(_contact_rag_stub())
 
-    tools = build_tools(
+    tools = _eval_toolset(
         tenant_id=TENANT_ID,
         user_id=USER_ID,
         input_text=input_text,
         request_context=None,
         crm_client=crm,
         rag_service=rag,
-        action_confirmation=False,
     )
 
     # Inject a one-shot validation error on the first crm_action_tool call.
@@ -994,7 +1026,7 @@ def test_d1_error_recovery():
                     user_id=USER_ID,
                     input_text=input_text,
                     context=None,
-                    tools=tools,
+                    toolset=tools,
                 )
             )
     finally:

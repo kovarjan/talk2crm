@@ -226,6 +226,9 @@ def try_patch_pending_action(
 
     if not changed:
         return None
+    if module_norm in {"meetings", "calls"} and any(note.startswith(("Patched pending datetime", "Patched pending duration")) for note in notes):
+        # date_end was derived from the old start/duration; the CRM re-derives it on re-preview.
+        fields.pop("date_end", None)
 
     data["fields"] = fields
     patched_pending = build_pending_action_envelope(

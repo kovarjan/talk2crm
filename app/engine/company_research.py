@@ -19,7 +19,7 @@ from typing import Any
 
 from app.engine.agent import run_agent
 from app.engine.extraction import _extract_json_object, _validate_fields_against_schema
-from app.engine.tools import build_tools
+from app.tools.toolset import build_turn_toolset
 from app.services.crm_client import CoripoClient
 
 COMPANY_RESEARCH_ALLOWED_TOOLS = {
@@ -107,19 +107,16 @@ async def research_company(
         f"Aktuální hodnoty polí (JSON): {current_values_json}"
     )
 
-    tools = [
-        tool
-        for tool in build_tools(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            input_text=input_text,
-            request_context={"web_search": True},
-            crm_client=crm_client,
-            rag_service=rag_service,
-            action_confirmation=False,
-        )
-        if getattr(tool, "name", "") in COMPANY_RESEARCH_ALLOWED_TOOLS
-    ]
+    toolset = await build_turn_toolset(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        input_text=input_text,
+        request_context={"web_search": True},
+        crm_client=crm_client,
+        rag_service=rag_service,
+        capabilities={"crm", "web"},
+    )
+    tools = [tool for tool in toolset.agent_tools() if tool.name in COMPANY_RESEARCH_ALLOWED_TOOLS]
 
     result = await run_agent(
         tenant_id=tenant_id,

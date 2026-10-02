@@ -52,11 +52,18 @@ def build_pending_action_envelope(
     adjustments: list[str] | None = None,
     ambiguities: list[dict[str, Any]] | None = None,
     requires_confirmation: bool = True,
+    tool_call: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Pending mutation carried between turns.
+
+    ``tool_call`` (AI tool registry) = {tool, tool_version, arguments, confirmation_token,
+    expires_at}: the exact CRM tool call the user is asked to confirm. The token is bound
+    to ``arguments``; any edit must be re-previewed to get a new one.
+    """
     target_module = str(effective_module or module or "").strip() or str(module or "").strip()
     requested = str(requested_module or module or target_module).strip() or target_module
     normalized_action = str(action or "").strip().lower()
-    return {
+    envelope: dict[str, Any] = {
         "module": target_module,
         "requested_module": requested,
         "effective_module": target_module,
@@ -66,6 +73,12 @@ def build_pending_action_envelope(
         "ambiguities": list(ambiguities or []),
         "requires_confirmation": bool(requires_confirmation),
     }
+    if tool_call and tool_call.get("tool"):
+        envelope.update({key: tool_call[key] for key in TOOL_CALL_KEYS if key in tool_call})
+    return envelope
+
+
+TOOL_CALL_KEYS = ("tool", "tool_version", "arguments", "confirmation_token", "expires_at")
 
 
 def normalize_pending_action_envelope(value: Any) -> dict[str, Any] | None:
@@ -96,4 +109,5 @@ def normalize_pending_action_envelope(value: Any) -> dict[str, Any] | None:
         adjustments=[str(item) for item in adjustments],
         ambiguities=[item for item in ambiguities if isinstance(item, dict)],
         requires_confirmation=requires_confirmation,
+        tool_call={key: value[key] for key in TOOL_CALL_KEYS if key in value},
     )

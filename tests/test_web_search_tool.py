@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import httpx
 
 from app.engine import web_search
-from app.engine.tools import build_tools
+from app.engine.tools import build_native_tools
 from app.engine.web_search import normalize_searxng_results
 
 
@@ -53,14 +53,13 @@ def test_web_search_tool_calls_searxng_json_api(monkeypatch) -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     monkeypatch.setattr(web_search, "get_shared_http_client", lambda: client)
 
-    tools = build_tools(
+    tools = build_native_tools(
         tenant_id="ai-local",
         user_id="1",
         input_text="najdi na webu firmu ACME",
         request_context={"web_search": True},
         crm_client=DummyCrmClient(),  # type: ignore[arg-type]
         rag_service=None,
-        action_confirmation=False,
     )
     tool = next(item for item in tools if getattr(item, "name", "") == "web_search_tool")
     raw = asyncio.run(tool.ainvoke({"query": "ACME s.r.o.", "max_results": 3}))
@@ -79,14 +78,13 @@ def test_web_search_tool_reports_unavailable_instance(monkeypatch) -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     monkeypatch.setattr(web_search, "get_shared_http_client", lambda: client)
 
-    tools = build_tools(
+    tools = build_native_tools(
         tenant_id="ai-local",
         user_id="1",
         input_text="najdi na webu firmu ACME",
         request_context={},
         crm_client=DummyCrmClient(),  # type: ignore[arg-type]
         rag_service=None,
-        action_confirmation=False,
     )
     tool = next(item for item in tools if getattr(item, "name", "") == "web_search_tool")
     payload = json.loads(asyncio.run(tool.ainvoke({"query": "ACME"})))

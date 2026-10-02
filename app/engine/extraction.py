@@ -23,7 +23,7 @@ import json
 from typing import Any
 
 from app.engine.agent import run_agent
-from app.engine.tools import build_tools
+from app.tools.toolset import build_turn_toolset
 from app.services.crm_client import CoripoClient
 
 EXTRACT_FIELDS_ALLOWED_TOOLS = {"rag_search_tool", "crm_query_tool", "get_company_overview", "product_lookup_tool"}
@@ -234,19 +234,16 @@ async def extract_fields(
         if isinstance(item, dict) and item.get("content")
     ]
 
-    tools = [
-        tool
-        for tool in build_tools(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            input_text=input_text,
-            request_context=None,
-            crm_client=crm_client,
-            rag_service=rag_service,
-            action_confirmation=False,
-        )
-        if getattr(tool, "name", "") in EXTRACT_FIELDS_ALLOWED_TOOLS
-    ]
+    toolset = await build_turn_toolset(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        input_text=input_text,
+        request_context=None,
+        crm_client=crm_client,
+        rag_service=rag_service,
+        capabilities={"crm", "products"},
+    )
+    tools = [tool for tool in toolset.agent_tools() if tool.name in EXTRACT_FIELDS_ALLOWED_TOOLS]
 
     result = await run_agent(
         tenant_id=tenant_id,

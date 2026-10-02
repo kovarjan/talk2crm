@@ -7,7 +7,6 @@ from typing import Any
 from langchain_core.tools import tool
 
 from app.utils.fuzzy import expand_fuzzy_token_variants, fuzzy_tokens, score_lexical_fuzzy
-from app.utils.modules import canonical_module_name
 from app.utils.text import normalize_text as _normalize_text, safe_text as _safe_text
 from app.core.config import get_settings
 from app.domain.aggregate_contracts import AggregateFilters, AggregateRequest
@@ -15,28 +14,13 @@ from app.engine.rag import TenantRAGService
 from app.services.crm_read_service import CRMReadHelpers, CRMReadService
 from app.services.crm_aggregate_service import CRMAggregateService
 from app.services.crm_client import CoripoClient
-from app.services.crm_write_service import CRMWriteService
-from app.engine.filter_builder import (
-    FilterSpec,
-    build_filter,
-    build_order,
-    extract_virtual_id_in_values,
-)
 from app.engine.tool_logger import ToolCallLogger
 from app.engine.tool_validator import (
     CrmAggregateToolArgs,
-    CrmActionToolArgs,
-    CrmQueryToolArgs,
-    GetCompanyOverviewToolArgs,
     MathToolArgs,
-    MyMeetingsToolArgs,
     RagSearchToolArgs,
     WebFetchToolArgs,
     WebSearchToolArgs,
-    validate_crm_action_call,
-    validate_get_company_overview_call,
-    validate_crm_query_call,
-    validate_my_meetings_call,
     validate_rag_search_call,
     validate_web_fetch_call,
     validate_web_search_call,
@@ -53,16 +37,13 @@ from app.engine.account_resolution import (
     select_account_candidates as _select_account_candidates,
 )
 from app.engine.date_filters import (
-    build_login_user_meetings_window_filter as _build_login_user_meetings_window_filter,
     build_meetings_date_filter as _build_meetings_date_filter,
     extract_date_range_from_text as _extract_date_range_from_text,
-    format_filter_datetime_boundary as _format_filter_datetime_boundary,
     next_week_range as _next_week_range,
     sort_records_by_datetime as _sort_records_by_datetime,
 )
 from app.engine.record_extract import (
     best_record_match as _best_record_match,
-    canonical_record_id as _canonical_record_id,
     dedupe_and_limit as _dedupe_and_limit,
     dedupe_rag_results as _dedupe_rag_results,
     extract_rag_records as _extract_rag_records,
@@ -75,7 +56,6 @@ from app.engine.record_extract import (
 )
 from app.presentation.cards import (
     contact_cards as _contact_cards,
-    format_date as _format_date,
     generic_cards as _generic_cards,
     meeting_cards as _meeting_cards,
     parse_datetime as _parse_datetime,
@@ -266,37 +246,6 @@ def _extract_account_ids_from_query(
         seen.add(clean)
         deduped.append(clean)
     return deduped
-
-
-def _coerce_contextual_id_filters(
-    filters: list[FilterSpec],
-    context: dict[str, Any] | None,
-) -> list[FilterSpec]:
-    if not isinstance(context, dict):
-        return filters
-
-    entities = context.get("entities") if isinstance(context.get("entities"), dict) else {}
-
-    def context_id_for_field(field_name: str) -> str:
-        field = _safe_text(field_name).lower()
-        if field == "id":
-            return _safe_text(context.get("record_id") or context.get("record"))
-        if field.endswith("_id"):
-            return _safe_text(entities.get(field))
-        if field.endswith(".id") or field.endswith("|id"):
-            module_part = re.split(r"[.|]", field, maxsplit=1)[0].rstrip("s")
-            return _safe_text(entities.get(f"{module_part}_id"))
-        return ""
-
-    coerced: list[FilterSpec] = []
-    for spec in filters:
-        value = _safe_text(spec.value)
-        if spec.op == "eq" and value and not _UUID_RE.match(value):
-            context_id = context_id_for_field(spec.field)
-            if _UUID_RE.match(context_id):
-                spec = spec.model_copy(update={"value": context_id})
-        coerced.append(spec)
-    return coerced
 
 
 def _infer_data_query_type(query: str, requested: str = "auto") -> str:
@@ -505,7 +454,7 @@ def _build_math_tool():
     return math_tool
 
 
-def build_tools(
+def build_native_tools(
     *,
     tenant_id: str,
     user_id: str,
@@ -513,20 +462,16 @@ def build_tools(
     request_context: dict[str, Any] | None,
     crm_client: CoripoClient,
     rag_service: TenantRAGService | None,
-    action_confirmation: bool = False,
     capabilities: set[str] | None = None,
     module_catalog: "ModuleCatalog | None" = None,
 ) -> list:
+    """The gateway's own tools (RAG, web, form extraction, products, briefing, aggregates)
+    for the enabled capabilities; ``None`` = all of them.
+
+    CRM data tools (crm_query_tool, crm_action_tool, …) are not built here: they are
+    published by each tenant's Coripo and reach the agent through app.tools.ToolSet.
+    """
     settings = get_settings()
-    write_service = CRMWriteService(
-        tenant_id=tenant_id,
-        user_id=user_id,
-        crm_client=crm_client,
-        input_text=input_text,
-        request_context=request_context,
-        rag_service=rag_service,
-        action_confirmation=action_confirmation,
-    )
     read_helpers = CRMReadHelpers(
         safe_text=_safe_text,
         normalize_text=_normalize_text,
@@ -596,76 +541,6 @@ def build_tools(
         rag_service=rag_service,
         helpers=read_helpers,
     )
-
-    @tool("crm_action_tool", args_schema=CrmActionToolArgs)
-    async def crm_action_tool(
-        module: str,
-        action: str,
-        data_json: str = "{}",
-        record_id: str | None = None,
-    ) -> str:
-        """
-        Provádí mutace v CRM: create, update, delete.
-        Používej POUZE po explicitním potvrzení uživatele nebo pokud kontext obsahuje potvrzenou pending_action.
-        Parametry: action ('create'|'update'|'delete'), module (str), data_json (JSON string), record_id (str, pro update/delete).
-        """
-        if settings.crm_mode.lower() == "off":
-            return json.dumps({"status": "crm-disabled",
-                               "message": "CRM mode is off."}, ensure_ascii=False)
-
-        async with ToolCallLogger(
-            "crm_action_tool", tenant_id, user_id,
-            inputs={"module": module, "action": action, "data_json": data_json, "record_id": record_id},
-        ) as tcl:
-            data_json_value = data_json
-            record_id_value = _canonical_record_id(record_id)
-            if record_id_value:
-                try:
-                    parsed_payload = json.loads(_safe_text(data_json_value) or "{}")
-                    if isinstance(parsed_payload, dict):
-                        existing_id = _canonical_record_id(
-                            parsed_payload.get("id")
-                            or parsed_payload.get("record_id")
-                            or parsed_payload.get("recordId")
-                        )
-                        if not existing_id:
-                            parsed_payload["id"] = record_id_value
-                            data_json_value = json.dumps(parsed_payload, ensure_ascii=False)
-                except Exception:
-                    pass
-
-            # The record open in the CRM form is never written from the gateway: with the form
-            # capability on, a mutation aimed at it becomes a live form_patch the user applies
-            # in the FE (universal detail scaffolding, same path as smart paste).
-            if capabilities is not None and "form" in capabilities:
-                from app.engine.form_tools import action_as_form_patch, targets_open_form
-
-                try:
-                    parsed_for_form = json.loads(_safe_text(data_json_value) or "{}")
-                except Exception:
-                    parsed_for_form = {}
-                if isinstance(parsed_for_form, dict) and targets_open_form(
-                    request_context=request_context, module=module, action=action, data=parsed_for_form,
-                ):
-                    open_record = str((request_context or {}).get("record_id") or (request_context or {}).get("record") or "").strip() or None
-                    redirected = await action_as_form_patch(module=module, record_id=open_record, data=parsed_for_form, crm_client=crm_client)
-                    tcl.set_output({"status": "redirected_to_form", "module": module, "action": action})
-                    return redirected
-            validation_error = validate_crm_action_call(module=module, action=action, data_json=data_json_value, catalog=module_catalog)
-            if validation_error:
-                error_payload = {"status": "tool_validation_error", "message": validation_error}
-                tcl.set_output(error_payload)
-                return json.dumps(error_payload, ensure_ascii=False)
-            try:
-                result = await write_service.execute_action(
-                    module=module, action=action, data_json=data_json_value
-                )
-            except Exception as exc:
-                error_payload = {"status": "error", "message": str(exc)}
-                tcl.set_output(error_payload)
-                return json.dumps(error_payload, ensure_ascii=False)
-            tcl.set_output({"status": result.get("status"), "module": module, "action": action})
-            return json.dumps(result, ensure_ascii=False)
 
     @tool("rag_search_tool", args_schema=RagSearchToolArgs)
     async def rag_search_tool(query: str, limit: int = 5, module: str = "") -> str:
@@ -744,330 +619,6 @@ def build_tools(
             tcl.set_output({"result_count": len(response_rows), "module_filter": _safe_text(module).lower()})
             return json.dumps(response_rows, ensure_ascii=False)
 
-    @tool("my_meetings_tool", args_schema=MyMeetingsToolArgs)
-    async def my_meetings_tool(
-        date_from: str | None = None,
-        date_to: str | None = None,
-        limit: int = 100,
-    ) -> str:
-        """
-        Returns current logged-in user's meetings.
-
-        date_from/date_to: optional timeframe boundaries (ISO date: YYYY-MM-DD).
-        Uses CRM filter with assigned_user_id = {%LOGIN_USER%}.
-
-        This tool is intended for:
-        - displaying "my meetings" in a period
-        - checking time-window conflicts before creating a new meeting
-        - listing latest meetings with just a limit (without forcing a date range)
-        """
-        if settings.crm_mode.lower() == "off":
-            return json.dumps({"status": "crm-disabled", "message_to_user": "CRM je vypnuté."}, ensure_ascii=False)
-
-        validation_error = validate_my_meetings_call(date_from=date_from, date_to=date_to, limit=limit)
-        if validation_error:
-            return json.dumps(
-                {"status": "tool_validation_error", "message": validation_error, "cards": []},
-                ensure_ascii=False,
-            )
-
-        from_boundary = _format_filter_datetime_boundary(date_from) if date_from else ""
-        to_boundary = _format_filter_datetime_boundary(date_to) if date_to else ""
-
-        if date_from and not from_boundary:
-            return json.dumps(
-                {
-                    "status": "error",
-                    "message": "Invalid date_from. Use YYYY-MM-DD.",
-                    "cards": [],
-                },
-                ensure_ascii=False,
-            )
-        if date_to and not to_boundary:
-            return json.dumps(
-                {
-                    "status": "error",
-                    "message": "Invalid date_to. Use YYYY-MM-DD.",
-                    "cards": [],
-                },
-                ensure_ascii=False,
-            )
-
-        if from_boundary and to_boundary:
-            from_dt = _parse_datetime(from_boundary)
-            to_dt = _parse_datetime(to_boundary)
-            if from_dt is None or to_dt is None or from_dt > to_dt:
-                return json.dumps(
-                    {
-                        "status": "error",
-                        "message": "Invalid timeframe: date_from must be <= date_to.",
-                        "cards": [],
-                    },
-                    ensure_ascii=False,
-                )
-
-        crm_filter = _build_login_user_meetings_window_filter(
-            from_boundary or None,
-            to_boundary or None,
-        )
-        payload = {
-            "limit": max(1, min(int(limit), 500)),
-            "offset": 0,
-            "filter": crm_filter,
-            "include_field_names": False,
-            "response_fields": [
-                "id",
-                "name",
-                "date_start",
-                "status",
-                "location",
-                "assigned_user_name",
-                "parent_name",
-            ],
-            "order": [{"field": "date_start", "sort": "DESC", "module": "Meetings"}],
-        }
-
-        async with ToolCallLogger(
-            "my_meetings_tool",
-            tenant_id,
-            user_id,
-            inputs={"date_from": from_boundary or None, "date_to": to_boundary or None, "limit": limit},
-        ) as tcl:
-            try:
-                raw = await crm_client.execute_module_action(
-                    module="Meetings",
-                    action="list",
-                    data=payload,
-                )
-            except Exception as exc:
-                error_payload = {"status": "error", "message": str(exc), "cards": []}
-                tcl.set_output(error_payload)
-                return json.dumps(error_payload, ensure_ascii=False)
-
-            records = CRMReadService._normalize_records(_extract_records(raw))
-            total = len(records)
-            cards = _meeting_cards(records, total, force_table=True)
-
-            summary_lines: list[str] = []
-            for row in records[:15]:
-                summary_lines.append(
-                    f"• {_format_date(row.get('date_start'))} — {_record_name(row)} ({_safe_text(row.get('status'))})"
-                )
-
-            result = {
-                "status": "ok",
-                "module": "Meetings",
-                "date_from": from_boundary or None,
-                "date_to": to_boundary or None,
-                "total": total,
-                "summary": "\n".join(summary_lines) if summary_lines else "Žádné záznamy.",
-                "cards": cards,
-            }
-            tcl.set_output({"total": total, "module": "Meetings"})
-            return json.dumps(result, ensure_ascii=False)
-
-    @tool("crm_query_tool", args_schema=CrmQueryToolArgs)
-    async def crm_query_tool(
-        module: str,
-        search: str | None = None,
-        filters: str = "[]",
-        date_from: str | None = None,
-        date_to: str | None = None,
-        order_by: str | None = None,
-        limit: int = 20,
-    ) -> str:
-        """
-        Přesný dotaz do CRM databáze. Použij pro: seznam kontaktů firmy
-        (filter field='account_id'), detail záznamu, počty záznamů.
-        Vždy zadej module a filters.
-        Parametry: module (str), filters (list[{field, op, value}]), limit (int).
-        Speciální případ: pro více konkrétních záznamů můžeš použít
-        {"field":"id","op":"in","value":["<id1>","<id2>"]}.
-        """
-        if settings.crm_mode.lower() == "off":
-            return json.dumps({"status": "crm-disabled",
-                               "message_to_user": "CRM je vypnuté."}, ensure_ascii=False)
-
-        # Resolve LLM-friendly aliases (orders → acm_orders, quote_lines →
-        # Products) before validation and filter building.
-        module = canonical_module_name(module) or module
-
-        async with ToolCallLogger(
-            "crm_query_tool", tenant_id, user_id,
-            inputs={"module": module, "search": search, "filters": filters,
-                    "date_from": date_from, "date_to": date_to,
-                    "order_by": order_by, "limit": limit},
-        ) as tcl:
-            validation_error = validate_crm_query_call(
-                module=module,
-                filters=filters,
-                date_from=date_from,
-                date_to=date_to,
-                limit=limit,
-                order_by=order_by,
-                catalog=module_catalog,
-            )
-            if validation_error:
-                error_payload = {"status": "tool_validation_error", "message": validation_error, "cards": []}
-                tcl.set_output(error_payload)
-                return json.dumps(error_payload, ensure_ascii=False)
-            try:
-                parsed_filters = [FilterSpec(**f) for f in json.loads(filters or "[]")]
-            except Exception as exc:
-                error_payload = {"status": "error",
-                                 "message": f"Invalid filters JSON: {exc}",
-                                 "cards": []}
-                tcl.set_output(error_payload)
-                return json.dumps(error_payload, ensure_ascii=False)
-            parsed_filters = _coerce_contextual_id_filters(parsed_filters, request_context)
-
-            order = build_order(order_by)
-            has_in_filter = any(spec.op == "in" for spec in parsed_filters)
-            try:
-                virtual_ids = extract_virtual_id_in_values(parsed_filters)
-            except ValueError as exc:
-                error_payload = {"status": "tool_validation_error", "message": str(exc), "cards": []}
-                tcl.set_output(error_payload)
-                return json.dumps(error_payload, ensure_ascii=False)
-
-            if has_in_filter and virtual_ids is None:
-                error_payload = {
-                    "status": "tool_validation_error",
-                    "message": "Operator 'in' is supported only as a standalone id filter.",
-                    "cards": [],
-                }
-                tcl.set_output(error_payload)
-                return json.dumps(error_payload, ensure_ascii=False)
-
-            if virtual_ids is not None:
-                if search or date_from or date_to:
-                    error_payload = {
-                        "status": "tool_validation_error",
-                        "message": "Operator 'in' can only be used as a standalone id filter.",
-                        "cards": [],
-                    }
-                    tcl.set_output(error_payload)
-                    return json.dumps(error_payload, ensure_ascii=False)
-                data: dict[str, Any] = {
-                    "ids": virtual_ids,
-                    "limit": max(1, min(int(limit), 500)),
-                    "include_field_names": False,
-                }
-                if order:
-                    data["order"] = order
-            else:
-                crm_filter = build_filter(
-                    module=module,
-                    search=search,
-                    filters=parsed_filters,
-                    date_from=date_from,
-                    date_to=date_to,
-                )
-
-                data = {
-                    "limit": max(1, min(int(limit), 500)),
-                    "offset": 0,
-                    "filter": crm_filter,
-                    "include_field_names": False,
-                }
-                if order:
-                    data["order"] = order
-
-            try:
-                raw = await crm_client.execute_module_action(
-                    module=module,
-                    action="list",
-                    data=data,
-                )
-            except Exception as exc:
-                error_payload = {"status": "error", "message": str(exc), "cards": []}
-                tcl.set_output(error_payload)
-                return json.dumps(error_payload, ensure_ascii=False)
-
-            records = CRMReadService._normalize_records(_extract_records(raw))
-
-            cards: list[dict] = []
-            module_lower = module.strip().lower()
-            total = len(records)
-
-            if module_lower == "meetings":
-                cards = _meeting_cards(records, total)
-            elif module_lower == "contacts":
-                title = f"Kontakty ({total})"
-                cards = _contact_cards(records, total, title, force_table=total > 4)
-            else:
-                cards = _generic_cards(records, total, default_module=module)
-
-            summary_lines = []
-            for row in records[:10]:
-                name = _record_name(row)
-                extra = ""
-                if module_lower == "contacts":
-                    extra = f" — {_safe_text(row.get('account_name') or row.get('company'))}"
-                elif module_lower in ("meetings", "calls"):
-                    extra = f" — {_safe_text(row.get('date_start', ''))[:10]} {_safe_text(row.get('status', ''))}"
-                summary_lines.append(f"• {name}{extra}".strip())
-
-            result = {
-                "status": "ok",
-                "module": module,
-                "total": total,
-                "summary": "\n".join(summary_lines) if summary_lines else "Žádné záznamy.",
-                "cards": cards,
-            }
-            tcl.set_output({"total": total, "module": module})
-            return json.dumps(result, ensure_ascii=False)
-
-    @tool("get_company_overview", args_schema=GetCompanyOverviewToolArgs)
-    async def get_company_overview(account_id: str) -> str:
-        """
-        Vrátí kompaktní AI detail firmy (Accounts) včetně souvisejících záznamů ze subpanelů.
-        Aktivity a každý related subpanel vrací ve výchozím stavu max 10 nejnovějších záznamů.
-        Měna částek je v response uvedena v default_currency.iso4217 (platí i pro pole amount_usdollar).
-        Parametr: account_id (CRM ID firmy).
-        """
-        if settings.crm_mode.lower() == "off":
-            return json.dumps(
-                {"status": "crm-disabled", "message_to_user": "CRM je vypnuté."},
-                ensure_ascii=False,
-            )
-
-        async with ToolCallLogger(
-            "get_company_overview",
-            tenant_id,
-            user_id,
-            inputs={"account_id": account_id},
-        ) as tcl:
-            validation_error = validate_get_company_overview_call(account_id=account_id)
-            if validation_error:
-                error_payload = {"status": "tool_validation_error", "message": validation_error}
-                tcl.set_output(error_payload)
-                return json.dumps(error_payload, ensure_ascii=False)
-
-            try:
-                result = await crm_client.execute_module_action(
-                    module="Accounts",
-                    action="company_overview",
-                    data={"id": account_id},
-                )
-            except Exception as exc:
-                error_payload = {"status": "error", "message": str(exc)}
-                tcl.set_output(error_payload)
-                return json.dumps(error_payload, ensure_ascii=False)
-
-            if isinstance(result, dict):
-                tcl.set_output(
-                    {
-                        "module": result.get("module") or "Accounts",
-                        "related_modules": len(result.get("related_records") or {}),
-                    }
-                )
-                return json.dumps(result, ensure_ascii=False)
-
-            wrapped = {"status": "ok", "module": "Accounts", "data": result}
-            tcl.set_output({"module": "Accounts", "related_modules": 0})
-            return json.dumps(wrapped, ensure_ascii=False)
-
     @tool("web_search_tool", args_schema=WebSearchToolArgs)
     async def web_search_tool(query: str, max_results: int = 5) -> str:
         """
@@ -1122,10 +673,7 @@ def build_tools(
             tcl.set_output({"status": "ok", "chars": len(page.get("text") or "")})
             return json.dumps(payload, ensure_ascii=False)
 
-    tools = [crm_action_tool, rag_search_tool, my_meetings_tool, crm_query_tool, get_company_overview]
-    from app.engine.record_detail_tool import build_record_detail_tools
-
-    tools.extend(build_record_detail_tools(tenant_id=tenant_id, user_id=user_id, crm_client=crm_client))
+    tools = [rag_search_tool]
     if settings.web_search_enabled:
         tools.append(web_search_tool)
     if settings.web_fetch_enabled:

@@ -371,6 +371,37 @@ class CoripoClient:
         require_sid: bool = True,
         timeout: float | None = None,
     ) -> dict[str, Any]:
+        response, decoded = await self._coripo_request_response(
+            method,
+            path,
+            params=params,
+            json_body=json_body,
+            require_sid=require_sid,
+            timeout=timeout,
+        )
+        if isinstance(decoded, dict):
+            return decoded
+        return self._decode_response(response)
+
+    async def _coripo_request_response(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+        require_sid: bool = True,
+        timeout: float | httpx.Timeout | None = None,
+        extra_headers: dict[str, str] | None = None,
+        raise_for_status: bool = True,
+    ) -> tuple[httpx.Response, Any]:
+        """Signed request returning the raw response and its decoded body.
+
+        ``extra_headers`` must not collide with the auth headers (sid/HMAC); callers
+        use it for X-Request-Id and If-None-Match. With ``raise_for_status=False``
+        non-2xx responses are returned instead of raised (the stale-SID retry still
+        applies).
+        """
         request_timeout = timeout if timeout is not None else self.timeout
         if require_sid and not self._coripo_session_id:
             await self._ensure_coripo_sid()
@@ -390,7 +421,7 @@ class CoripoClient:
         async def _send() -> tuple[httpx.Response, Any]:
             nonlocal attempt
             attempt += 1
-            headers: dict[str, str] = {"Accept": "application/json"}
+            headers: dict[str, str] = {"Accept": "application/json", **(extra_headers or {})}
             if self._coripo_session_id:
                 headers["sid"] = self._coripo_session_id
             if json_body is not None:
@@ -464,7 +495,7 @@ class CoripoClient:
             await self._ensure_coripo_sid()
             response, decoded = await _send()
 
-        if response.status_code >= 400:
+        if response.status_code >= 400 and raise_for_status:
             logger.error(
                 "Coripo request failed status=%s method=%s url=%s body=%s",
                 response.status_code,
@@ -474,9 +505,7 @@ class CoripoClient:
             )
             response.raise_for_status()
 
-        if isinstance(decoded, dict):
-            return decoded
-        return self._decode_response(response)
+        return response, decoded
 
     @staticmethod
     def _canonical_module(module: str) -> str:
@@ -1157,6 +1186,66 @@ class CoripoClient:
             json_body=data if data else None,
             require_sid=True,
         )
+
+    @staticmethod
+    def _standard_return_data(raw: Any) -> dict[str, Any] | None:
+        """``data`` of Coripo's standardReturn envelope ({status, message: {text, data}})."""
+        if not isinstance(raw, dict):
+            return None
+        message = raw.get("message")
+        if raw.get("status") is True and isinstance(message, dict) and isinstance(message.get("data"), dict):
+            return message["data"]
+        return None
+
+    async def get_tool_manifest(
+        self,
+        *,
+        etag: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """GET ai/tools (coripo-tools/1 manifest). Returns (not_modified, manifest).
+
+        ``etag`` is the manifest_hash the caller already has; an unchanged manifest
+        comes back as HTTP 304 → (True, None).
+        """
+        headers = {"If-None-Match": f'"{etag}"'} if etag else None
+        response, decoded = await self._coripo_request_response(
+            "GET", "ai/tools", extra_headers=headers, timeout=timeout, raise_for_status=False,
+        )
+        if response.status_code == 304:
+            return True, None
+        response.raise_for_status()
+        manifest = self._standard_return_data(decoded)
+        if manifest is None:
+            raise ValueError("ai/tools returned no manifest")
+        return False, manifest
+
+    async def call_tool(
+        self,
+        *,
+        name: str,
+        arguments: dict[str, Any],
+        mode: str,
+        confirmation_token: str | None,
+        request_id: str,
+        timeout: float | httpx.Timeout | None = None,
+    ) -> dict[str, Any]:
+        """POST ai/tools/call → MCP-shaped CallToolResult {content, structuredContent, isError, meta}.
+
+        Tool-level failures are part of the result (isError); transport/auth failures
+        and unknown tools (404) raise httpx.HTTPStatusError.
+        """
+        body: dict[str, Any] = {"name": name, "arguments": arguments, "mode": mode}
+        if confirmation_token:
+            body["confirmation_token"] = confirmation_token
+        _, decoded = await self._coripo_request_response(
+            "POST", "ai/tools/call", json_body=body, timeout=timeout,
+            extra_headers={"X-Request-Id": request_id},
+        )
+        result = self._standard_return_data(decoded)
+        if result is None:
+            raise ValueError("ai/tools/call returned no result")
+        return result
 
     async def get_ai_modules(self) -> list[dict[str, Any]]:
         """Modules the current user may use with the AI (GET ai/modules): ACL-filtered by Coripo."""

@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.domain.aggregate_contracts import AggregateFilters, AggregateRequest, AggregateResult
-from app.engine.tools import build_tools
+from app.engine.tools import build_native_tools
 from app.services.crm_aggregate_service import CRMAggregateService
 from app.services.crm_read_service import CRMReadHelpers, CRMReadService
 
@@ -87,14 +87,13 @@ def _make_tools(*, crm_client=None, aggregate_tools_enabled: bool = True, input_
         mock_settings.return_value.crm_mode = "on"
         mock_settings.return_value.tool_call_logging = False
         mock_settings.return_value.aggregate_tools_enabled = aggregate_tools_enabled
-        return build_tools(
+        return build_native_tools(
             tenant_id="test-tenant",
             user_id="user1",
             input_text=input_text,
             request_context=None,
             crm_client=client,
             rag_service=None,
-            action_confirmation=False,
         )
 
 
