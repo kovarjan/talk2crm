@@ -215,3 +215,16 @@ def test_describe_pending_action_cz_meeting():
     assert "schůzka" in msg
     assert "Schůzka s Iveco" in msg
     assert "2026-07-04 11:00" in msg
+
+
+def test_final_chat_reply_preserves_streamed_markdown_structure():
+    from app.presentation.agent_result import normalize_agent_result_for_ui, to_user_message
+    text = "Prošel jsem firmu.\n\nCo vidím:\n\n- Aktivní nabídky.\n- Faktury pokračují.\n  - Vnořený bod.\n\n**Další kroky:**\n\n1. Prověřit objednávky.\n2. Porovnat produkty."
+    assert to_user_message(text) == text
+    result = normalize_agent_result_for_ui({"output": text})
+    assert result["message_to_user"] == text
+
+
+def test_chat_cleanup_removes_reasoning_without_flattening_answer():
+    from app.presentation.agent_result import to_user_message
+    assert to_user_message("<think>Skryté úvahy</think><answer>Úvod.\n\n- První\n- Druhý</answer>") == "Úvod.\n\n- První\n- Druhý"

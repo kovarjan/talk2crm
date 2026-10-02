@@ -1,6 +1,6 @@
 {
     "protocol": "coripo-tools/1",
-    "manifest_hash": "sha256:be3f4066dc7c8ac9181c6e5ef4e2b639ce5746fc80480657af69a39cb76d6f80",
+    "manifest_hash": "sha256:878708997bc9524242ded6c04dac215f01925843487edcb48533b837647aa87c",
     "coripo_version": "2.32.1",
     "capabilities": [
         {
@@ -69,6 +69,46 @@
                 "requiresConfirmation": true,
                 "capability": "crm",
                 "timeoutSeconds": 30
+            }
+        },
+        {
+            "name": "crm_ares_tool",
+            "version": "1.0.0",
+            "title": "ARES – údaje firmy",
+            "description": "oficiální rejstříkové údaje české firmy přes stejnou službu ARES jako detail firmy v CORIPO. Nevyžaduje zapnutý Web.\nZadej právě jedno: ico (IČO jako text, zachovej počáteční nuly) nebo company_name. IČO vrací úplné údaje; název vrací kandidáty, pak vyhledej vybrané IČO.\nPři více kandidátech nevybírej firmu bez dostatečných údajů nebo potvrzení uživatele. limit omezuje počet kandidátů.\ncompany_data obsahuje původní pole služby používaná formulářem (např. ticker_symbol, sic_code, name a adresy). Výsledek není CRM záznam ani zdroj kontaktů zaměstnanců.\nPouze čte. Pro doplnění formuláře použij návrh polí, pro uložení CRM existující potvrzovanou akci. Nevymýšlej chybějící údaje a neoznačuj výpadek služby za nenalezenou firmu.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ico": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 8
+                    },
+                    "company_name": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 200
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "default": 10
+                    }
+                },
+                "additionalProperties": false
+            },
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "requiresConfirmation": false,
+                "capability": "crm",
+                "timeoutSeconds": 15
             }
         },
         {

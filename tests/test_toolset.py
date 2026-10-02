@@ -232,3 +232,18 @@ async def test_record_card_preserves_typed_fields_for_localized_ui() -> None:
     observation = json.loads(await toolset.invoke("crm_record_detail_tool", {"module": "Quotes", "record_id": "quote-1"}))
     assert observation["cards"][0]["meta_fields"] == fields
     assert observation["cards"][0]["actions"][0]["label_key"] == "LBL_AI_OPEN"
+
+
+@pytest.mark.asyncio
+async def test_ares_is_available_without_web_and_preserves_external_registry_data() -> None:
+    data = {"name": "Firma s.r.o.", "ticker_symbol": "00012345", "sic_code": "CZ00012345"}
+    transport = FakeTransport(responses=[ok_result({"status": "ok", "ico": "00012345", "company_data": data})])
+    toolset = await _toolset(transport, context={"capabilities": []})
+    assert "crm_ares_tool" in toolset.names()
+    assert toolset.is_read_only("crm_ares_tool")
+    assert "web_search_tool" not in toolset.names()
+    observation = json.loads(await toolset.invoke("crm_ares_tool", {"ico": "00012345"}))
+    assert observation["company_data"] == data
+    assert "cards" not in observation
+    assert "confirmation" not in observation
+    assert "stejnou službu ARES" in "\n".join(toolset.prompt_blocks())

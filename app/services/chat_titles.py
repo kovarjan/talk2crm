@@ -15,7 +15,7 @@ from app.api.models import ChatMessageItem
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.engine.llm import get_chat_llm
-from app.presentation.agent_result import to_user_message
+from app.presentation.agent_result import to_plain_message
 from database.models import Chat
 
 
@@ -32,7 +32,7 @@ def history_for_title_prompt(history: list[ChatMessageItem]) -> str:
         role = (item.role or "").strip().lower()
         if role not in {"user", "assistant"}:
             continue
-        content = to_user_message(item.content or "")
+        content = to_plain_message(item.content or "")
         if not content:
             continue
         compact = re.sub(r"\s+", " ", content).strip()
@@ -44,7 +44,7 @@ def history_for_title_prompt(history: list[ChatMessageItem]) -> str:
 
 
 def sanitize_chat_name(value: str | None) -> str:
-    text = to_user_message(value or "")
+    text = to_plain_message(value or "")
     text = re.sub(r"\s+", " ", text).strip()
     text = text.strip("`\"'“”„")
     if not text:

@@ -25,7 +25,7 @@ _EMOJI_RE = re.compile(
 )
 
 
-def to_user_message(text: str) -> str:
+def to_plain_message(text: str) -> str:
     """Strip LLM markup (think/answer tags, markdown, emoji) into plain Czech text."""
     cleaned = strip_think_tags(text)
     cleaned = strip_answer_tags(cleaned)
@@ -40,6 +40,11 @@ def to_user_message(text: str) -> str:
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = cleaned.strip()
     return cleaned or (text or "")
+
+
+def to_user_message(text: str) -> str:
+    """Keep chat Markdown and paragraph structure; remove only model wrapper tags."""
+    return format_european_dates(strip_answer_tags(strip_think_tags(text))).strip()
 
 
 def try_parse_json(text: str) -> dict[str, Any] | None:
