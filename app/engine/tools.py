@@ -691,6 +691,7 @@ def build_native_tools(
             request_context=request_context,
             crm_client=crm_client,
             rag_service=rag_service,
+            input_text=input_text,
         ))
     if capabilities is not None and "products" in capabilities:
         from app.engine.product_tools import build_product_tools

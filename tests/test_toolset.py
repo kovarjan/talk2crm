@@ -58,6 +58,23 @@ async def test_crm_tool_prompt_is_rendered_from_manifest() -> None:
 
 
 @pytest.mark.asyncio
+async def test_manual_is_available_without_web_and_returns_readable_source_passages() -> None:
+    passage = {"path": "Komplet-CORIPO-manual.md", "title": "Manuál CORIPO",
+               "url": "/#wiki/Komplet-CORIPO-manual.md", "start_line": 700, "end_line": 720,
+               "content": "Zvolte Import a nahrajte CSV."}
+    transport = FakeTransport(responses=[ok_result({"status": "ok", "locale": "cs_CZ", "results": [passage]})])
+    toolset = await _toolset(transport, context={"capabilities": []})
+    assert "crm_manual_tool" in toolset.names()
+    assert "web_search_tool" not in toolset.names()
+    assert toolset.is_read_only("crm_manual_tool")
+    observation = json.loads(await toolset.invoke("crm_manual_tool", {"query": "import kontakty"}))
+    assert observation["results"] == [passage]
+    assert "cards" not in observation
+    assert "confirmation" not in observation
+    assert "oficiální manuály CORIPO" in "\n".join(toolset.prompt_blocks())
+
+
+@pytest.mark.asyncio
 async def test_manifest_tool_cannot_shadow_a_native_tool() -> None:
     manifest = sample_manifest()
     manifest["tools"].append(_custom_tool("web_search_tool"))

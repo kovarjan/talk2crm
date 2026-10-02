@@ -21,6 +21,11 @@ ALWAYS_ON: frozenset[str] = frozenset({"crm"})
 # are not here: each tenant's Coripo publishes them with their descriptions in its tool
 # manifest (app/tools). Braces are doubled for historical f-string rendering.
 TOOL_PROMPT_BLOCKS: dict[str, str] = {
+    "prepare_company_contacts_tool": """prepare_company_contacts_tool(contacts: list)
+   — připraví pojmenované osoby jako samostatné Contacts navázané na právě otevřenou firmu Accounts, ověří duplicity a pro každou osobu vrátí kartu k potvrzení. Nic nezapisuje.
+   — contacts: [{first_name, last_name, email?, phone?, job_title?, department?, source_url}]. Pouze úplné údaje skutečně nalezené ve zdroji; žádné domýšlení e-mailů/telefonů ani osoby z obecných schránek.
+   — před návrhem otevři zdroj web_fetch_tool; seznam kontaktů nikdy nevkládej do description firmy. Obecné firemní telefony a schránky vypiš odděleně.
+   — po status=contact_proposals skonči: uživatel potvrdí jednotlivé karty.""",
     "daily_briefing_tool": """daily_briefing_tool(refresh: bool=false, closing_days: int=14)
    — denní přehled přihlášeného uživatele. Pro dotazy „můj den“, „co mě dnes čeká“, „denní přehled“ vždy použij tento nástroj.
    — zahrnuje schůzky, hovory, úkoly, nabídky, obchodní případy, faktury, objednávky a zájemce. U částečných výsledků přiznej nedostupné sekce.""",
@@ -65,6 +70,7 @@ TOOL_PROMPT_ORDER: list[str] = [
     "propose_form_fields_tool",
     "research_record_tool",
     "product_lookup_tool",
+    "prepare_company_contacts_tool",
 ]
 
 
@@ -82,7 +88,7 @@ CAPABILITIES: dict[str, Capability] = {
     # this lists only the gateway-native tools of the always-on CRM capability.
     "crm": Capability(
         id="crm",
-        tool_names=frozenset({"rag_search_tool"}),
+        tool_names=frozenset({"rag_search_tool", "prepare_company_contacts_tool"}),
         prompt_block="",
         default_on=True,
     ),
@@ -105,6 +111,10 @@ CAPABILITIES: dict[str, Capability] = {
             "(instructions = přesný text a cílová pole) nebo research_record_tool. Nikdy neříkej, že formulář "
             "nemůžeš vyplnit, a pro otevřený záznam nevolej crm_action_tool — hodnoty se uživateli ukážou ve "
             "formuláři k potvrzení."
+            " VÝJIMKA: dohledání/přidání kontaktů K firmě znamená samostatné Contacts s account_id, "
+            "nikoli pole firmy. Použij prepare_company_contacts_tool; propose_form_fields_tool ani "
+            "research_record_tool nepoužívej pro uložení seznamu osob do description firmy. "
+            "Krátké ano potvrzuje předchozí záměr, nemění cílový modul na Accounts."
         ),
         default_on=True,
     ),

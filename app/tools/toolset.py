@@ -320,7 +320,7 @@ async def build_turn_toolset(
             module_catalog=module_catalog,
         )
 
-    return await ToolSet.build(
+    toolset = await ToolSet.build(
         tenant_id=tenant_id,
         user_id=user_id,
         request_context=request_context,
@@ -328,3 +328,17 @@ async def build_turn_toolset(
         native_tools=natives,
         capabilities=capabilities,
     )
+    if {"crm_query_tool", "crm_action_tool"} <= set(toolset.crm_specs):
+        from app.engine.contact_tools import NAME, build_contact_tool, contact_form_misroute, related_contacts_response
+
+        toolset.native_tools[NAME] = build_contact_tool(toolset)
+        async def guard_contact_description(spec: ToolSpec, args: dict[str, Any]) -> str | None:
+            data = args.get("data_json") or {}
+            fields = data.get("fields") or {}
+            if (spec.name == "crm_action_tool" and str(args.get("module") or "").lower() == "accounts"
+                    and "description" in fields and contact_form_misroute(str(fields["description"]), user_input=input_text)):
+                return _dumps(related_contacts_response())
+            return None
+
+        toolset.interceptors.insert(0, guard_contact_description)
+    return toolset

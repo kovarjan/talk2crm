@@ -55,7 +55,7 @@ def test_non_string_entries_are_ignored() -> None:
 def test_tool_names_follow_enabled_capabilities() -> None:
     names = tool_names_for({"crm"})
     # CRM data tools are published by the tenant's Coripo, not listed here.
-    assert names == {"rag_search_tool"}
+    assert names == {"rag_search_tool", "prepare_company_contacts_tool"}
     assert "web_search_tool" not in names
     assert "propose_form_fields_tool" not in names
     names = tool_names_for({"crm", "web", "form"})

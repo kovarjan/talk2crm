@@ -74,12 +74,17 @@ def build_form_tools(
     crm_client: Any,
     rag_service: Any | None,
     db: Any | None = None,
+    input_text: str = "",
 ) -> list:
     current_values = _current_values(request_context)
 
     @tool("propose_form_fields_tool", args_schema=ProposeFormFieldsArgs)
     async def propose_form_fields_tool(module: str, record_id: str | None = None, instructions: str = "") -> str:
         """Připraví hodnoty polí otevřeného formuláře z textu. Nikdy nezapisuje do CRM."""
+        from app.engine.contact_tools import contact_form_misroute, related_contacts_response
+
+        if module.lower() == "accounts" and contact_form_misroute(instructions, user_input=input_text):
+            return json.dumps(related_contacts_response(), ensure_ascii=False)
         try:
             schema = await crm_client.get_ai_schema(module, record_id)
         except Exception as exc:  # noqa: BLE001 - any failure means "no form"
@@ -106,6 +111,10 @@ def build_form_tools(
     @tool("research_record_tool", args_schema=ResearchRecordArgs)
     async def research_record_tool(module: str, record_id: str | None = None, subject: str = "", hint: str | None = None) -> str:
         """Dohledá veřejné informace k subjektu a připraví hodnoty polí otevřeného formuláře. Nikdy nezapisuje do CRM."""
+        from app.engine.contact_tools import contact_form_misroute, related_contacts_response
+
+        if module.lower() == "accounts" and contact_form_misroute(hint or "", user_input=input_text):
+            return json.dumps(related_contacts_response(), ensure_ascii=False)
         try:
             schema = await crm_client.get_ai_schema(module, record_id)
         except Exception as exc:  # noqa: BLE001
