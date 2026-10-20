@@ -53,3 +53,11 @@ def test_form_patch_carries_lines() -> None:
 def test_prompt_and_tools_mention_lines() -> None:
     assert '"lines"' in EXTRACT_FIELDS_SYSTEM_PROMPT
     assert "product_lookup_tool" in EXTRACT_FIELDS_ALLOWED_TOOLS
+
+
+def test_polymorphic_relation_preserves_module_for_form_save() -> None:
+    from app.engine.extraction import _validate_fields_against_schema
+
+    schema = {"sections": [{"fields": [{"name": "parent_id", "type": "polymorphic_relate"}]}]}
+    value = {"id": "a1", "name": "Acme", "module": "Accounts"}
+    assert _validate_fields_against_schema({"parent_id": value}, schema) == {"parent_id": value}

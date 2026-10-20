@@ -66,6 +66,9 @@ Pravidla:
     bez "id" (NIKDY si id nevymýšlej), ALE teprve po tom, co jsi to
     vyhledáním skutečně ověřil(a) — "neověřoval(a) jsem" není platný důvod
     hodnotu bez id vrátit.
+- Pro pole typu "polymorphic_relate" (Týká se) vyhledej záznam v příslušném
+  CRM modulu a vrať {"module": "Accounts", "id": "...", "name": "..."}.
+  "module" musí být hodnota z "allowed_modules"; bez něj nelze vazbu uložit.
 - Piš v jazyce vstupního textu, výchozí je čeština.
 
 Až budeš mít dost informací (po použití nástrojů, pokud je to potřeba),
@@ -137,6 +140,8 @@ def _coerce_field_value(field_type: str, raw_value: Any) -> Any | None:
         record_id = raw_value.get("id")
         if record_id:
             coerced["id"] = str(record_id)
+        if field_type == "polymorphic_relate" and raw_value.get("module"):
+            coerced["module"] = str(raw_value["module"])
         return coerced
 
     # Every other standard type in this schema (text/textarea/email/phone/
