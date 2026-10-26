@@ -25,6 +25,7 @@ from typing import Any
 from app.engine.agent import run_agent
 from app.tools.toolset import build_turn_toolset
 from app.services.crm_client import CoripoClient
+from app.utils.text import normalize_text
 
 EXTRACT_FIELDS_ALLOWED_TOOLS = {"rag_search_tool", "crm_query_tool", "get_company_overview", "product_lookup_tool"}
 
@@ -192,6 +193,50 @@ def validate_line_rows(raw_rows: Any, line_field: dict[str, Any] | None) -> tupl
     return rows, dropped
 
 
+def _pick_product(query: str, results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The one catalog product a line refers to, or None when the match is not clear."""
+    results = [r for r in results if isinstance(r, dict) and r.get("id")]
+    if not results:
+        return None
+    q = normalize_text(query)
+    exact = [r for r in results if q and q in (normalize_text(str(r.get("name") or "")), normalize_text(str(r.get("mft_part_num") or "")))]
+    if len(exact) == 1:
+        return exact[0]
+    if not exact and len(results) == 1:
+        return results[0]
+    return None
+
+
+async def resolve_product_rows(rows: list[dict[str, Any]], lookup: Any) -> list[str]:
+    """Give every product line a catalog ``product_template_id`` the model left out.
+
+    The frontend prices a line through ``getProductTemplate(product_template_id)``; a row with
+    only a name becomes a plain, unpriced line. ``lookup(query)`` is the product catalog lookup
+    returning its JSON text. Only a clear single match is linked (never a guess); the names of
+    lines that stay unlinked are returned so the caller can tell the user.
+    """
+    unresolved: list[str] = []
+    for row in rows:
+        template = row.get("product_template_id")
+        if isinstance(template, dict) and template.get("id"):
+            continue
+        hint = template.get("name") if isinstance(template, dict) else ""
+        query = str(hint or row.get("name") or "").strip()
+        if not query:
+            continue
+        try:
+            payload = json.loads(await lookup(query))
+        except Exception:  # noqa: BLE001 - a failed lookup must not fail the extraction
+            payload = {}
+        match = _pick_product(query, payload.get("results") or [] if isinstance(payload, dict) else [])
+        if match is None:
+            unresolved.append(query)
+            continue
+        row["product_template_id"] = {"id": str(match["id"]), "name": str(match.get("name") or query)}
+        row.setdefault("name", str(match.get("name") or query))
+    return unresolved
+
+
 def _validate_fields_against_schema(raw_fields: Any, field_schema: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw_fields, dict):
         return {}
@@ -267,9 +312,15 @@ async def extract_fields(
     parsed = _extract_json_object(raw_output)
     fields = _validate_fields_against_schema(parsed.get("fields"), field_schema)
     line_rows, dropped = validate_line_rows(parsed.get("lines"), _line_field_from_schema(field_schema))
+    line_field = _line_field_from_schema(field_schema)
+    # Only forms whose lines carry a catalog product (quotes, orders...), not free-form custom lines.
+    links_products = any(isinstance(f, dict) and f.get("name") == "product_template_id" for f in (line_field or {}).get("line_fields") or [])
+    unresolved = await resolve_product_rows(line_rows, lambda query: toolset.invoke("product_lookup_tool", {"query": query, "limit": 5})) if links_products else []
     message = str(parsed.get("message") or "").strip()
     if not message:
         message = "Aktualizoval(a) jsem pole podle vloženého textu."
+    if unresolved:
+        message += " (produkt se nepodařilo jednoznačně přiřadit z katalogu: " + "; ".join(unresolved[:3]) + ")"
     if dropped:
         message += f" ({len(dropped)} řádků vynecháno: " + "; ".join(d["reason"] for d in dropped[:3]) + ")"
 
