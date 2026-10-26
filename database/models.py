@@ -118,3 +118,14 @@ class TenantToolManifest(Base):
     manifest_hash: Mapped[str] = mapped_column(String(80), nullable=False)
     manifest_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class HmacNonce(Base):
+    """Used HMAC/stream-token nonces (replay protection shared by all workers)."""
+
+    __tablename__ = "hmac_nonces"
+    __table_args__ = (Index("ix_hmac_nonces_expires_at", "expires_at"),)
+
+    key_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    nonce: Mapped[str] = mapped_column(String(200), primary_key=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

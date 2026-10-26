@@ -14,6 +14,7 @@ from fastapi.openapi.utils import get_openapi
 
 from app.api.endpoints import router as api_router
 from app.core.audio import cleanup_audio_cache
+from app.core.audio_upload import BodySizeLimitMiddleware
 from app.core.config import get_settings
 from app.core.logging import get_logger, request_context_middleware, setup_logging
 from app.core.http import aclose_shared_http_client
@@ -34,6 +35,7 @@ setup_logging(
     log_trace_enabled=settings.log_trace_enabled,
     log_trace_max_chars=settings.log_trace_max_chars,
     log_trace_history_messages=settings.log_trace_history_messages,
+    log_include_payloads=settings.log_include_payloads,
 )
 
 
@@ -80,6 +82,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.middleware("http")(request_context_middleware)
+# Multipart overhead allowance on top of the audio cap; rejects before buffering.
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.audio_max_upload_bytes + 1024 * 1024)
 
 
 @app.get("/openapi.json", include_in_schema=False)

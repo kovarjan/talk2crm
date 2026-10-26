@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,13 +26,21 @@ class Settings(BaseSettings):
     log_file_enabled: bool = False
     log_file_path: str = "./logs/talk2crm.log"
     log_file_format: str = "json"
-    crm_wire_log_enabled: bool = True
+    # CRM wire logs and LLM traces contain message bodies (PII). Off by default;
+    # when enabled, payloads are truncated to log_trace_max_chars.
+    crm_wire_log_enabled: bool = False
     crm_wire_log_path: str = "./logs/crm_wire.log"
     crm_wire_log_format: str = "pretty"
-    log_trace_enabled: bool = True
+    log_trace_enabled: bool = False
+    # Debug only: keep full message bodies / CRM payloads in traces and wire logs.
+    log_include_payloads: bool = False
     log_trace_max_chars: int = 1200
     log_trace_history_messages: int = 10
     tool_call_logging: bool = False
+
+    # Apply Alembic migrations in the app lifespan. Set false when a separate
+    # one-shot step (docker-compose.prod.yml `migrate`) runs them.
+    run_migrations_on_startup: bool = True
 
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/talk2crm"
 
@@ -41,6 +49,11 @@ class Settings(BaseSettings):
     llm_title_model: str = "llama3"
     llm_api_key: str = "EMPTY"
     llm_temperature: float = 0.1
+    # Per-request timeout and retry budget for the chat LLM, and the overall
+    # wall-clock deadline for one agent turn (all iterations together).
+    llm_request_timeout_seconds: float = 60.0
+    llm_max_retries: int = 1
+    agent_turn_timeout_seconds: float = 180.0
     llm_context_window_tokens: int = 32768
     llm_system_prompt_prefix: str = "/nothink"
 
@@ -89,6 +102,7 @@ class Settings(BaseSettings):
     web_fetch_timeout_seconds: float = 10.0
 
     coripo_hmac_key_id: str = "your-tenant-id"
+    # Dev-only shortcut credential; startup is refused in production when set.
     coripo_test_token: str = ""
     # How long an HMAC-derived Coripo SID is reused across requests (0 disables
     # the cache and restores one hmac-login per request).
@@ -140,8 +154,26 @@ class Settings(BaseSettings):
     )
 
 
+    # Comma/JSON list of user ids ("user" or "tenant:user") allowed to
+    # create/approve/deactivate tenant-scope skills. Empty = nobody (deny).
+    skills_admin_user_ids: str = ""
+
+    # Audio upload limits (process-audio / transcribe endpoints).
+    audio_max_upload_bytes: int = 25 * 1024 * 1024
+    audio_max_concurrent_transcriptions: int = 2
+
     hmac_keys_json: str = Field(default="{}")
     hmac_max_skew_seconds: int = 300
+    # Optional JSON map key id -> list of tenant ids that key may act for, e.g.
+    # {"kid-1": ["acme", "globex"]}. Unset keeps "any key, any tenant" (warned).
+    hmac_key_tenants_json: str = Field(default="{}")
+    # When true the signed string also covers the query string, X-Tenant and
+    # X-User-Id (see app/core/security.py). Clients MUST sign the same fields,
+    # so gateway and CRM client have to be upgraded together before enabling.
+    hmac_bind_identity: bool = False
+    # Replay-protection store: "database" (shared by all workers), "memory"
+    # (per process) or "auto" (database outside dev/test environments).
+    hmac_nonce_store: str = "auto"
     # When true, every protected request must carry a valid HMAC Authorization
     # header — tenant/user headers alone are rejected. Keep enabled in any
     # deployment where the API is not behind a trusted authenticating gateway.
@@ -151,6 +183,7 @@ class Settings(BaseSettings):
         "CHANGE_ME_WITH_32_BYTE_URLSAFE_BASE64_FOR_FERNET"
     )
 
+    # Defaults to "*" for dev only; production startup requires explicit origins.
     cors_allow_origins: list[str] = Field(default_factory=lambda: ["*"])
     # Browsers reject credentialed CORS with a wildcard origin, so enabling this
     # only takes effect when cors_allow_origins lists explicit origins.
@@ -198,6 +231,57 @@ class Settings(BaseSettings):
                 f"CRM_MODE must be 'on' or 'off', got {value!r}"
             )
         return normalized
+
+    @model_validator(mode="after")
+    def validate_production_settings(self) -> "Settings":
+        if not self.is_production:
+            return self
+        problems: list[str] = []
+        if not self.require_hmac:
+            problems.append("REQUIRE_HMAC must be true")
+        if self.coripo_test_token:
+            problems.append("CORIPO_TEST_TOKEN must not be set")
+        if "*" in self.cors_allow_origins:
+            problems.append("CORS_ALLOW_ORIGINS must list explicit origins (not '*')")
+        if problems:
+            raise ValueError("Unsafe production configuration: " + "; ".join(problems))
+        # Silent local-disk Qdrant fallback hides outages in production unless
+        # the operator opted in explicitly.
+        if "qdrant_allow_local_fallback" not in self.model_fields_set:
+            self.qdrant_allow_local_fallback = False
+        return self
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment.strip().lower() in {"production", "prod"}
+
+    @property
+    def skills_admin_ids(self) -> set[str]:
+        raw = (self.skills_admin_user_ids or "").strip()
+        if not raw:
+            return set()
+        if raw.startswith("["):
+            try:
+                items = json.loads(raw)
+            except json.JSONDecodeError:
+                return set()
+        else:
+            items = raw.split(",")
+        return {str(item).strip() for item in items if str(item).strip()}
+
+    @property
+    def hmac_key_tenants(self) -> dict[str, list[str]]:
+        try:
+            parsed = json.loads(self.hmac_key_tenants_json)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return {
+            str(kid): [str(t) for t in tenants]
+            for kid, tenants in parsed.items()
+            if isinstance(tenants, list)
+        }
 
     @property
     def cache_audio_dir(self) -> Path:

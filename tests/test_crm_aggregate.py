@@ -335,7 +335,7 @@ async def test_crm_fetch_error_returns_failure() -> None:
         AggregateRequest(module="invoices", operation="sum", metric="amount")
     )
     assert result.success is False
-    assert "CRM down" in str(result.error)
+    assert result.error and "CRM down" not in str(result.error)  # details are logged, not returned
 
 
 @pytest.mark.asyncio

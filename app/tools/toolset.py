@@ -246,6 +246,13 @@ class ToolSet:
 
     # ------------------------------------------------------------------ diagnostics
 
+    def _short_description(self, name: str, limit: int = 240) -> str:
+        """First paragraph of the tool's description, as the LLM is told about it."""
+        spec = self.crm_specs.get(name)
+        raw = spec.description if spec is not None else str(getattr(self.native_tools.get(name), "description", "") or "")
+        first = " ".join(raw.strip().split("\n\n")[0].split())
+        return first if len(first) <= limit else first[: limit - 1].rstrip() + "…"
+
     def describe(self) -> dict[str, Any]:
         return {
             "tenant_id": self.ctx.tenant_id,
@@ -261,6 +268,8 @@ class ToolSet:
                     "version": self.crm_specs[name].version if name in self.crm_specs else None,
                     "capability": self.crm_specs[name].annotations.capability if name in self.crm_specs else None,
                     "needs_confirmation": self.crm_specs[name].annotations.needs_confirmation if name in self.crm_specs else False,
+                    "read_only": self.is_read_only(name),
+                    "description": self._short_description(name),
                 }
                 for name in self.names()
             ],

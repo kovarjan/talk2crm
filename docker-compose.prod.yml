@@ -1,15 +1,33 @@
+x-api-build: &api-build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    INSTALL_GPU_DEPS: ${INSTALL_GPU_DEPS:-true}
+    PIP_TIMEOUT: ${PIP_TIMEOUT:-120}
+    PIP_RETRIES: ${PIP_RETRIES:-10}
+
 services:
+  # One-shot: applies Alembic migrations once, before any API worker starts.
+  migrate:
+    build: *api-build
+    image: talk2crm-api:latest
+    container_name: talk2crm-migrate
+    command: alembic upgrade head
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        INSTALL_GPU_DEPS: ${INSTALL_GPU_DEPS:-true}
-        PIP_TIMEOUT: ${PIP_TIMEOUT:-120}
-        PIP_RETRIES: ${PIP_RETRIES:-10}
+    build: *api-build
     image: talk2crm-api:latest
     container_name: talk2crm-api
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8011 --workers ${UVICORN_WORKERS:-2} --proxy-headers --forwarded-allow-ips='*' --no-access-log
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8011 --workers ${UVICORN_WORKERS:-2} --proxy-headers --forwarded-allow-ips=${FORWARDED_ALLOW_IPS:-127.0.0.1} --no-access-log
     env_file:
       - .env
     environment:
@@ -17,6 +35,8 @@ services:
       QDRANT_URL: http://qdrant:6333
       SEARXNG_URL: http://searxng:8080
       ENVIRONMENT: ${ENVIRONMENT:-production}
+      RUN_MIGRATIONS_ON_STARTUP: "false"
+      QDRANT_API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in .env}
       DEBUG: ${DEBUG:-false}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
@@ -24,6 +44,8 @@ services:
     ports:
       - "8011:8011"
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       qdrant:
@@ -33,7 +55,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - hf_cache:/root/.cache/huggingface
+      - hf_cache:/home/app/.cache/huggingface
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8011/ping/ >/dev/null || exit 1"]
       interval: 30s
@@ -74,12 +96,13 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     container_name: talk2crm-qdrant
-    ports:
-      - "6333:6333"
+    # Internal only: reachable from the compose network, not published.
+    expose:
+      - "6333"
     env_file:
       - .env
     environment:
-      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-}
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in .env}
     volumes:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
@@ -87,8 +110,9 @@ services:
   adminer:
     image: adminer:4
     container_name: talk2crm-adminer
+    # Admin UI: bound to loopback only (use an SSH tunnel to reach it).
     ports:
-      - "8085:8080"
+      - "127.0.0.1:8085:8080"
     depends_on:
       postgres:
         condition: service_healthy

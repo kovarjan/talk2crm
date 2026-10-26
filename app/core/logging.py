@@ -24,6 +24,13 @@ request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
 _TRACE_ENABLED = True
 _TRACE_MAX_CHARS = 2200
 _TRACE_HISTORY_MESSAGES = 10
+# Message bodies / CRM payloads are PII: traces keep structure and sizes only,
+# unless LOG_INCLUDE_PAYLOADS is explicitly enabled (local debugging).
+_INCLUDE_PAYLOADS = False
+_KEEP_STRING_KEYS = frozenset({
+    "tool", "name", "status", "event", "mode", "role", "step", "module", "action",
+    "method", "path", "type", "query_type", "error_code",
+})
 _HEALTH_PATHS = ("/ping", "/ping/", "/health", "/health/")
 
 _STANDARD_RECORD_ATTRS = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__.keys())
@@ -35,6 +42,22 @@ LLM_STEP_USER_INPUT = "USER INPUT"
 LLM_STEP_AGENT_ACTION = "AGENT THINKING/ACTION"
 LLM_STEP_TOOL_RESULT = "TOOL RESULT"
 LLM_STEP_FINAL_RESPONSE = "FINAL RESPONSE"
+
+
+def redact_for_log(value: Any, *, _key: str | None = None) -> Any:
+    """Replaces free-text values with their length; keeps keys, numbers, booleans
+    and a few enum-like string fields. No-op when payload logging is enabled."""
+    if _INCLUDE_PAYLOADS:
+        return value
+    if isinstance(value, dict):
+        return {str(k): redact_for_log(v, _key=str(k)) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [redact_for_log(v, _key=_key) for v in value]
+    if isinstance(value, str):
+        if _key in _KEEP_STRING_KEYS and len(value) <= 64:
+            return value
+        return f"<redacted {len(value)} chars>"
+    return value
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
@@ -454,12 +477,15 @@ def setup_logging(
     log_trace_enabled: bool = True,
     log_trace_max_chars: int = 1200,
     log_trace_history_messages: int = 10,
+    log_include_payloads: bool = False,
 ) -> None:
+    global _INCLUDE_PAYLOADS
     global _TRACE_ENABLED
     global _TRACE_MAX_CHARS
     global _TRACE_HISTORY_MESSAGES
 
     _TRACE_ENABLED = bool(log_trace_enabled)
+    _INCLUDE_PAYLOADS = bool(log_include_payloads)
     _TRACE_MAX_CHARS = max(200, int(log_trace_max_chars))
     _TRACE_HISTORY_MESSAGES = max(1, int(log_trace_history_messages))
 
@@ -593,12 +619,14 @@ def log_llm_step(
     *,
     meta: dict[str, Any] | None = None,
 ) -> None:
+    if not _TRACE_ENABLED:
+        return
     logger.info(
         f"[{step}]",
         extra={
             "llm_step": {
                 "step": step,
-                "payload": _normalize_for_display(payload),
+                "payload": redact_for_log(_normalize_for_display(payload)),
                 "meta": _normalize_for_display(meta or {}),
             }
         },
@@ -685,8 +713,8 @@ def log_llm_trace(
     if not _TRACE_ENABLED:
         return
 
-    normalized_request = _normalize_for_display(request)
-    normalized_context = _normalize_for_display(context or {})
+    normalized_request = redact_for_log(_normalize_for_display(request))
+    normalized_context = redact_for_log(_normalize_for_display(context or {}))
     normalized_resources = _normalize_for_display(resources or {})
     if isinstance(normalized_request, dict) and isinstance(normalized_context, dict) and isinstance(normalized_resources, dict):
         context_usage = _build_context_usage(normalized_resources, normalized_request, normalized_context)
@@ -702,10 +730,10 @@ def log_llm_trace(
         },
         "request": normalized_request,
         "context": normalized_context,
-        "tool_calls": _normalize_for_display(tool_calls or []),
-        "outcome": _normalize_for_display(outcome),
+        "tool_calls": redact_for_log(_normalize_for_display(tool_calls or [])),
+        "outcome": redact_for_log(_normalize_for_display(outcome)),
         "resources": normalized_resources,
-        "chat_history": summarize_chat_history(chat_history or []),
+        "chat_history": redact_for_log(summarize_chat_history(chat_history or [])),
     }
     logger.info("LLM interaction trace", extra={"trace": payload})
 

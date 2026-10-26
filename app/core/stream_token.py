@@ -37,11 +37,8 @@ def create_stream_token(
     return f"{payload_b64}.{sig}"
 
 
-def validate_stream_token(token: str, *, hmac_keys: dict[str, str]) -> dict[str, Any]:
-    """
-    Validate a stream token. Returns identity payload on success.
-    Raises ValueError on invalid/expired/replayed token.
-    """
+def _verify_stream_token(token: str, *, hmac_keys: dict[str, str]) -> tuple[dict[str, Any], str]:
+    """Decode and verify signature/expiry/key-tenant binding (no nonce use)."""
     try:
         payload_b64, sig = token.rsplit(".", 1)
     except ValueError:
@@ -68,14 +65,44 @@ def validate_stream_token(token: str, *, hmac_keys: dict[str, str]) -> dict[str,
     if int(time.time()) > int(payload.get("exp", 0)):
         raise ValueError("Token expired")
 
-    from app.core.security import _register_nonce
+    from app.core.security import tenant_allowed_for_key
 
-    nonce = str(payload.get("nonce", ""))
-    if not _register_nonce(f"stream:{key_id}", nonce, 120.0):
-        raise ValueError("Token nonce already used (replay attack)")
+    if not tenant_allowed_for_key(key_id, str(payload.get("tenant", ""))):
+        raise ValueError("Key not allowed for tenant")
+    return payload, key_id
 
+
+def _identity(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "tenant": str(payload.get("tenant", "")),
         "user_id": str(payload.get("user_id", "")),
         "user_name": str(payload.get("user_name", "") or ""),
     }
+
+
+def validate_stream_token(token: str, *, hmac_keys: dict[str, str]) -> dict[str, Any]:
+    """
+    Validate a stream token. Returns identity payload on success.
+    Raises ValueError on invalid/expired/replayed token. Process-local nonce
+    store; request handlers use ``validate_stream_token_async``.
+    """
+    payload, key_id = _verify_stream_token(token, hmac_keys=hmac_keys)
+
+    from app.core.security import _register_nonce
+
+    nonce = str(payload.get("nonce", ""))
+    if not _register_nonce(f"stream:{key_id}", nonce, 120.0):
+        raise ValueError("Token nonce already used (replay attack)")
+    return _identity(payload)
+
+
+async def validate_stream_token_async(token: str, *, hmac_keys: dict[str, str]) -> dict[str, Any]:
+    """Same as ``validate_stream_token`` but replay-checks in the shared store."""
+    payload, key_id = _verify_stream_token(token, hmac_keys=hmac_keys)
+
+    from app.core.nonce_store import get_nonce_store
+
+    nonce = str(payload.get("nonce", ""))
+    if not await get_nonce_store().register(f"stream:{key_id}", nonce, 120.0):
+        raise ValueError("Token nonce already used (replay attack)")
+    return _identity(payload)

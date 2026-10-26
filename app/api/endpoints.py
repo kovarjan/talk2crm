@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import tempfile
 import uuid as _uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
@@ -24,7 +23,12 @@ from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import TenantContext, get_stream_token_context, get_tenant_context
+from app.api.dependencies import (
+    TenantContext,
+    get_skills_admin_context,
+    get_stream_token_context,
+    get_tenant_context,
+)
 from app.api.models import (
     BaseResponse,
     ChatCreate,
@@ -43,6 +47,7 @@ from app.api.models import (
     UserChatsResponse,
 )
 from app.core.audio import transcribe, transcribe_segments
+from app.core.audio_upload import get_transcription_semaphore, save_upload_to_tempfile
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.engine.events import StreamEvent
@@ -144,6 +149,18 @@ async def ping() -> BaseResponse:
     return BaseResponse(success=True, response={"status": "ok"})
 
 
+@router.get("/ping/details/", response_model=BaseResponse)
+async def ping_details(
+    ctx: TenantContext = Depends(get_tenant_context),
+    db: AsyncSession = Depends(get_db),
+) -> BaseResponse:
+    """Authenticated diagnostics (version, DB, Qdrant counts, LLM, CRM cache) for the hidden /ping command."""
+    from app.services.diagnostics import collect_diagnostics
+
+    data = await collect_diagnostics(tenant_id=ctx["tenant_id"], user_id=ctx["user_id"], db=db)
+    return BaseResponse(success=True, response=data)
+
+
 @router.post("/generate/", response_model=BaseResponse)
 async def generate(
     payload: GenerateRequest,
@@ -203,17 +220,29 @@ async def daily_briefing_endpoint(
     return BaseResponse(success=True, response=result)
 
 
-async def _describe_tools(ctx: TenantContext, db: AsyncSession, capabilities: list[str] | None) -> dict[str, Any]:
+async def _describe_tools(ctx: TenantContext, db: AsyncSession, capabilities: list[str] | None, *, all_capabilities: bool = False) -> dict[str, Any]:
+    from app.engine.capabilities import CAPABILITIES
     from app.tools.toolset import build_turn_toolset, get_manifest_cache, get_tenant_guards
 
     credentials = await TenantManager(db).get_credentials(ctx["tenant_id"])
     crm_client = CoripoClient(credentials.crm_base_url, credentials.crm_token,
                               user_id=ctx["user_id"], user_name=ctx["user_name"])
-    toolset = await build_turn_toolset(
-        tenant_id=ctx["tenant_id"], user_id=ctx["user_id"], input_text="",
-        request_context={"capabilities": capabilities} if capabilities is not None else None,
-        crm_client=crm_client, rag_service=get_rag_service(),
-    )
+
+    async def build(requested: list[str] | None):
+        return await build_turn_toolset(
+            tenant_id=ctx["tenant_id"], user_id=ctx["user_id"], input_text="",
+            request_context={"capabilities": requested} if requested is not None else None,
+            crm_client=crm_client, rag_service=get_rag_service(),
+        )
+
+    if all_capabilities:
+        # Every gateway capability, then every capability the CRM manifest declares (known only after the first build).
+        toolset = await build(sorted(CAPABILITIES))
+        declared = {c.id for c in (toolset.manifest.capabilities if toolset.manifest else ())}
+        if declared - toolset.enabled_capabilities:
+            toolset = await build(sorted(set(CAPABILITIES) | declared))
+    else:
+        toolset = await build(capabilities)
     return {
         **toolset.describe(),
         "unknown_capabilities": toolset.unknown_capabilities,
@@ -225,14 +254,16 @@ async def _describe_tools(ctx: TenantContext, db: AsyncSession, capabilities: li
 @router.get("/tools/", response_model=BaseResponse)
 async def tools_endpoint(
     capabilities: str | None = None,
+    all: bool = False,
     ctx: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db),
 ) -> BaseResponse:
     """Effective tool set for this tenant/user — what the agent would see — plus manifest
     cache and CRM circuit state. First stop when a tool is "missing". ``capabilities`` is a
-    comma list (FE chips); omitted = defaults."""
+    comma list (FE chips); omitted = defaults. ``all=true`` lists every tool of every capability
+    (CRM tools and the gateway's own, e.g. RAG/web), for the admin-only /tools command."""
     requested = [c.strip() for c in capabilities.split(",") if c.strip()] if capabilities is not None else None
-    return BaseResponse(success=True, response=await _describe_tools(ctx, db, requested))
+    return BaseResponse(success=True, response=await _describe_tools(ctx, db, requested, all_capabilities=all))
 
 
 @router.post("/tools/refresh/", response_model=BaseResponse)
@@ -720,8 +751,8 @@ async def process_audio_stream(
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=f"Invalid context JSON: {exc}")
 
-    suffix = Path(file.filename or "upload.webm").suffix or ".webm"
-    raw_bytes = await file.read()
+    # Size-capped, allowlisted-suffix copy of the upload (raises 413/415/400).
+    audio_path = await save_upload_to_tempfile(file)
 
     queue: asyncio.Queue[StreamEvent | None] = asyncio.Queue()
 
@@ -729,12 +760,8 @@ async def process_audio_stream(
         await queue.put(event)
 
     async def run_audio_pipeline() -> None:
-        tmp_path: str | None = None
+        tmp_path: str | None = audio_path
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(raw_bytes)
-                tmp_path = tmp.name
-
             full_text_parts: list[str] = []
             seg_index = 0
             loop = asyncio.get_event_loop()
@@ -752,7 +779,8 @@ async def process_audio_stream(
                     )
                     seg_index += 1
 
-            await asyncio.to_thread(iter_segments)
+            async with get_transcription_semaphore():
+                await asyncio.to_thread(iter_segments)
             input_text = " ".join(full_text_parts).strip()
             await emit(StreamEvent("transcription.done", {"text": input_text}))
 
@@ -983,15 +1011,13 @@ async def process_audio(
                     ),
                 ) from exc
 
-    suffix = Path(file.filename or "upload.webm").suffix or ".webm"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp:
-        payload = await file.read()
-        temp.write(payload)
-        temp_path = temp.name
+    # Size-capped, allowlisted-suffix copy of the upload (raises 413/415/400).
+    temp_path = await save_upload_to_tempfile(file)
 
     try:
         # faster-whisper is CPU-bound and synchronous; keep it off the event loop.
-        input_text = await asyncio.to_thread(transcribe, temp_path, language=user_locale)
+        async with get_transcription_semaphore():
+            input_text = await asyncio.to_thread(transcribe, temp_path, language=user_locale)
         process_payload = ProcessInputRequest(
             input_text=input_text,
             chat_id=effective_chat_id,
@@ -1193,34 +1219,31 @@ def _require_skill_modification_enabled() -> None:
 
 @router.get("/skills/", response_model=list[SkillIndexEntry])
 async def list_skill_index(
-    x_tenant: str = Header(..., alias="X-Tenant"),
-    x_user_id: str = Header(..., alias="X-User-Id"),
+    ctx: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db),
 ) -> list[SkillIndexEntry]:
     svc = SkillService(db, settings)
-    return await svc.load_index(x_tenant, x_user_id)
+    return await svc.load_index(ctx["tenant_id"], ctx["user_id"])
 
 
 @router.get("/skills/tenant/pending/", response_model=list[TenantOverlay])
 async def list_pending_tenant_skills(
-    x_tenant: str = Header(..., alias="X-Tenant"),
-    x_user_id: str = Header(..., alias="X-User-Id"),
+    ctx: TenantContext = Depends(get_skills_admin_context),
     db: AsyncSession = Depends(get_db),
 ) -> list[TenantOverlay]:
     svc = SkillService(db, settings)
-    return await svc.list_pending_tenant_overlays(x_tenant)
+    return await svc.list_pending_tenant_overlays(ctx["tenant_id"])
 
 
 @router.post("/skills/tenant/{name}/approve", response_model=TenantOverlay)
 async def approve_tenant_skill(
     name: str,
-    x_tenant: str = Header(..., alias="X-Tenant"),
-    x_user_id: str = Header(..., alias="X-User-Id"),
+    ctx: TenantContext = Depends(get_skills_admin_context),
     db: AsyncSession = Depends(get_db),
 ) -> TenantOverlay:
     _require_skill_modification_enabled()
     svc = SkillService(db, settings)
-    overlay = await svc.approve_tenant_overlay(x_tenant, name)
+    overlay = await svc.approve_tenant_overlay(ctx["tenant_id"], name)
     if overlay is None:
         raise HTTPException(status_code=404, detail="Skill overlay not found")
     return overlay
@@ -1229,14 +1252,13 @@ async def approve_tenant_skill(
 @router.post("/skills/tenant/", response_model=TenantOverlay)
 async def upsert_tenant_skill(
     data: TenantOverlayCreate,
-    x_tenant: str = Header(..., alias="X-Tenant"),
-    x_user_id: str = Header(..., alias="X-User-Id"),
+    ctx: TenantContext = Depends(get_skills_admin_context),
     db: AsyncSession = Depends(get_db),
 ) -> TenantOverlay:
     _require_skill_modification_enabled()
-    data.created_by = x_user_id
+    data.created_by = ctx["user_id"]
     svc = SkillService(db, settings)
-    overlay = await svc.upsert_tenant_overlay(x_tenant, data)
+    overlay = await svc.upsert_tenant_overlay(ctx["tenant_id"], data)
     if overlay is None:
         raise HTTPException(status_code=403, detail="Skill modification is disabled")
     return overlay
@@ -1245,13 +1267,12 @@ async def upsert_tenant_skill(
 @router.delete("/skills/tenant/{name}")
 async def deactivate_tenant_skill(
     name: str,
-    x_tenant: str = Header(..., alias="X-Tenant"),
-    x_user_id: str = Header(..., alias="X-User-Id"),
+    ctx: TenantContext = Depends(get_skills_admin_context),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     _require_skill_modification_enabled()
     svc = SkillService(db, settings)
-    ok = await svc.deactivate_tenant_overlay(x_tenant, name)
+    ok = await svc.deactivate_tenant_overlay(ctx["tenant_id"], name)
     if not ok:
         raise HTTPException(status_code=404, detail="Skill overlay not found")
     return {"deleted": True}
@@ -1260,13 +1281,12 @@ async def deactivate_tenant_skill(
 @router.post("/skills/user/", response_model=UserOverlay)
 async def upsert_user_skill(
     data: UserOverlayCreate,
-    x_tenant: str = Header(..., alias="X-Tenant"),
-    x_user_id: str = Header(..., alias="X-User-Id"),
+    ctx: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db),
 ) -> UserOverlay:
     _require_skill_modification_enabled()
     svc = SkillService(db, settings)
-    overlay = await svc.upsert_user_overlay(x_tenant, x_user_id, data)
+    overlay = await svc.upsert_user_overlay(ctx["tenant_id"], ctx["user_id"], data)
     if overlay is None:
         raise HTTPException(status_code=403, detail="Skill modification is disabled")
     return overlay
@@ -1275,13 +1295,12 @@ async def upsert_user_skill(
 @router.delete("/skills/user/{name}")
 async def deactivate_user_skill(
     name: str,
-    x_tenant: str = Header(..., alias="X-Tenant"),
-    x_user_id: str = Header(..., alias="X-User-Id"),
+    ctx: TenantContext = Depends(get_tenant_context),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     _require_skill_modification_enabled()
     svc = SkillService(db, settings)
-    ok = await svc.deactivate_user_overlay(x_tenant, x_user_id, name)
+    ok = await svc.deactivate_user_overlay(ctx["tenant_id"], ctx["user_id"], name)
     if not ok:
         raise HTTPException(status_code=404, detail="Skill overlay not found")
     return {"deleted": True}

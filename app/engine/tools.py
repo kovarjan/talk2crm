@@ -6,7 +6,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from app.utils.fuzzy import expand_fuzzy_token_variants, fuzzy_tokens, score_lexical_fuzzy
+from app.utils.fuzzy import score_lexical_fuzzy
 from app.utils.text import normalize_text as _normalize_text, safe_text as _safe_text
 from app.core.config import get_settings
 from app.domain.aggregate_contracts import AggregateFilters, AggregateRequest
@@ -25,10 +25,14 @@ from app.engine.tool_validator import (
     validate_web_fetch_call,
     validate_web_search_call,
 )
-from app.engine.web_fetch import fetch_page
+from app.engine.web_fetch import WebFetchError, fetch_page
 from app.engine.web_search import search_web
 from app.engine.capabilities import tool_names_for
 from app.services.module_catalog import ModuleCatalog
+
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 # Helpers relocated to dedicated modules; aliased to keep call sites stable.
 from app.engine.account_resolution import (
@@ -66,15 +70,9 @@ _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
-_SCOPED_RECORD_ID_RE = re.compile(
-    r"^(?P<module>[A-Za-z]+)[-:/](?P<id>(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}))$",
-    re.IGNORECASE,
-)
 
 
 # Fuzzy matching shared with the RAG ranking layer (app/utils/fuzzy.py).
-_expand_fuzzy_token_variants = expand_fuzzy_token_variants
-_fuzzy_tokens = fuzzy_tokens
 _score_lexical_fuzzy = score_lexical_fuzzy
 
 
@@ -638,7 +636,8 @@ def build_native_tools(
             try:
                 results = await search_web(query=_safe_text(query), max_results=int(max_results))
             except Exception as exc:  # noqa: BLE001 - the agent must get a usable observation
-                error_payload = {"status": "web_search_unavailable", "message": str(exc), "results": []}
+                logger.warning("web_search failed: %s: %s", type(exc).__name__, exc)
+                error_payload = {"status": "web_search_unavailable", "message": "Webové vyhledávání je momentálně nedostupné.", "results": []}
                 tcl.set_output({"status": "web_search_unavailable"})
                 return json.dumps(error_payload, ensure_ascii=False)
             payload = {"status": "ok", "query": _safe_text(query), "results": results}
@@ -666,7 +665,12 @@ def build_native_tools(
             try:
                 page = await fetch_page(url=_safe_text(url))
             except Exception as exc:  # noqa: BLE001 - the agent must get a usable observation
-                error_payload = {"status": "web_fetch_unavailable", "message": str(exc)}
+                logger.warning("web_fetch failed: %s: %s", type(exc).__name__, exc)
+                # WebFetchError texts are our own user-safe messages; anything else may leak internals.
+                error_payload = {
+                    "status": "web_fetch_unavailable",
+                    "message": str(exc) if isinstance(exc, WebFetchError) else "Stránku se nepodařilo načíst.",
+                }
                 tcl.set_output({"status": "web_fetch_unavailable"})
                 return json.dumps(error_payload, ensure_ascii=False)
             payload = {"status": "ok", **page}

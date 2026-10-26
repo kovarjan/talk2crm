@@ -16,7 +16,7 @@ import httpx
 
 from app.core.config import get_settings
 from app.core.http import get_shared_http_client
-from app.core.logging import get_logger
+from app.core.logging import get_logger, redact_for_log
 from app.utils.modules import canonical_module_name
 
 
@@ -147,13 +147,19 @@ class CoripoClient:
     def _can_use_hmac(self) -> bool:
         return bool(self.coripo_hmac_secret and self.user_id)
 
-    def _build_coripo_hmac_headers(self, body_bytes: bytes) -> dict[str, str]:
+    def _build_coripo_hmac_headers(
+        self, body_bytes: bytes, *, method: str = "", path: str = "", query: str = ""
+    ) -> dict[str, str]:
         if not self._can_use_hmac():
             return {}
 
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         nonce = str(uuid.uuid4())
-        sign_base = f"{timestamp}|{nonce}|{self.user_id}|".encode("utf-8") + body_bytes
+        # Matches the CRM's coripo\common\HmacVerifier strict format; method, path
+        # and query are bound so a captured signature cannot be replayed elsewhere.
+        sign_base = (
+            f"{timestamp}|{nonce}|{self.user_id}|{method.upper()}|{path}|{query}|"
+        ).encode("utf-8") + body_bytes
         signature = base64.b64encode(
             hmac.new(
                 self.coripo_hmac_secret.encode("utf-8"),
@@ -219,15 +225,15 @@ class CoripoClient:
                     "method": method,
                     "url": url,
                     "path": path,
-                    "params": params or {},
+                    "params": redact_for_log(params or {}),
                     "headers": self._redact_headers(headers),
-                    "json_body": json_body,
+                    "json_body": redact_for_log(json_body),
                     "require_sid": require_sid,
                     "status_code": response.status_code if response is not None else None,
                     "response_headers": (
                         self._redact_headers(dict(response.headers)) if response is not None else {}
                     ),
-                    "response_body": response_body,
+                    "response_body": redact_for_log(response_body),
                     "duration_ms": round(duration_ms, 2) if duration_ms is not None else None,
                     "error": error,
                 }
@@ -415,7 +421,11 @@ class CoripoClient:
                 default=str,
             ).encode("utf-8")
 
-        url = f"{self._coripo_api_base()}/{path.lstrip('/')}"
+        # Resolve params into the URL up front so the signed path/query are exactly
+        # what goes on the wire (raw, still percent-encoded, as the CRM sees REQUEST_URI).
+        request_url = httpx.URL(f"{self._coripo_api_base()}/{path.lstrip('/')}", params=params)
+        signed_path, _, signed_query = request_url.raw_path.decode("ascii").partition("?")
+        url = str(request_url)
         attempt = 0
 
         async def _send() -> tuple[httpx.Response, Any]:
@@ -426,7 +436,11 @@ class CoripoClient:
                 headers["sid"] = self._coripo_session_id
             if json_body is not None:
                 headers["Content-Type"] = "application/json"
-            headers.update(self._build_coripo_hmac_headers(body_bytes))
+            headers.update(
+                self._build_coripo_hmac_headers(
+                    body_bytes, method=method, path=signed_path, query=signed_query
+                )
+            )
             self._log_crm_wire_event(
                 event="crm_http_request",
                 method=method,
@@ -444,7 +458,6 @@ class CoripoClient:
                     method=method,
                     url=url,
                     headers=headers,
-                    params=params,
                     content=body_bytes if json_body is not None else None,
                     timeout=request_timeout,
                 )

@@ -25,7 +25,17 @@ RUN pip install --upgrade pip \
          pip install --timeout ${PIP_TIMEOUT} --retries ${PIP_RETRIES} -r /app/requirements.gpu.txt; \
        fi
 
-COPY . /app
+# Run as an unprivileged user; it owns the writable runtime dirs.
+RUN useradd --create-home --uid 10001 app \
+    && mkdir -p /app/cache /app/logs /home/app/.cache/huggingface \
+    && chown -R app:app /app/cache /app/logs /home/app
+
+COPY --chown=app:app . /app
+
+ENV HOME=/home/app \
+    HF_HOME=/home/app/.cache/huggingface
+
+USER app
 
 EXPOSE 8011
 

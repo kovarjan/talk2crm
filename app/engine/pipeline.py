@@ -11,6 +11,7 @@ TTS response generation.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -490,20 +491,39 @@ async def process_input_core(
                 for item in history_for_agent
             ]
             try:
-                agent_result = await run_agent(
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    input_text=payload.input_text,
-                    context=request_context,
-                    toolset=toolset,
-                    chat_history=recent_history_for_agent,
-                    emit=emit,
-                    db=db,
-                    capabilities=enabled_capabilities,
-                    readable_modules=", ".join(module_catalog.readable_names()) or None,
-                )
+                async with asyncio.timeout(settings.agent_turn_timeout_seconds):
+                    agent_result = await run_agent(
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        input_text=payload.input_text,
+                        context=request_context,
+                        toolset=toolset,
+                        chat_history=recent_history_for_agent,
+                        emit=emit,
+                        db=db,
+                        capabilities=enabled_capabilities,
+                        readable_modules=", ".join(module_catalog.readable_names()) or None,
+                    )
                 agent_result = normalize_agent_result_for_ui(agent_result)
-            except Exception as exc:
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Agent turn exceeded %.0fs deadline tenant=%s user=%s chat=%s",
+                    settings.agent_turn_timeout_seconds,
+                    tenant_id,
+                    user_id,
+                    chat.id,
+                )
+                timeout_message = (
+                    "Zpracování dotazu trvalo příliš dlouho a bylo přerušeno. "
+                    "Zkuste to prosím znovu nebo dotaz zjednodušte."
+                )
+                agent_result = {
+                    "output": timeout_message,
+                    "error": "agent_timeout",
+                    "status": "agent_timeout",
+                    "message_to_user": timeout_message,
+                }
+            except Exception:
                 logger.exception(
                     "Agent execution failed tenant=%s user=%s chat=%s",
                     tenant_id,
@@ -516,7 +536,7 @@ async def process_input_core(
                         "Akce nebyla provedena. "
                         "Zkontrolujte povinná pole a potvrďte akci znovu."
                     ),
-                    "error": str(exc),
+                    "error": "agent_error",
                     "status": "agent_error",
                     "message_to_user": (
                         "Nastala chyba při provedení akce v CRM. "

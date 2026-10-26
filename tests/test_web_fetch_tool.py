@@ -29,12 +29,78 @@ class DummyCrmClient:
 
 
 def test_validate_url_rejects_private_and_non_http_targets() -> None:
+    for bad in (
+        "http://127.0.0.1/admin",
+        "http://localhost:8080/",
+        "http://100.64.0.1/cgnat",
+        "http://10.0.0.5/",
+        "http://[::1]/",
+        "ftp://example.com/file",
+    ):
+        with pytest.raises(WebFetchError):
+            asyncio.run(_validate_url(bad))
+
+
+def test_validate_url_rejects_host_with_any_private_address(monkeypatch) -> None:
+    async def fake_getaddrinfo(self, host, port, **kwargs):
+        return [
+            (2, 1, 6, "", ("93.184.216.34", 0)),
+            (2, 1, 6, "", ("192.168.1.10", 0)),
+        ]
+
+    monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", fake_getaddrinfo)
     with pytest.raises(WebFetchError):
-        _validate_url("http://127.0.0.1/admin")
+        asyncio.run(_validate_url("http://mixed.example/"))
+
+
+def test_fetch_pins_validated_ip_and_keeps_host_header(monkeypatch) -> None:
+    async def fake_resolve(host):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(web_fetch, "_resolve_public_ips", fake_resolve)
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["host"] = request.url.host
+        seen["host_header"] = request.headers["host"]
+        return httpx.Response(200, headers={"content-type": "text/html"}, html="<p>hi</p>")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(web_fetch, "get_shared_http_client", lambda: client)
+    result = asyncio.run(web_fetch.fetch_page(url="https://acme.cz/x"))
+    assert seen == {"host": "93.184.216.34", "host_header": "acme.cz"}
+    assert result["text"] == "hi"
+
+
+def test_fetch_aborts_oversized_body_while_streaming(monkeypatch) -> None:
+    async def fake_resolve(host):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(web_fetch, "_resolve_public_ips", fake_resolve)
+    monkeypatch.setattr(web_fetch, "_MAX_BYTES", 1000)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/html"}, content=b"a" * 5000)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(web_fetch, "get_shared_http_client", lambda: client)
     with pytest.raises(WebFetchError):
-        _validate_url("http://localhost:8080/")
+        asyncio.run(web_fetch.fetch_page(url="https://acme.cz/big"))
+
+
+def test_fetch_revalidates_redirect_target(monkeypatch) -> None:
+    async def fake_resolve(host):
+        return ["93.184.216.34"] if host == "acme.cz" else None
+
+    monkeypatch.setattr(web_fetch, "_resolve_public_ips", fake_resolve)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "http://internal.corp/"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(web_fetch, "get_shared_http_client", lambda: client)
     with pytest.raises(WebFetchError):
-        _validate_url("ftp://example.com/file")
+        asyncio.run(web_fetch.fetch_page(url="https://acme.cz/"))
 
 
 def test_text_extractor_strips_scripts_and_collapses_whitespace() -> None:
@@ -59,7 +125,10 @@ def test_text_extractor_strips_scripts_and_collapses_whitespace() -> None:
 
 
 def test_web_fetch_tool_extracts_page_text(monkeypatch) -> None:
-    monkeypatch.setattr(web_fetch, "_is_public_host", lambda host: True)
+    async def fake_resolve(host):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(web_fetch, "_resolve_public_ips", fake_resolve)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

@@ -752,12 +752,13 @@ class CRMReadService:
                 "message_to_user": "CRM data se nepodařilo načíst. Zkuste to prosím znovu.",
                 "cards": [],
             }
-        except Exception as exc:
+        except Exception:
+            logger.exception("CRM data query failed query_type=%s", resolved_type)
             return {
                 "status": "crm_data_error",
                 "query_type": resolved_type,
                 "message_to_user": "Nastala chyba při načítání CRM dat.",
-                "error": str(exc),
+                "error": "internal_error",
                 "cards": [],
             }
 

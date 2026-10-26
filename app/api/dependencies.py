@@ -6,9 +6,13 @@ from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.security import verify_hmac_request
+from app.core.logging import get_logger
+from app.core.security import verify_hmac_request_async
 from app.services.tenant_manager import TenantManager
 from database.session import get_db
+
+
+logger = get_logger(__name__)
 
 
 class TenantContext(TypedDict):
@@ -36,15 +40,22 @@ async def get_tenant_context(
         raise HTTPException(status_code=401, detail="HMAC authentication required")
     if has_hmac_header:
         body = await request.body()
-        ok = verify_hmac_request(
-            method=request.method,
-            path=request.url.path,
-            original_path=x_original_uri or x_rewrite_url or x_forwarded_uri,
-            body=body,
-            authorization=authorization,
-            timestamp=x_timestamp,
-            nonce=x_nonce,
-        )
+        try:
+            ok = await verify_hmac_request_async(
+                method=request.method,
+                path=request.url.path,
+                original_path=x_original_uri or x_rewrite_url or x_forwarded_uri,
+                body=body,
+                authorization=authorization,
+                timestamp=x_timestamp,
+                nonce=x_nonce,
+                query=request.url.query,
+                tenant=x_tenant,
+                user_id=x_user_id,
+            )
+        except Exception:
+            logger.exception("HMAC nonce store unavailable")
+            raise HTTPException(status_code=503, detail="Authentication temporarily unavailable")
         if not ok:
             raise HTTPException(status_code=401, detail="Invalid HMAC signature")
 
@@ -69,10 +80,13 @@ async def get_stream_token_context(
     if auth_value.lower().startswith("bearer "):
         token = auth_value[len("bearer "):].strip()
         try:
-            from app.core.stream_token import validate_stream_token
-            identity = validate_stream_token(token, hmac_keys=settings.hmac_keys)
+            from app.core.stream_token import validate_stream_token_async
+            identity = await validate_stream_token_async(token, hmac_keys=settings.hmac_keys)
         except ValueError as exc:
             raise HTTPException(status_code=401, detail=f"Invalid stream token: {exc}")
+        except Exception:
+            logger.exception("Stream token nonce store unavailable")
+            raise HTTPException(status_code=503, detail="Authentication temporarily unavailable")
         tenant_id = identity["tenant"]
         user_id = identity["user_id"]
         user_name = identity["user_name"] or None
@@ -89,3 +103,14 @@ async def get_stream_token_context(
     tenant_manager = TenantManager(db)
     await tenant_manager.assert_user_access(tenant_id=tenant_id, user_id=user_id)
     return {"tenant_id": tenant_id, "user_id": user_id, "user_name": user_name}
+
+
+async def get_skills_admin_context(
+    ctx: TenantContext = Depends(get_tenant_context),
+) -> TenantContext:
+    """Tenant-scope skill management: user must be on SKILLS_ADMIN_USER_IDS
+    (entries are ``user`` or ``tenant:user``). Empty list denies everyone."""
+    admins = get_settings().skills_admin_ids
+    if ctx["user_id"] in admins or f"{ctx['tenant_id']}:{ctx['user_id']}" in admins:
+        return ctx
+    raise HTTPException(status_code=403, detail="Skills administrator role required")

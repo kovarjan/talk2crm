@@ -30,8 +30,10 @@ class ToolAnnotations:
 
     @property
     def needs_confirmation(self) -> bool:
-        # Destructive tools are always confirmed — a floor the gateway enforces itself.
-        return not self.read_only and (self.requires_confirmation or self.destructive)
+        # Floor the gateway enforces itself: anything not declared readOnlyHint is a
+        # write (MCP default) and goes through preview -> confirmation, whether or not
+        # the manifest also says requiresConfirmation/destructiveHint.
+        return not self.read_only
 
     @classmethod
     def from_manifest(cls, raw: dict[str, Any] | None) -> "ToolAnnotations":

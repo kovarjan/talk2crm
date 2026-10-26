@@ -159,7 +159,7 @@ class CRMAggregateService:
                 metric=request.metric,
                 module=request.module,
                 record_count=0,
-                error=str(exc),
+                error="CRM data se nepodařilo načíst",
             )
 
         filtered_records, status_notes = self._apply_status_filter(records, request)
