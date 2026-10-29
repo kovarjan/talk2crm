@@ -58,6 +58,7 @@ database/
   migrations/001_init.sql
 scripts/
   create_tenant.py
+  onboard_tenant.py
   check_tool_manifests.py  # cutover readiness: every tenant serves ai/tools
 requirements.txt
 requirements.gpu.txt   # NVIDIA wheels — install only on GPU hosts
@@ -116,6 +117,22 @@ docker run -d --name talk2crm-qdrant \
 Web UI for Qdrant is available at `http://localhost:6333/dashboard`
 
 4. Seed first tenant:
+
+**Wizard (recommended):** asks for tenant id, name, Coripo URL and gateway URL, generates the HMAC secret,
+saves the tenant in the DB, optionally adds the key to this repo's `.env` (`HMAC_KEYS_JSON`) and prints the
+`AI_GATEWAY_*` block to paste into the Coripo (`rest_coripo`) `.env`:
+
+```bash
+python scripts/onboard_tenant.py
+# non-interactive:
+python scripts/onboard_tenant.py --tenant-id acme-cz --name "Acme" \
+  --crm-base-url https://crm.acme.cz/public --gateway-url https://ai.example.com --write-env --yes
+```
+
+Re-running for an existing tenant reuses its secret (re-prints the Coripo settings); `--rotate-secret` issues a new one.
+Restart the API after the `.env` change.
+
+**Manual:**
 
 ```bash
 python scripts/create_tenant.py \

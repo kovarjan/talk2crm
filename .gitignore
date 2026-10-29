@@ -155,3 +155,4 @@ out/
 
 # Git worktrees
 .worktrees/
+.superpowers/
