@@ -94,7 +94,6 @@ cp .env.example .env
 |---|---|
 | `TENANT_SECRET_KEY` | Fernet key for CRM token encryption. Generate: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | `DATABASE_URL` | PostgreSQL connection string (`postgresql+asyncpg://...`) |
-| `HMAC_KEYS_JSON` | JSON map of `{ "key-id": "secret" }` for M2M auth |
 | `CRM_MODE` | `on` or `off` (default `on`) |
 
 The app **refuses to start** if `TENANT_SECRET_KEY` is still the placeholder value.
@@ -118,19 +117,26 @@ Web UI for Qdrant is available at `http://localhost:6333/dashboard`
 
 4. Seed first tenant:
 
-**Wizard (recommended):** asks for tenant id, name, Coripo URL and gateway URL, generates the HMAC secret,
-saves the tenant in the DB, optionally adds the key to this repo's `.env` (`HMAC_KEYS_JSON`) and prints the
-`AI_GATEWAY_*` block to paste into the Coripo (`rest_coripo`) `.env`:
+**Wizard (recommended):** asks for tenant id, name, Coripo REST URL and gateway URL, generates the HMAC secret,
+stores the tenant (secret encrypted) in the DB and prints the `AI_GATEWAY_*` block to paste into the Coripo
+(`rest_coripo`) `.env`. Then it tests the connection (HMAC login + tool manifest) and offers to ingest the
+tenant's data into RAG. All per-tenant config, including the HMAC key, lives in the DB: nothing to add to this
+repo's `.env`, no restart.
 
 ```bash
 python scripts/onboard_tenant.py
 # non-interactive:
 python scripts/onboard_tenant.py --tenant-id acme-cz --name "Acme" \
-  --crm-base-url https://crm.acme.cz/public --gateway-url https://ai.example.com --write-env --yes
+  --crm-base-url https://rest-acme.coripo.cloud/public --gateway-url https://ai-gateway.coripo.app \
+  --test-user-id 1 --ingest Contacts,Accounts,Meetings --yes
 ```
 
-Re-running for an existing tenant reuses its secret (re-prints the Coripo settings); `--rotate-secret` issues a new one.
-Restart the API after the `.env` change.
+- `CRM base url` is the Coripo **REST** host (`https://rest-<name>.coripo.cloud/public`), not the web UI.
+- `Gateway url` is the bare origin Coripo calls (no `/v1`).
+- Re-running for an existing tenant reuses its secret (re-prints the Coripo settings); `--rotate-secret` issues a
+  new one; `--secret` sets a specific one (e.g. migrating a secret that used to be in `HMAC_KEYS_JSON`).
+- Inbound requests are verified with the key of the tenant named in `X-Tenant`, so a tenant's key can only act
+  for that tenant.
 
 **Manual:**
 
@@ -158,9 +164,8 @@ python scripts/create_tenant.py \
 ```
 
 For Coripo:
-- set `CORIPO_HMAC_KEY_ID` in `.env` (default `your-tenant-id`)
 - `--crm-token` can be:
-`HMAC secret` (plain string), or JSON:
+`HMAC secret` (plain string; the tenant id becomes the key id), or JSON:
 `'{"mode":"coripo_public","hmac_key_id":"your-tenant-id","hmac_secret":"...","session_id":"optional-sid","user_id":"YOUR_USER_ID","user_name":"your-username"}'`
 - send `X-User-Id` on API requests (must be Coripo user id)
 - if Coripo enforces username checks, set `user_name` in tenant token JSON
@@ -169,7 +174,7 @@ Coripo FE (`rest_coripo`) bridge wiring for local development:
 - in `rest_coripo/.env`: `AI_GATEWAY_URL='http://host.docker.internal:8011'`
 - in `rest_coripo/.env`: `AI_GATEWAY_TENANT='ai-local'`
 - in `rest_coripo/.env`: `AI_GATEWAY_HMAC_KEY_ID='your-tenant-id'` and matching `AI_GATEWAY_HMAC_SECRET`
-- in `talk2crm/.env`: `HMAC_KEYS_JSON={"your-tenant-id":"<same-secret-as-rest_coripo>"}`
+- the same secret must be the tenant's `hmac_secret` in the gateway DB (the wizard does this)
 - recreate php container after `.env` change: `docker compose -f docker-compose.yml up -d php`
 
 5. Open API docs:
@@ -235,7 +240,7 @@ Runs API + PostgreSQL + Qdrant with production-oriented defaults (no hot reload,
 cp .env.production.example .env
 ```
 
-2. Set strong secrets in `.env` (`POSTGRES_PASSWORD`, `TENANT_SECRET_KEY`, `HMAC_KEYS_JSON`, CORS origins).
+2. Set strong secrets in `.env` (`POSTGRES_PASSWORD`, `TENANT_SECRET_KEY`, CORS origins); tenants and their HMAC keys are added with `scripts/onboard_tenant.py`.
 
 3. Start production stack:
 

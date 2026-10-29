@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 from app.core.config import get_settings
+from app.core.crm_token import parse_crm_token
 from app.core.http import get_shared_http_client
 from app.core.logging import get_logger, redact_for_log
 from app.utils.modules import canonical_module_name
@@ -56,18 +57,10 @@ class CoripoClient:
         self.user_id = str(user_id or self._auth_config.get("user_id") or "").strip() or None
         self.user_name = str(user_name or self._auth_config.get("user_name") or "").strip() or None
 
-        self.coripo_hmac_key_id = str(
-            self._auth_config.get("hmac_key_id") or settings.coripo_hmac_key_id
-        ).strip()
+        # Key id + secret come only from the tenant's stored token (TenantManager
+        # normalizes legacy tokens so the key id is always present).
+        self.coripo_hmac_key_id = str(self._auth_config.get("hmac_key_id") or "").strip()
         self.coripo_hmac_secret = str(self._auth_config.get("hmac_secret") or "").strip()
-        if not self.coripo_hmac_secret:
-            fallback_secret = str(settings.hmac_keys.get(self.coripo_hmac_key_id) or "").strip()
-            if fallback_secret:
-                self.coripo_hmac_secret = fallback_secret
-                logger.warning(
-                    "CoripoClient using HMAC secret fallback from HMAC_KEYS_JSON for key_id=%s",
-                    self.coripo_hmac_key_id,
-                )
         self.clean_response_default = bool(self._auth_config.get("clean_response", True))
         self._coripo_session_id = str(
             self._auth_config.get("session_id")
@@ -77,15 +70,6 @@ class CoripoClient:
 
         if self._is_uuid(self.token):
             self._coripo_session_id = self.token
-        elif ":" in self.token and not self.token.startswith("{"):
-            # "keyId:secret" compact token format.
-            kid, secret = self.token.split(":", 1)
-            if kid.strip() and secret.strip():
-                self.coripo_hmac_key_id = kid.strip()
-                self.coripo_hmac_secret = secret.strip()
-        elif self.token and not self.token.startswith("{") and not self.coripo_hmac_secret:
-            # Plain token means HMAC secret for convenience.
-            self.coripo_hmac_secret = self.token
 
         # Prefer a fresh HMAC-derived SID over any pre-configured static one.
         # Static SIDs may have limited scope or become stale after a server restart;
@@ -102,35 +86,7 @@ class CoripoClient:
 
     @staticmethod
     def _parse_auth_config(token: str) -> dict[str, Any]:
-        if not token:
-            return {}
-        if token.startswith("{"):
-            try:
-                parsed = json.loads(token)
-                if isinstance(parsed, dict):
-                    # Compatibility: allow {"keyId":"secret"} mapping shape.
-                    if "hmac_secret" not in parsed and "session_id" not in parsed and "sid" not in parsed:
-                        if len(parsed) == 1:
-                            only_key = next(iter(parsed.keys()))
-                            only_val = parsed.get(only_key)
-                            if str(only_key).strip() and str(only_val or "").strip():
-                                return {
-                                    "mode": "coripo_public",
-                                    "hmac_key_id": str(only_key).strip(),
-                                    "hmac_secret": str(only_val).strip(),
-                                }
-                    return parsed
-            except json.JSONDecodeError:
-                return {}
-        if ":" in token:
-            key_id, secret = token.split(":", 1)
-            if key_id.strip() and secret.strip():
-                return {
-                    "mode": "coripo_public",
-                    "hmac_key_id": key_id.strip(),
-                    "hmac_secret": secret.strip(),
-                }
-        return {}
+        return parse_crm_token(token)
 
     def _coripo_api_base(self) -> str:
         base = self.base_url.rstrip("/")
@@ -145,7 +101,7 @@ class CoripoClient:
         return f"{base}/public"
 
     def _can_use_hmac(self) -> bool:
-        return bool(self.coripo_hmac_secret and self.user_id)
+        return bool(self.coripo_hmac_key_id and self.coripo_hmac_secret and self.user_id)
 
     def _build_coripo_hmac_headers(
         self, body_bytes: bytes, *, method: str = "", path: str = "", query: str = ""

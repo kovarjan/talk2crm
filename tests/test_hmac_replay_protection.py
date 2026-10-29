@@ -22,7 +22,6 @@ SECRET = "test-secret-1234567890"
 
 def _fake_settings():
     return SimpleNamespace(
-        hmac_keys={KEY_ID: SECRET},
         hmac_max_skew_seconds=300,
     )
 
@@ -44,6 +43,7 @@ def _signed_request(*, nonce: str, timestamp: str | None = None, secret: str = S
         "authorization": f"HMAC keyId={KEY_ID}, signature={signature}",
         "timestamp": ts,
         "nonce": nonce,
+        "keys": {KEY_ID: SECRET},
     }
 
 

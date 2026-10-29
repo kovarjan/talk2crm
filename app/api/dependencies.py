@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.core.security import verify_hmac_request_async
+from app.core.security import parse_hmac_authorization, verify_hmac_request_async
 from app.services.tenant_manager import TenantManager
 from database.session import get_db
 
@@ -38,8 +38,18 @@ async def get_tenant_context(
     has_hmac_header = auth_value.lower().startswith("hmac")
     if get_settings().require_hmac and not has_hmac_header:
         raise HTTPException(status_code=401, detail="HMAC authentication required")
+    tenant_manager = TenantManager(db)
     if has_hmac_header:
         body = await request.body()
+        # The signing secret is the claimed tenant's own key from the DB, so a key
+        # can only ever act for its tenant (no global key table, no env config).
+        parsed_header = parse_hmac_authorization(auth_value)
+        secret = (
+            await tenant_manager.get_hmac_secret(x_tenant, parsed_header.key_id)
+            if parsed_header
+            else None
+        )
+        keys = {parsed_header.key_id: secret} if parsed_header and secret else {}
         try:
             ok = await verify_hmac_request_async(
                 method=request.method,
@@ -52,6 +62,7 @@ async def get_tenant_context(
                 query=request.url.query,
                 tenant=x_tenant,
                 user_id=x_user_id,
+                keys=keys,
             )
         except Exception:
             logger.exception("HMAC nonce store unavailable")
@@ -59,7 +70,6 @@ async def get_tenant_context(
         if not ok:
             raise HTTPException(status_code=401, detail="Invalid HMAC signature")
 
-    tenant_manager = TenantManager(db)
     await tenant_manager.assert_user_access(tenant_id=x_tenant, user_id=x_user_id)
 
     return {"tenant_id": x_tenant, "user_id": x_user_id, "user_name": x_user_name}
@@ -80,8 +90,13 @@ async def get_stream_token_context(
     if auth_value.lower().startswith("bearer "):
         token = auth_value[len("bearer "):].strip()
         try:
-            from app.core.stream_token import validate_stream_token_async
-            identity = await validate_stream_token_async(token, hmac_keys=settings.hmac_keys)
+            from app.core.stream_token import peek_stream_token_claims, validate_stream_token_async
+            claims = peek_stream_token_claims(token)
+            key_id = str(claims.get("key_id", ""))
+            secret = await TenantManager(db).get_hmac_secret(str(claims.get("tenant", "")), key_id)
+            identity = await validate_stream_token_async(
+                token, hmac_keys={key_id: secret} if secret else {}
+            )
         except ValueError as exc:
             raise HTTPException(status_code=401, detail=f"Invalid stream token: {exc}")
         except Exception:

@@ -114,7 +114,6 @@ def _security_flags() -> dict[str, Any]:
         "require_hmac": settings.require_hmac,
         "bind_identity": settings.hmac_bind_identity,
         "nonce_store": (settings.hmac_nonce_store or "auto"),
-        "key_tenant_restrictions": bool(settings.hmac_key_tenants),
     }
 
 

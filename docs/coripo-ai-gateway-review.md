@@ -16,7 +16,7 @@ expands it), `improvement-suggestions.md` (Python side).
 > **⚠️ Action required before/at deploy:**
 > 1. **Rotate the `acmark-ai` HMAC secret** — it is in the coripo git history (3+ commits) and in
 >    both deployments' configs. Generate a new one, update `AI_GATEWAY_HMAC_KEY_ID`/`_SECRET`
->    (PHP env) and `HMAC_KEYS_JSON`/`CORIPO_TEST_TOKEN` (talk2api2 `.env`).
+>    (PHP env) and the tenant's `hmac_secret` in the talk2api2 DB (`scripts/onboard_tenant.py`; the old `HMAC_KEYS_JSON`/`CORIPO_TEST_TOKEN` env keys no longer exist).
 > 2. Set `AI_ALLOWED_ORIGINS` if any browser calls `/ai/*` cross-origin (the CRM widget is
 >    same-origin via `site/public`, so likely none).
 > 3. Any caller of `POST /ai/v1/command` must now send valid HMAC headers (it previously worked

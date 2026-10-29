@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.crm_token import build_crm_token, parse_crm_token
 from app.core.security import decrypt_tenant_secret
 from database.models import Tenant
 
@@ -50,40 +51,23 @@ class TenantManager:
     def _is_uuid_like(value: str | None) -> bool:
         return bool(value and _UUID_RE.match(value.strip()))
 
-    @staticmethod
-    def _parse_token_json(token: str) -> dict | None:
+    @classmethod
+    def _normalize_token(cls, tenant_id: str, token: str) -> str:
+        """Make the stored token self-describing: a legacy plain-secret token or a
+        JSON token without ``hmac_key_id`` gets the tenant id as its key id, so the
+        key id never has to come from process-wide env config."""
         raw = str(token or "").strip()
-        if not raw.startswith("{"):
-            return None
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return None
-        return parsed if isinstance(parsed, dict) else None
-
-    def _resolve_effective_crm_token(self, token: str) -> str:
-        fallback = str(self.settings.coripo_test_token or "").strip()
-        if not fallback:
-            return token
-        parsed = self._parse_token_json(token)
-        has_static_sid = self._is_uuid_like(token)
-        has_hmac_secret = False
-        if parsed is not None:
-            sid_value = str(parsed.get("session_id") or parsed.get("sid") or "").strip()
-            has_static_sid = has_static_sid or bool(sid_value)
-            has_hmac_secret = bool(str(parsed.get("hmac_secret") or "").strip())
-        else:
-            # Plain non-JSON token is interpreted by CoripoClient as HMAC secret.
-            has_hmac_secret = not has_static_sid and bool(str(token or "").strip())
-
-        if has_hmac_secret and not has_static_sid:
-            return token
-
-        logger.warning(
-            "Tenant token is SID-style or missing HMAC secret; using CORIPO_TEST_TOKEN fallback in environment=%s",
-            self.settings.environment,
-        )
-        return fallback
+        if not raw or cls._is_uuid_like(raw):
+            return raw
+        parsed = parse_crm_token(raw)
+        if parsed:
+            if parsed.get("hmac_secret") and not str(parsed.get("hmac_key_id") or "").strip():
+                return json.dumps({**parsed, "hmac_key_id": tenant_id}, separators=(",", ":"))
+            return raw
+        if raw.startswith("{"):
+            return raw
+        # Plain non-JSON token is an HMAC secret.
+        return build_crm_token(tenant_id, raw)
 
     async def get_tenant(self, tenant_id: str) -> Tenant:
         stmt = select(Tenant).where(Tenant.id == tenant_id, Tenant.active.is_(True))
@@ -108,7 +92,7 @@ class TenantManager:
 
         tenant = await self.get_tenant(tenant_id)
         token = decrypt_tenant_secret(tenant.crm_token_encrypted)
-        token = self._resolve_effective_crm_token(token)
+        token = self._normalize_token(tenant.id, token)
         credentials = TenantCredentials(
             tenant_id=tenant.id,
             crm_base_url=tenant.crm_base_url.rstrip("/"),
@@ -118,6 +102,25 @@ class TenantManager:
         if ttl > 0:
             _CREDENTIALS_CACHE[tenant_id] = (time.monotonic() + ttl, credentials)
         return credentials
+
+    async def get_hmac_secret(self, tenant_id: str, key_id: str) -> str | None:
+        """Secret for ``key_id`` iff it is this tenant's own key (inbound HMAC auth).
+
+        Unknown/inactive tenant, undecryptable token or a different key id all yield
+        None, so the caller just reports an invalid signature.
+        """
+        try:
+            credentials = await self.get_credentials(tenant_id)
+        except HTTPException:
+            return None
+        except ValueError:
+            logger.error("Cannot decrypt CRM token for tenant=%s (wrong TENANT_SECRET_KEY?)", tenant_id)
+            return None
+        config = parse_crm_token(credentials.crm_token)
+        secret = str(config.get("hmac_secret") or "").strip()
+        if not secret or str(config.get("hmac_key_id") or "").strip() != key_id:
+            return None
+        return secret
 
     async def assert_user_access(self, tenant_id: str, user_id: str) -> None:
         # NOTE: User-level authorization is intentionally NOT enforced here.

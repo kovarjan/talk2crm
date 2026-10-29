@@ -37,6 +37,19 @@ def create_stream_token(
     return f"{payload_b64}.{sig}"
 
 
+def peek_stream_token_claims(token: str) -> dict[str, Any]:
+    """Decode the payload WITHOUT verifying it, only to learn which tenant/key to
+    load the secret for. Never trust the result before ``validate_stream_token*``."""
+    try:
+        payload_b64, _sig = token.rsplit(".", 1)
+        payload = json.loads(base64.b64decode(payload_b64).decode("utf-8"))
+    except Exception:
+        raise ValueError("Malformed token: cannot decode payload")
+    if not isinstance(payload, dict):
+        raise ValueError("Malformed token: cannot decode payload")
+    return payload
+
+
 def _verify_stream_token(token: str, *, hmac_keys: dict[str, str]) -> tuple[dict[str, Any], str]:
     """Decode and verify signature/expiry/key-tenant binding (no nonce use)."""
     try:
@@ -65,10 +78,6 @@ def _verify_stream_token(token: str, *, hmac_keys: dict[str, str]) -> tuple[dict
     if int(time.time()) > int(payload.get("exp", 0)):
         raise ValueError("Token expired")
 
-    from app.core.security import tenant_allowed_for_key
-
-    if not tenant_allowed_for_key(key_id, str(payload.get("tenant", ""))):
-        raise ValueError("Key not allowed for tenant")
     return payload, key_id
 
 

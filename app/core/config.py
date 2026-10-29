@@ -101,9 +101,6 @@ class Settings(BaseSettings):
     web_fetch_max_chars: int = 6000
     web_fetch_timeout_seconds: float = 10.0
 
-    coripo_hmac_key_id: str = "your-tenant-id"
-    # Dev-only shortcut credential; startup is refused in production when set.
-    coripo_test_token: str = ""
     # How long an HMAC-derived Coripo SID is reused across requests (0 disables
     # the cache and restores one hmac-login per request).
     coripo_sid_cache_ttl_seconds: float = 600.0
@@ -162,11 +159,9 @@ class Settings(BaseSettings):
     audio_max_upload_bytes: int = 25 * 1024 * 1024
     audio_max_concurrent_transcriptions: int = 2
 
-    hmac_keys_json: str = Field(default="{}")
+    # Per-tenant HMAC key id + secret are NOT configured here: they live in each
+    # tenant's encrypted CRM token in the DB (scripts/onboard_tenant.py).
     hmac_max_skew_seconds: int = 300
-    # Optional JSON map key id -> list of tenant ids that key may act for, e.g.
-    # {"kid-1": ["acme", "globex"]}. Unset keeps "any key, any tenant" (warned).
-    hmac_key_tenants_json: str = Field(default="{}")
     # When true the signed string also covers the query string, X-Tenant and
     # X-User-Id (see app/core/security.py). Clients MUST sign the same fields,
     # so gateway and CRM client have to be upgraded together before enabling.
@@ -239,8 +234,6 @@ class Settings(BaseSettings):
         problems: list[str] = []
         if not self.require_hmac:
             problems.append("REQUIRE_HMAC must be true")
-        if self.coripo_test_token:
-            problems.append("CORIPO_TEST_TOKEN must not be set")
         if "*" in self.cors_allow_origins:
             problems.append("CORS_ALLOW_ORIGINS must list explicit origins (not '*')")
         if problems:
@@ -270,30 +263,8 @@ class Settings(BaseSettings):
         return {str(item).strip() for item in items if str(item).strip()}
 
     @property
-    def hmac_key_tenants(self) -> dict[str, list[str]]:
-        try:
-            parsed = json.loads(self.hmac_key_tenants_json)
-        except json.JSONDecodeError:
-            return {}
-        if not isinstance(parsed, dict):
-            return {}
-        return {
-            str(kid): [str(t) for t in tenants]
-            for kid, tenants in parsed.items()
-            if isinstance(tenants, list)
-        }
-
-    @property
     def cache_audio_dir(self) -> Path:
         return Path(self.cache_dir) / "audio"
-
-    @property
-    def hmac_keys(self) -> dict[str, str]:
-        try:
-            parsed = json.loads(self.hmac_keys_json)
-        except json.JSONDecodeError:
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
 
     @property
     def read_service_v2_active(self) -> bool:

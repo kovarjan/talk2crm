@@ -37,10 +37,8 @@ TENANT_KEY = "x" * 32
 
 def _settings(**overrides):
     base = dict(
-        hmac_keys={KEY_ID: SECRET},
         hmac_max_skew_seconds=300,
         hmac_bind_identity=False,
-        hmac_key_tenants={},
         hmac_nonce_store="memory",
         environment="dev",
         require_hmac=False,
@@ -64,6 +62,7 @@ def _sign(*, bound: bool, query="", tenant="t1", user="u1", body=b"{}", path="/x
         method=method, path=path, original_path=None, body=body,
         authorization=f"HMAC keyId={KEY_ID}, signature={sig}",
         timestamp=ts, nonce=nonce, query=query, tenant=tenant, user_id=user,
+        keys={KEY_ID: SECRET},
     )
 
 
@@ -88,12 +87,11 @@ def test_bound_signature_accepted_and_tamper_detected(monkeypatch) -> None:
         assert security.verify_hmac_request(**req) is False
 
 
-def test_key_tenant_mapping_restricts_tenants(monkeypatch) -> None:
-    monkeypatch.setattr(
-        security, "get_settings", lambda: _settings(hmac_key_tenants={KEY_ID: ["t1"]})
-    )
-    assert security.verify_hmac_request(**_sign(bound=True, tenant="t1")) is True
-    assert security.verify_hmac_request(**_sign(bound=True, tenant="t2")) is False
+def test_unknown_key_or_wrong_secret_rejected(monkeypatch) -> None:
+    monkeypatch.setattr(security, "get_settings", lambda: _settings())
+    req = _sign(bound=True)
+    assert security.verify_hmac_request(**{**req, "keys": {}}) is False
+    assert security.verify_hmac_request(**{**req, "keys": {KEY_ID: "other-secret"}}) is False
 
 
 def test_async_verify_uses_shared_store_and_rejects_replay(monkeypatch) -> None:
@@ -204,8 +202,6 @@ def test_production_requires_hmac_and_explicit_cors_and_no_test_token() -> None:
     assert _prod().qdrant_allow_local_fallback is False
     with pytest.raises(ValueError):
         _prod(require_hmac=False)
-    with pytest.raises(ValueError):
-        _prod(coripo_test_token="tok")
     with pytest.raises(ValueError):
         _prod(cors_allow_origins=["*"])
     # Explicit opt-in still honoured.

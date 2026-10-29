@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -78,21 +79,6 @@ def decrypt_tenant_secret(cipher_text: str) -> str:
         raise ValueError("Unable to decrypt tenant secret") from exc
 
 
-def tenant_allowed_for_key(key_id: str, tenant: str | None) -> bool:
-    """Enforce the optional key -> tenants mapping (unset = unrestricted)."""
-    mapping = getattr(get_settings(), "hmac_key_tenants", None) or {}
-    if not mapping:
-        _warn_once(
-            "key_tenants",
-            "HMAC_KEY_TENANTS_JSON is not set: any valid HMAC key may act for any tenant",
-        )
-        return True
-    allowed = mapping.get(key_id)
-    if allowed is None:
-        return False
-    return bool(tenant) and tenant in allowed
-
-
 def _signing_inputs(
     *,
     method: str,
@@ -123,11 +109,14 @@ def _verify_signature(
     authorization: str | None,
     timestamp: str | None,
     nonce: str | None,
+    keys: Mapping[str, str],
     query: str = "",
     tenant: str | None = None,
     user_id: str | None = None,
 ) -> ParsedHmacHeader | None:
-    """Check signature, skew and tenant binding. Does NOT touch the nonce store."""
+    """Check signature and skew against ``keys`` (key id -> secret, loaded from the
+    tenant named in the request, so a key can only act for its own tenant).
+    Does NOT touch the nonce store."""
     settings = get_settings()
     parsed = parse_hmac_authorization(authorization or "")
     if not parsed:
@@ -144,7 +133,7 @@ def _verify_signature(
     if abs(now - ts) > settings.hmac_max_skew_seconds:
         return None
 
-    key = settings.hmac_keys.get(parsed.key_id)
+    key = keys.get(parsed.key_id)
     if not key:
         return None
 
@@ -197,8 +186,6 @@ def _verify_signature(
                         "HMAC request signed without X-Tenant/X-User-Id/query binding "
                         "(set HMAC_BIND_IDENTITY=true once clients sign them)",
                     )
-                if not tenant_allowed_for_key(parsed.key_id, tenant):
-                    return None
                 return parsed
     return None
 
@@ -212,6 +199,7 @@ def verify_hmac_request(
     authorization: str | None,
     timestamp: str | None,
     nonce: str | None,
+    keys: Mapping[str, str],
     query: str = "",
     tenant: str | None = None,
     user_id: str | None = None,
@@ -220,7 +208,7 @@ def verify_hmac_request(
     parsed = _verify_signature(
         method=method, path=path, original_path=original_path, body=body,
         authorization=authorization, timestamp=timestamp, nonce=nonce,
-        query=query, tenant=tenant, user_id=user_id,
+        keys=keys, query=query, tenant=tenant, user_id=user_id,
     )
     if parsed is None:
         return False
