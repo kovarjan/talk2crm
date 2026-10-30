@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     # wall-clock deadline for one agent turn (all iterations together).
     llm_request_timeout_seconds: float = 60.0
     llm_max_retries: int = 1
+    # Tool-call rounds per chat turn before the agent must answer from what it has.
+    agent_max_iterations: int = 10
     agent_turn_timeout_seconds: float = 180.0
     llm_context_window_tokens: int = 32768
     llm_system_prompt_prefix: str = "/nothink"

@@ -321,6 +321,25 @@ async def _capture_skill_in_background(
         )
 
 
+async def _answer_from_gathered_data(llm: Any, messages: list[Any], tenant_id: str) -> str:
+    """One last tool-free call after the iteration cap. Empty string = fall back to the
+    last tool result."""
+    prompt = (
+        "Limit volání nástrojů byl vyčerpán. Nevolej žádné další nástroje. Odpověz nyní uživateli "
+        "v <answer> pouze na základě dosud získaných výsledků a výslovně uveď, co se nepodařilo zjistit."
+    )
+    try:
+        response = await llm.ainvoke([*messages, HumanMessage(content=prompt)])
+    except Exception as exc:
+        logger.warning("tenant=%s forced final answer failed: %s", tenant_id, exc)
+        return ""
+    content = strip_think_tags(str(getattr(response, "content", "") or ""))
+    if not content or _TOOL_CALL_RE.search(content):
+        return ""
+    match = _ANSWER_RE.search(content)
+    return (match.group(1) if match else content).strip()
+
+
 async def run_agent(
     *,
     tenant_id: str,
@@ -357,7 +376,7 @@ async def run_agent(
     seq = 0
     if emit:
         seq += 1
-        await emit(StreamEvent("agent.started", {"iteration_limit": 6}, seq=seq))
+        await emit(StreamEvent("agent.started", {"iteration_limit": settings.agent_max_iterations}, seq=seq))
 
     settings = get_settings()
     # No bind_tools — LiteLLM strips tool parameter schemas when forwarding to Ollama,
@@ -440,9 +459,9 @@ async def run_agent(
     intermediate_steps: list[dict[str, Any]] = []
     final_answer = ""
 
-    # 6 iterations matches LangChain AgentExecutor's default; prevents runaway
-    # tool-call loops when the LLM fails to emit a final answer.
-    for iteration in range(6):
+    # Bounded (agent_max_iterations) to prevent runaway tool-call loops; thorough models
+    # spend rounds on retries and extra lookups, so hitting the cap forces an answer below.
+    for iteration in range(settings.agent_max_iterations):
         try:
             if emit:
                 _stream_state = AnswerStreamState()
@@ -562,6 +581,12 @@ async def run_agent(
         # Plain text response with no tags — use as final answer
         final_answer = content
         break
+    else:
+        # Cap reached while the model was still calling tools: make it answer from the
+        # results it already has instead of surfacing the last raw tool summary.
+        logger.warning("tenant=%s Agent hit the %d-iteration cap; forcing a final answer",
+                       tenant_id, settings.agent_max_iterations)
+        final_answer = await _answer_from_gathered_data(llm, messages, tenant_id)
 
     if not final_answer:
         # Synthesize from last tool result if available
