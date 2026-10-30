@@ -105,7 +105,7 @@ async def generate_chat_name_with_llm(
             base_url=llm_config.base_url,
             api_key=llm_config.api_key,
             model=model_name,
-            temperature=0.0,
+            temperature=llm_config.temp(0.0),
             max_tokens=200,
         )
         try:

@@ -89,12 +89,14 @@ class SkillCaptureService:
         llm_base_url: str,
         llm_model: str,
         llm_api_key: str = "EMPTY",
+        llm_temperature: float | None = None,
     ) -> None:
         self._skill_svc = skill_service
         self._settings = settings
         self._llm_url = llm_base_url.rstrip("/") + "/chat/completions"
         self._llm_model = llm_model
         self._llm_api_key = llm_api_key
+        self._llm_temperature = 0.1 if llm_temperature is None else llm_temperature
 
     async def maybe_capture(
         self,
@@ -160,20 +162,21 @@ class SkillCaptureService:
 
         try:
             client = get_shared_http_client()
-            resp = await client.post(
-                self._llm_url,
-                headers={"Authorization": f"Bearer {self._llm_api_key}"},
-                timeout=15.0,
-                json={
-                    "model": self._llm_model,
-                    "max_tokens": 400,
-                    "temperature": 0.1,
-                    "messages": [
-                        {"role": "system", "content": _DISTILL_SYSTEM},
-                        {"role": "user", "content": prompt},
-                    ],
-                },
-            )
+            body = {
+                "model": self._llm_model,
+                "max_tokens": 400,
+                "temperature": self._llm_temperature,
+                "messages": [
+                    {"role": "system", "content": _DISTILL_SYSTEM},
+                    {"role": "user", "content": prompt},
+                ],
+            }
+            headers = {"Authorization": f"Bearer {self._llm_api_key}"}
+            resp = await client.post(self._llm_url, headers=headers, timeout=15.0, json=body)
+            if resp.status_code == 400 and "temperature" in resp.text.lower():
+                # Reasoning models only accept the default temperature.
+                body.pop("temperature")
+                resp = await client.post(self._llm_url, headers=headers, timeout=15.0, json=body)
             resp.raise_for_status()
             data = resp.json()
             raw = data["choices"][0]["message"]["content"].strip()

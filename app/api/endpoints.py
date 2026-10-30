@@ -176,7 +176,7 @@ async def generate(
         base_url=llm_config.base_url,
         api_key=llm_config.api_key,
         model=llm_config.model,
-        temperature=settings.llm_temperature,
+        temperature=llm_config.temp(settings.llm_temperature),
         max_tokens=payload.max_tokens or 2048,
     )
     messages: list = []

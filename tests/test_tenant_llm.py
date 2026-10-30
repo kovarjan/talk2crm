@@ -76,12 +76,13 @@ def _session(row):
 
 @pytest.mark.asyncio
 async def test_resolve_reads_tenant_row_and_caches():
-    db = _session(("http://litellm:4000/v1", "sk-t", "qwen3", None))
+    db = _session(("http://litellm:4000/v1", "sk-t", "qwen3", None, 1.0))
     with patch.object(tenant_llm, "get_settings", return_value=SETTINGS):
         first = await resolve_llm_config("t1", db=db)
         second = await resolve_llm_config("t1", db=db)
     assert first is second
     assert first.base_url == "http://litellm:4000/v1" and first.api_key == "sk-t"
+    assert first.temperature == 1.0
     assert db.execute.await_count == 1
 
 
@@ -90,3 +91,15 @@ async def test_resolve_without_tenant_or_row_is_system_default_without_db():
     with patch.object(tenant_llm, "get_settings", return_value=SETTINGS):
         assert await resolve_llm_config(None) == default_llm_config(SETTINGS)
         assert await resolve_llm_config("missing", db=_session(None)) == default_llm_config(SETTINGS)
+
+
+def test_temperature_override_applies_on_both_endpoint_kinds():
+    own = build_llm_config(SETTINGS, base_url="http://litellm:4000/v1", temperature=0.0)
+    system = build_llm_config(SETTINGS, model="other-model", temperature=0.7)
+    assert own.temp(0.3) == 0.0 and system.temp(0.3) == 0.7
+
+
+def test_no_temperature_override_keeps_each_calls_default():
+    config = build_llm_config(SETTINGS, base_url="http://litellm:4000/v1")
+    assert config.temperature is None
+    assert config.temp(0.0) == 0.0 and config.temp(0.1) == 0.1

@@ -7,6 +7,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     String,
@@ -37,6 +38,8 @@ class Tenant(Base):
     llm_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     llm_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     llm_title_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Overrides every call's temperature for this tenant; NULL = per-call default.
+    llm_temperature: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

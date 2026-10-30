@@ -30,6 +30,11 @@ class LLMConfig:
     model: str
     title_model: str
     custom_endpoint: bool = False
+    # Tenant override applied to all calls; None keeps each call's own default.
+    temperature: float | None = None
+
+    def temp(self, default: float) -> float:
+        return default if self.temperature is None else self.temperature
 
 
 # Keyed by tenant_id; entries expire after Settings.tenant_cache_ttl_seconds.
@@ -65,6 +70,7 @@ def build_llm_config(
     api_key: str | None = None,
     model: str | None = None,
     title_model: str | None = None,
+    temperature: float | None = None,
 ) -> LLMConfig:
     base_url, api_key, model, title_model = map(_clean, (base_url, api_key, model, title_model))
     default = default_llm_config(settings)
@@ -76,12 +82,14 @@ def build_llm_config(
             model=effective_model,
             title_model=title_model or effective_model,
             custom_endpoint=True,
+            temperature=temperature,
         )
     return LLMConfig(
         base_url=default.base_url,
         api_key=default.api_key,
         model=model or default.model,
         title_model=title_model or default.title_model,
+        temperature=temperature,
     )
 
 
@@ -97,7 +105,11 @@ async def resolve_llm_config(tenant_id: str | None, *, db: AsyncSession | None =
         return cached[1]
 
     stmt = select(
-        Tenant.llm_base_url, Tenant.llm_api_key, Tenant.llm_model, Tenant.llm_title_model
+        Tenant.llm_base_url,
+        Tenant.llm_api_key,
+        Tenant.llm_model,
+        Tenant.llm_title_model,
+        Tenant.llm_temperature,
     ).where(Tenant.id == tenant_id)
     if db is not None:
         row = (await db.execute(stmt)).one_or_none()
@@ -108,7 +120,7 @@ async def resolve_llm_config(tenant_id: str | None, *, db: AsyncSession | None =
             row = (await session.execute(stmt)).one_or_none()
 
     config = default_llm_config(settings) if row is None else build_llm_config(
-        settings, base_url=row[0], api_key=row[1], model=row[2], title_model=row[3]
+        settings, base_url=row[0], api_key=row[1], model=row[2], title_model=row[3], temperature=row[4]
     )
     if ttl > 0:
         _LLM_CONFIG_CACHE[tenant_id] = (time.monotonic() + ttl, config)

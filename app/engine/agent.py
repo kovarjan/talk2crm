@@ -306,6 +306,7 @@ async def _capture_skill_in_background(
                 llm_base_url=llm_config.base_url,
                 llm_model=llm_config.model,
                 llm_api_key=llm_config.api_key,
+                llm_temperature=llm_config.temperature,
             )
             await capture_svc.maybe_capture(
                 user_message=user_message,
@@ -367,7 +368,7 @@ async def run_agent(
         base_url=llm_config.base_url,
         api_key=llm_config.api_key,
         model=llm_config.model,
-        temperature=0.0,
+        temperature=llm_config.temp(0.0),
         max_tokens=4096,
     )
 

@@ -176,7 +176,7 @@ async def summarize_briefing(result: dict, tenant_id: str | None = None) -> str:
     try:
         llm_config = await resolve_llm_config(tenant_id)
         llm = get_chat_llm(base_url=llm_config.base_url, api_key=llm_config.api_key,
-                           model=llm_config.model, max_tokens=512)
+                           model=llm_config.model, max_tokens=512, temperature=llm_config.temp(0.0))
         response = await asyncio.wait_for(llm.ainvoke([
             ("system", "Vyber 3 až 7 nejdůležitějších položek denního přehledu (ne více než počet položek). "
                        "Priorita: dnešní časové závazky, faktury po splatnosti, blížící se obchodní případy, nabídky. "
@@ -242,7 +242,7 @@ async def focus_summary(result: dict, tenant_id: str | None = None) -> str:
     try:
         llm_config = await resolve_llm_config(tenant_id)
         llm = get_chat_llm(base_url=llm_config.base_url, api_key=llm_config.api_key,
-                           model=llm_config.model, max_tokens=220)
+                           model=llm_config.model, max_tokens=220, temperature=llm_config.temp(0.0))
         response = await asyncio.wait_for(llm.ainvoke([
             ("system", "Napiš 2 až 4 věty přirozenou, gramaticky správnou češtinou (správné skloňování a shoda "
                        "podmětu s přísudkem podle čísla, např. '1 schůzka', '2 schůzky', '5 schůzek') shrnující "
