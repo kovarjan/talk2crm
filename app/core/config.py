@@ -183,6 +183,9 @@ class Settings(BaseSettings):
     # Browsers reject credentialed CORS with a wildcard origin, so enabling this
     # only takes effect when cors_allow_origins lists explicit origins.
     cors_allow_credentials: bool = False
+    # Optional regex (fully matched against the Origin header) for origin families,
+    # e.g. https://([a-z0-9-]+\.)*coripo\.(app|cloud|dev); used next to the explicit list.
+    cors_allow_origin_regex: str | None = None
 
     @field_validator("cors_allow_origins", mode="before")
     @classmethod

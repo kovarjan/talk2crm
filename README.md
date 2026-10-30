@@ -128,7 +128,7 @@ python scripts/onboard_tenant.py
 # non-interactive:
 python scripts/onboard_tenant.py --tenant-id acme-cz --name "Acme" \
   --crm-base-url https://rest-acme.coripo.cloud/public --gateway-url https://ai-gateway.coripo.app \
-  --test-user-id 1 --ingest Contacts,Accounts,Meetings --yes
+  --test-user-id 1 --ingest --yes   # --ingest alone = all RAG modules
 ```
 
 - `CRM base url` is the Coripo **REST** host (`https://rest-<name>.coripo.cloud/public`), not the web UI.

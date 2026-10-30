@@ -13,7 +13,7 @@ Non-interactive (a missing required value is an error with --yes):
     python scripts/onboard_tenant.py --tenant-id acme --name "Acme s.r.o." \
         --crm-base-url https://rest-acme.coripo.cloud/public \
         --gateway-url https://ai-gateway.coripo.app --test-user-id 1 \
-        --ingest Contacts,Accounts,Meetings --yes
+        --ingest --yes
 
 Re-running for an existing tenant reuses its stored secret (re-prints the Coripo
 settings); --rotate-secret issues a new one; --secret sets a specific one (migrating
@@ -45,7 +45,11 @@ from database.session import AsyncSessionLocal, init_db  # noqa: E402
 
 TENANT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
 DEFAULT_GATEWAY_URL = "http://host.docker.internal:8011"
-DEFAULT_INGEST_MODULES = "Contacts,Accounts,Meetings"
+INGEST_CONCURRENCY = 3  # modules ingested in parallel
+HEARTBEAT_SECONDS = 15
+DEFAULT_INGEST_MODULES = (
+    "Contacts,Accounts,Leads,Meetings,Calls,Tasks,Notes,Opportunities,Quotes,acm_invoices,ProductTemplates"
+)
 
 
 # --------------------------------------------------------------------------- prompts
@@ -165,12 +169,20 @@ async def test_connection(tenant_id: str, user_id: str) -> bool:
     return True
 
 
-async def run_ingest(tenant_id: str, user_id: str, user_name: str | None, modules: list[str], incremental: bool) -> None:
+async def run_ingest(
+    tenant_id: str, user_id: str, user_name: str | None, modules: list[str], incremental: bool,
+    concurrency: int = INGEST_CONCURRENCY,
+) -> None:
+    """Ingest modules concurrently (at most ``concurrency`` at a time) with live progress."""
+    import time
+    import warnings
+
     from app.engine.rag import get_rag_service
     from app.services.crm_client import CoripoClient
     from app.services.tenant_manager import TenantManager
     from app.utils.modules import canonical_module_name
 
+    warnings.filterwarnings("ignore", message="Qdrant client version")  # client/server minor skew
     rag = get_rag_service()
     if rag is None:
         print("✘ RAG service unavailable (is Qdrant running / QDRANT_URL correct?) - skipping ingest.")
@@ -178,17 +190,51 @@ async def run_ingest(tenant_id: str, user_id: str, user_name: str | None, module
     async with AsyncSessionLocal() as db:
         credentials = await TenantManager(db).get_credentials(tenant_id)
     client = CoripoClient(credentials.crm_base_url, credentials.crm_token, user_id=user_id, user_name=user_name)
-    for raw in modules:
-        module = canonical_module_name(raw) or raw
-        print(f"  ingesting {module} ...", end=" ", flush=True)
-        try:
-            count = await rag.ingest_from_crm(
-                tenant_id=tenant_id, crm_client=client, module=module,
-                limit=None, page_size=500, incremental=incremental,
-            )
-            print(f"{count} records")
-        except Exception as exc:  # noqa: BLE001 - keep going with the other modules
-            print(f"failed ({type(exc).__name__}: {exc})")
+
+    names = [canonical_module_name(m) or m for m in modules]
+    stats: dict[str, dict[str, int]] = {n: {} for n in names}
+    done: set[str] = set()
+    gate = asyncio.Semaphore(max(1, concurrency))
+    started = time.monotonic()
+
+    def summary(n: str) -> str:
+        s = stats[n]
+        return (f"fetched {s.get('fetched', 0)}, written {s.get('written', 0)}, "
+                f"unchanged {s.get('unchanged', 0)}")
+
+    async def one(module: str) -> None:
+        async with gate:
+            t0 = time.monotonic()
+            try:
+                await rag.ingest_from_crm(
+                    tenant_id=tenant_id, crm_client=client, module=module,
+                    limit=None, page_size=500, incremental=incremental, stats=stats[module],
+                )
+                s = stats[module]
+                note = "  (nothing returned by the CRM - check the user's access to this module)" if not s.get("fetched") else ""
+                print(f"  ✔ {module:<18} {summary(module)}  [{time.monotonic() - t0:.0f}s]{note}", flush=True)
+            except Exception as exc:  # noqa: BLE001 - keep going with the other modules
+                print(f"  ✘ {module:<18} failed: {type(exc).__name__}: {exc}", flush=True)
+            finally:
+                done.add(module)
+
+    async def heartbeat() -> None:
+        while True:
+            await asyncio.sleep(HEARTBEAT_SECONDS)
+            running = [n for n in names if n not in done and stats[n].get("fetched")]
+            if running:
+                line = "; ".join(f"{n} {stats[n].get('written', 0) + stats[n].get('unchanged', 0)}/{stats[n]['fetched']}" for n in running)
+                print(f"  … {int(time.monotonic() - started)}s  {line}", flush=True)
+
+    ticker = asyncio.create_task(heartbeat())
+    try:
+        await asyncio.gather(*(one(n) for n in names))
+    finally:
+        ticker.cancel()
+    print(f"Ingest finished in {time.monotonic() - started:.0f}s "
+          f"({sum(s.get('fetched', 0) for s in stats.values())} records fetched, "
+          f"{sum(s.get('written', 0) for s in stats.values())} written, "
+          f"{sum(s.get('unchanged', 0) for s in stats.values())} already up to date).")
 
 
 async def main() -> int:
@@ -254,14 +300,14 @@ async def main() -> int:
     modules_arg = None if args.no_ingest else args.ingest
     if not args.no_ingest and user_id:
         if modules_arg is None and interactive and tested_ok:
-            if ask_yes_no(f"Ingest this tenant's CRM data into search (RAG) now? ({DEFAULT_INGEST_MODULES})", True):
+            if ask_yes_no(f"Ingest this tenant's CRM data into search (RAG) now? (all RAG modules)", True):
                 modules_arg = ask("Modules", DEFAULT_INGEST_MODULES, hint="comma separated")
         if modules_arg:
             if not tested_ok and not args.test_user_id:
                 print("Skipping ingest: connection was not verified.")
             else:
                 modules = [m.strip() for m in modules_arg.split(",") if m.strip()]
-                print(f"\nFull import of {', '.join(modules)} ...")
+                print(f"\nFull import of {len(modules)} modules ({INGEST_CONCURRENCY} at a time) ...")
                 await run_ingest(tenant_id, user_id, user_name, modules, incremental=False)
     elif args.ingest and not user_id:
         print("Skipping ingest: --test-user-id is required (the CRM user the gateway acts as).")

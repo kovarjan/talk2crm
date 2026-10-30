@@ -590,7 +590,14 @@ class TenantRAGService:
             if max_scanned is not None and scanned >= max_scanned:
                 break
 
-    async def ingest_records(self, *, tenant_id: str, module: str, records: list[dict[str, Any]]) -> int:
+    async def ingest_records(
+        self,
+        *,
+        tenant_id: str,
+        module: str,
+        records: list[dict[str, Any]],
+        stats: dict[str, int] | None = None,
+    ) -> int:
         collection = await self._tenant_collection(tenant_id)
         client = await self._get_client()
         prepared: list[dict[str, Any]] = []
@@ -658,6 +665,8 @@ class TenantRAGService:
             await client.upsert(collection_name=collection, points=points)
             inserted += len(points)
 
+        if stats is not None:
+            stats["unchanged"] = stats.get("unchanged", 0) + skipped_unchanged
         logger.info(
             "Ingested records into qdrant tenant=%s module=%s count=%s skipped_unchanged=%s",
             tenant_id,
@@ -998,7 +1007,11 @@ class TenantRAGService:
         limit: int | None = None,
         page_size: int = 500,
         incremental: bool = True,
+        stats: dict[str, int] | None = None,
     ) -> int:
+        """Returns the number of points written. ``stats`` (optional, live-updated) gets
+        ``fetched`` / ``selected`` / ``written`` / ``unchanged`` so callers can tell
+        "nothing in the CRM" from "everything already up to date"."""
         remaining = None if limit is None else max(0, int(limit))
         page_size = max(1, min(int(page_size), 500))
         offset = 0
@@ -1084,14 +1097,20 @@ class TenantRAGService:
                 len(selected_records),
             )
 
+            if stats is not None:
+                stats["fetched"] = stats.get("fetched", 0) + fetched_count
+                stats["selected"] = stats.get("selected", 0) + len(selected_records)
             inserted = 0
             if selected_records:
                 inserted = await self.ingest_records(
                     tenant_id=tenant_id,
                     module=module,
                     records=selected_records,
+                    stats=stats,
                 )
             total += inserted
+            if stats is not None:
+                stats["written"] = total
             if remaining is not None:
                 remaining -= inserted
 
@@ -1114,6 +1133,7 @@ class TenantRAGService:
         limit: int | None = None,
         page_size: int = 500,
         incremental: bool = True,
+        stats: dict[str, int] | None = None,
     ) -> int:
         # Always use the paginated list path. The legacy bulk dump path has shown
         # inconsistent visibility/limits on some Coripo deployments.
@@ -1124,6 +1144,7 @@ class TenantRAGService:
             limit=limit,
             page_size=page_size,
             incremental=incremental,
+            stats=stats,
         )
 
 
