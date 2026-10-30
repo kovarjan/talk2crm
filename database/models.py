@@ -32,6 +32,11 @@ class Tenant(Base):
     crm_token_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    # Optional per-tenant LLM (plain text, edited in the DB); NULL = system default.
+    llm_base_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    llm_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    llm_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    llm_title_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

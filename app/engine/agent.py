@@ -16,6 +16,7 @@ from app.engine.capabilities import TOOL_PROMPT_BLOCKS, TOOL_PROMPT_ORDER, promp
 from app.engine.base_skills import BASE_SKILLS
 from app.engine.events import EmitFn, StreamEvent, tool_label_cz
 from app.engine.llm import get_chat_llm
+from app.services.tenant_llm import resolve_llm_config
 from app.utils.text import format_european_dates, strip_answer_tags, strip_think_tags
 from app.core.logging import (
     LLM_STEP_AGENT_ACTION,
@@ -298,12 +299,13 @@ async def _capture_skill_in_background(
 
         async with AsyncSessionLocal() as db:
             skill_svc = SkillService(db, settings)
+            llm_config = await resolve_llm_config(tenant_id, db=db)
             capture_svc = SkillCaptureService(
                 skill_service=skill_svc,
                 settings=settings,
-                llm_base_url=settings.llm_base_url,
-                llm_model=settings.llm_model,
-                llm_api_key=settings.llm_api_key,
+                llm_base_url=llm_config.base_url,
+                llm_model=llm_config.model,
+                llm_api_key=llm_config.api_key,
             )
             await capture_svc.maybe_capture(
                 user_message=user_message,
@@ -360,10 +362,11 @@ async def run_agent(
     # No bind_tools — LiteLLM strips tool parameter schemas when forwarding to Ollama,
     # so the model sees tools with empty schemas and can't generate tool calls.
     # We describe tools in the system prompt and parse <tool_call> tags from text output.
+    llm_config = await resolve_llm_config(tenant_id, db=db)
     llm = get_chat_llm(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        model=settings.llm_model,
+        base_url=llm_config.base_url,
+        api_key=llm_config.api_key,
+        model=llm_config.model,
         temperature=0.0,
         max_tokens=4096,
     )

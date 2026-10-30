@@ -20,10 +20,10 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, text
 
-from app.core.config import get_settings
 from app.engine.base_skills import BRIEFING_STATUS_SETS
 from app.engine.filter_builder import FilterSpec, build_filter, build_order
 from app.engine.llm import get_chat_llm
+from app.services.tenant_llm import resolve_llm_config
 from app.presentation.cards import record_name, table_card
 from app.services import chat_service
 from app.services.crm_read_service import CRMReadService
@@ -164,7 +164,7 @@ async def collect_briefing(*, crm_client: Any, tenant_id: str, user_id: str, now
             "partial": any(b["status"] == "error" for b in blocks)}
 
 
-async def summarize_briefing(result: dict) -> str:
+async def summarize_briefing(result: dict, tenant_id: str | None = None) -> str:
     # Candidates are bounded, and URLs/names always come from CRM, never the model.
     order = {key: i for i, key in enumerate(("overdue", "meetings", "calls", "tasks", "closing", "quotes", "orders", "leads"))}
     candidates = [{"block": b["key"], "title": b["title"], **r}
@@ -174,9 +174,9 @@ async def summarize_briefing(result: dict) -> str:
         return warning + "V dostupných částech přehledu nebyly nalezeny žádné položky pro aktuálního uživatele."
     indices = list(range(min(7, len(candidates))))
     try:
-        settings = get_settings()
-        llm = get_chat_llm(base_url=settings.llm_base_url, api_key=settings.llm_api_key,
-                           model=settings.llm_model, max_tokens=512)
+        llm_config = await resolve_llm_config(tenant_id)
+        llm = get_chat_llm(base_url=llm_config.base_url, api_key=llm_config.api_key,
+                           model=llm_config.model, max_tokens=512)
         response = await asyncio.wait_for(llm.ainvoke([
             ("system", "Vyber 3 až 7 nejdůležitějších položek denního přehledu (ne více než počet položek). "
                        "Priorita: dnešní časové závazky, faktury po splatnosti, blížící se obchodní případy, nabídky. "
@@ -226,7 +226,7 @@ def _focus_summary_fallback(counts: dict[str, int | None], closing_days: int) ->
     ))
 
 
-async def focus_summary(result: dict) -> str:
+async def focus_summary(result: dict, tenant_id: str | None = None) -> str:
     """Short, natural-sounding Czech paragraph highlighting today's priorities.
 
     The model only phrases pre-computed integer counts (never raw CRM text), so
@@ -240,9 +240,9 @@ async def focus_summary(result: dict) -> str:
         return "nedostupný počet" if counts[key] is None else counts[key]
 
     try:
-        settings = get_settings()
-        llm = get_chat_llm(base_url=settings.llm_base_url, api_key=settings.llm_api_key,
-                           model=settings.llm_model, max_tokens=220)
+        llm_config = await resolve_llm_config(tenant_id)
+        llm = get_chat_llm(base_url=llm_config.base_url, api_key=llm_config.api_key,
+                           model=llm_config.model, max_tokens=220)
         response = await asyncio.wait_for(llm.ainvoke([
             ("system", "Napiš 2 až 4 věty přirozenou, gramaticky správnou češtinou (správné skloňování a shoda "
                        "podmětu s přísudkem podle čísla, např. '1 schůzka', '2 schůzky', '5 schůzek') shrnující "
@@ -308,8 +308,8 @@ async def get_briefing(*, db, crm_client, tenant_id: str, user_id: str,
                 return result
     result = await collect_briefing(crm_client=crm_client, tenant_id=tenant_id, user_id=user_id, now=now,
                                     timezone_name=timezone_name, days=days, statuses=statuses, readable=readable)
-    result["focus_summary"] = await focus_summary(result)
-    result["message"] = await summarize_briefing(result)
+    result["focus_summary"] = await focus_summary(result, tenant_id)
+    result["message"] = await summarize_briefing(result, tenant_id)
     chat = await chat_service.create_chat(db, tenant_id=tenant_id, user_id=user_id, persist=False,
                                           name=f"Denní přehled {result['date']}", tool="briefing")
     await db.flush()

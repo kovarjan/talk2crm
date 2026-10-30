@@ -13,6 +13,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.crm_token import build_crm_token, parse_crm_token
 from app.core.security import decrypt_tenant_secret
+from app.services.tenant_llm import invalidate_llm_config_cache
 from database.models import Tenant
 
 
@@ -36,6 +37,7 @@ _CREDENTIALS_CACHE: dict[str, tuple[float, TenantCredentials]] = {}
 
 
 def invalidate_tenant_cache(tenant_id: str | None = None) -> None:
+    invalidate_llm_config_cache(tenant_id)
     if tenant_id is None:
         _CREDENTIALS_CACHE.clear()
     else:

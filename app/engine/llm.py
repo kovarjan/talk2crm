@@ -11,7 +11,7 @@ from langchain_openai import ChatOpenAI
 from app.core.config import get_settings
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=64)
 def get_chat_llm(
     *,
     base_url: str,

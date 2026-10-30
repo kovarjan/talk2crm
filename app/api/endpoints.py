@@ -52,6 +52,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.engine.events import StreamEvent
 from app.engine.llm import get_chat_llm
+from app.services.tenant_llm import resolve_llm_config
 from app.engine.pipeline import process_input_core
 from app.engine.recommendations import recommend_actions
 from app.engine.extraction import extract_fields
@@ -170,10 +171,11 @@ async def generate(
     Intended for automation and simple text generation where the caller
     supplies all context in the prompts."""
     settings = get_settings()
+    llm_config = await resolve_llm_config(ctx["tenant_id"])
     llm = get_chat_llm(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        model=settings.llm_model,
+        base_url=llm_config.base_url,
+        api_key=llm_config.api_key,
+        model=llm_config.model,
         temperature=settings.llm_temperature,
         max_tokens=payload.max_tokens or 2048,
     )

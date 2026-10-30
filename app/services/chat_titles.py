@@ -15,6 +15,7 @@ from app.api.models import ChatMessageItem
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.engine.llm import get_chat_llm
+from app.services.tenant_llm import resolve_llm_config
 from app.presentation.agent_result import to_plain_message
 from database.models import Chat
 
@@ -97,11 +98,12 @@ async def generate_chat_name_with_llm(
             )
         ),
     ]
-    models_to_try = list(dict.fromkeys([settings.llm_title_model, settings.llm_model]))
+    llm_config = await resolve_llm_config(tenant_id)
+    models_to_try = list(dict.fromkeys([llm_config.title_model, llm_config.model]))
     for model_name in models_to_try:
         llm = get_chat_llm(
-            base_url=settings.llm_base_url,
-            api_key=settings.llm_api_key,
+            base_url=llm_config.base_url,
+            api_key=llm_config.api_key,
             model=model_name,
             temperature=0.0,
             max_tokens=200,

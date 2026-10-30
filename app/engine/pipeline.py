@@ -38,6 +38,7 @@ from app.services import chat_service
 from app.services.chat_titles import ensure_chat_name
 from app.services.crm_client import CoripoClient
 from app.services.module_catalog import get_module_catalog
+from app.services.tenant_llm import default_llm_config, resolve_llm_config
 from app.services.tenant_manager import TenantManager
 from app.tools.toolset import build_turn_toolset
 from app.utils.modules import canonical_module_name
@@ -595,6 +596,10 @@ async def process_input_core(
     if not isinstance(cards, list):
         cards = []
     duration_ms = round((time.perf_counter() - started) * 1000, 2)
+    try:
+        llm_config = await resolve_llm_config(tenant_id, db=db)
+    except Exception:  # trace-only; the turn already ran
+        llm_config = default_llm_config(settings)
     log_llm_trace(
         logger,
         tenant_id=tenant_id,
@@ -617,8 +622,8 @@ async def process_input_core(
         },
         resources={
             "execution_mode": execution_mode,
-            "llm_model": settings.llm_model,
-            "llm_base_url": settings.llm_base_url,
+            "llm_model": llm_config.model,
+            "llm_base_url": llm_config.base_url,
             "crm_mode": settings.crm_mode,
             "rag_available": rag_service is not None,
             "available_tools": available_tools,
