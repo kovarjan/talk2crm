@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from sqlalchemy import text
 
 from app.core.config import get_settings
+from app.services.tenant_llm import resolve_llm_config
 from app.core.http import get_shared_http_client
 from app.core.logging import get_logger
 from app.engine.rag import TenantRAGService, get_rag_service
@@ -102,6 +103,13 @@ async def _probe_openai_compatible(base_url: str, api_key: str | None, model: st
     return {"host": _host(base_url), "model": model, "model_available": model in ids if ids else None}
 
 
+async def _probe_tenant_llm(tenant_id: str) -> dict[str, Any]:
+    # The tenant's own endpoint/model when configured, else the system default.
+    config = await resolve_llm_config(tenant_id)
+    result = await _probe_openai_compatible(config.base_url, config.api_key, config.model)
+    return {**result, "tenant_endpoint": config.custom_endpoint}
+
+
 def _crm_state(tenant_id: str) -> dict[str, Any]:
     from app.tools.toolset import get_manifest_cache, get_tenant_guards
 
@@ -123,7 +131,7 @@ async def collect_diagnostics(*, tenant_id: str, user_id: str, db) -> dict[str, 
     database, qdrant, llm, embeddings = await asyncio.gather(
         _timed(_probe_database(db)),
         _timed(_probe_qdrant(tenant_id)),
-        _timed(_probe_openai_compatible(settings.llm_base_url, settings.llm_api_key, settings.llm_model)),
+        _timed(_probe_tenant_llm(tenant_id)),
         _timed(_probe_openai_compatible(settings.rag_embedding_base_url, settings.rag_embedding_api_key, settings.rag_embedding_model)),
     )
     components = {"database": database, "qdrant": qdrant, "llm": llm, "embeddings": embeddings}

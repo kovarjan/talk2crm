@@ -1,5 +1,7 @@
 import asyncio
 
+from types import SimpleNamespace
+
 from app.services import diagnostics
 
 
@@ -16,6 +18,11 @@ def test_collect_diagnostics_isolates_failures_and_hides_secrets(monkeypatch) ->
     monkeypatch.setattr(diagnostics, "_probe_database", ok_db)
     monkeypatch.setattr(diagnostics, "_probe_qdrant", broken_qdrant)
     monkeypatch.setattr(diagnostics, "_probe_openai_compatible", ok_llm)
+
+    async def tenant_llm(tenant_id):
+        return SimpleNamespace(base_url="http://tenant/v1", api_key="k", model="tenant-model", custom_endpoint=True)
+
+    monkeypatch.setattr(diagnostics, "resolve_llm_config", tenant_llm)
     monkeypatch.setattr(diagnostics, "_crm_state", lambda tenant_id: {"manifest": {"cached": False}, "circuit": {}})
 
     data = asyncio.run(diagnostics.collect_diagnostics(tenant_id="t1", user_id="u1", db=None))
@@ -23,6 +30,7 @@ def test_collect_diagnostics_isolates_failures_and_hides_secrets(monkeypatch) ->
     assert data["status"] == "degraded"
     assert data["database"] == {"ok": True, "latency_ms": data["database"]["latency_ms"], "migration": "0013"}
     assert data["qdrant"]["ok"] is False and data["qdrant"]["error"] == "ConnectionError"
+    assert data["llm"]["model"] == "tenant-model" and data["llm"]["tenant_endpoint"] is True
     assert "pw" not in str(data)  # exception text (may carry credentials) is never returned
     assert data["app"]["version"] and data["security"].keys() >= {"require_hmac", "bind_identity"}
 
