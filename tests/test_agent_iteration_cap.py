@@ -25,7 +25,7 @@ def _settings(limit: int):
     )
 
 
-async def _run(llm, limit=3):
+async def _run(llm, limit=3, emit=None):
     config = LLMConfig(base_url="http://x/v1", api_key="k", model="m", title_model="m")
     with (
         patch.object(agent, "get_settings", return_value=_settings(limit)),
@@ -35,7 +35,7 @@ async def _run(llm, limit=3):
     ):
         return await agent.run_agent(
             tenant_id="t", user_id="u", input_text="briefing", context=None,
-            tools=[FakeTool()], capture_skills=False,
+            tools=[FakeTool()], capture_skills=False, emit=emit,
         )
 
 
@@ -64,3 +64,21 @@ async def test_normal_answer_before_the_cap_is_untouched():
     result = await _run(llm, limit=3)
     assert result["output"] == "Hotovo."
     assert llm.ainvoke.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_streaming_turn_reports_the_iteration_limit_and_answers():
+    events = []
+
+    async def emit(event):
+        events.append(event)
+
+    llm = SimpleNamespace(astream=lambda messages: _astream("<answer>Hotovo.</answer>"))
+    result = await _run(llm, limit=7, emit=emit)
+    assert result["output"] == "Hotovo."
+    started = [e for e in events if e.type == "agent.started"]
+    assert started and started[0].data == {"iteration_limit": 7}
+
+
+async def _astream(text):
+    yield SimpleNamespace(content=text)

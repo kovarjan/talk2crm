@@ -39,3 +39,22 @@ def test_errors_carry_json_pointer_paths() -> None:
 def test_missing_required_argument() -> None:
     _, errors = validate_arguments({}, SPECS["crm_record_detail_tool"].input_schema)
     assert errors and all(e["path"] == "/" for e in errors)
+
+
+def test_order_by_slips_are_normalised_to_field_colon_direction() -> None:
+    schema = SPECS["crm_query_tool"].input_schema
+    for given, expected in [
+        ("date_start DESC", "date_start:desc"),
+        ("date_start desc", "date_start:desc"),
+        ("-date_start", "date_start:desc"),
+        ("name", "name:asc"),
+        ("date_start:desc", "date_start:desc"),
+    ]:
+        args, errors = validate_arguments({"module": "Meetings", "order_by": given}, schema)
+        assert errors == [], given
+        assert args["order_by"] == expected
+
+
+def test_unparseable_order_by_is_still_reported() -> None:
+    _, errors = validate_arguments({"module": "Meetings", "order_by": "date_start; DROP"}, SPECS["crm_query_tool"].input_schema)
+    assert errors and errors[0]["path"] == "/order_by"

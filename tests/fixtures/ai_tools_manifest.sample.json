@@ -1,6 +1,6 @@
 {
     "protocol": "coripo-tools/1",
-    "manifest_hash": "sha256:878708997bc9524242ded6c04dac215f01925843487edcb48533b837647aa87c",
+    "manifest_hash": "sha256:4a36605c16ac9d7554464a88afe2609d12a47e733c83d724a03942c2e590721c",
     "coripo_version": "2.32.1",
     "capabilities": [
         {
@@ -164,7 +164,7 @@
             "name": "crm_query_tool",
             "version": "1.0.0",
             "title": "Dotaz do CRM",
-            "description": "přesný dotaz do CRM. Pro přesné lookupy jména osoby/firmy použij nejdřív search.\nfilters je pole [{\"field\":\"...\",\"op\":\"eq\",\"value\":\"...\"}].\nfields id/account_id/contact_id a také *.id nebo *|id musí mít jako value jen skutečné CRM UUID, nikdy název firmy/kontaktu – to nic nenajde.\npro více konkrétních záznamů můžeš použít pouze {\"field\": \"id\", \"op\": \"in\", \"value\": [\"<CRM_ID_1>\", \"<CRM_ID_2>\"]}.\ndate_from/date_to filtrují přirozené datum modulu (schůzky/hovory date_start, úkoly date_due, obchody date_closed, faktury datum_vystaveni).",
+            "description": "přesný dotaz do CRM. Pro přesné lookupy jména osoby/firmy použij nejdřív search.\nfilters je pole [{\"field\":\"...\",\"op\":\"eq\",\"value\":\"...\"}].\nfields id/account_id/contact_id a také *.id nebo *|id musí mít jako value jen skutečné CRM UUID, nikdy název firmy/kontaktu – to nic nenajde.\npro více konkrétních záznamů můžeš použít pouze {\"field\": \"id\", \"op\": \"in\", \"value\": [\"<CRM_ID_1>\", \"<CRM_ID_2>\"]}.\ndate_from/date_to filtrují přirozené datum modulu (schůzky/hovory date_start, úkoly date_due, obchody date_closed, faktury datum_vystaveni).\norder_by má tvar \"pole:asc\" nebo \"pole:desc\" (dvojtečka, ne mezera), např. \"date_start:desc\".\nu Meetings/Calls/Tasks/Notes vybere filtr account_id jen aktivity, jejichž „Týká se“ je přímo tato firma. Aktivity navázané jen na kontakt nebo obchod firmou nenajdeš – ty hledej přes contact_id/opportunity_id nebo přes search. Když filtr na firmu nic nevrátí, neopakuj ho: zkus search nebo to uveď jako chybějící informaci.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -245,7 +245,7 @@
                             "null"
                         ],
                         "pattern": "^[A-Za-z0-9_.]+:(asc|desc|ASC|DESC)$",
-                        "description": "pole:asc|desc"
+                        "description": "pole:asc|desc, např. date_start:desc (s dvojtečkou, ne s mezerou)"
                     },
                     "limit": {
                         "type": "integer",
@@ -311,7 +311,7 @@
             "name": "get_company_overview",
             "version": "1.1.0",
             "title": "Přehled firmy",
-            "description": "vrátí kompaktní AI detail firmy (Accounts) + related_records ze subpanelů.\nactivities i každý related_records subpanel je ve výchozím stavu omezen na 10 nejnovějších záznamů.\nměna částek je v monetary_values_currency (platí i pro amount).\npoužívej pro detail firmy, když máš account_id.\nuživatel uvidí kartu firmy s tlačítkem „Otevřít v CRM“; když chce firmu ukázat nebo otevřít v CRM, zavolej tento nástroj.",
+            "description": "vrátí kompaktní AI detail firmy (Accounts) + related_records ze subpanelů.\nactivities i každý related_records subpanel je ve výchozím stavu omezen na 10 nejnovějších záznamů.\nměna částek je v monetary_values_currency (platí i pro amount).\npoužívej pro detail firmy, když máš account_id.\npro briefing nebo shrnutí firmy začni tímto nástrojem: activities a related_records už obsahují poslední aktivity, kontakty a související záznamy. Další crm_query_tool volej jen pro to, co v přehledu chybí (starší historie, úkoly, příležitosti, nabídky).\nuživatel uvidí kartu firmy s tlačítkem „Otevřít v CRM“; když chce firmu ukázat nebo otevřít v CRM, zavolej tento nástroj.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

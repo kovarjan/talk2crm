@@ -373,12 +373,12 @@ async def run_agent(
         },
     )
     log_llm_step(logger, LLM_STEP_AGENT_ACTION, {"event": "agent_execution_started"})
+    settings = get_settings()
     seq = 0
     if emit:
         seq += 1
         await emit(StreamEvent("agent.started", {"iteration_limit": settings.agent_max_iterations}, seq=seq))
 
-    settings = get_settings()
     # No bind_tools — LiteLLM strips tool parameter schemas when forwarding to Ollama,
     # so the model sees tools with empty schemas and can't generate tool calls.
     # We describe tools in the system prompt and parse <tool_call> tags from text output.

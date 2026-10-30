@@ -11,6 +11,7 @@ for booleans, and null for optional non-nullable arguments (treated as "not give
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
 from typing import Any
 
@@ -30,10 +31,24 @@ def _types(schema: dict[str, Any]) -> set[str]:
     return {str(value)} if value else set()
 
 
+_ORDER_SLIP = re.compile(r"^\s*(-)?([A-Za-z0-9_.]+)(?:\s+(asc|desc))?\s*$", re.IGNORECASE)
+
+
+def _coerce_order_by(text: str) -> str | None:
+    """'date_start DESC' / 'date_start desc' / '-date_start' / 'date_start' → 'date_start:desc|asc'."""
+    match = _ORDER_SLIP.match(text)
+    if not match:
+        return None
+    descending, field, direction = match.groups()
+    return f"{field}:{(direction or ('desc' if descending else 'asc')).lower()}"
+
+
 def _coerce_value(value: Any, schema: dict[str, Any]) -> Any:
     types = _types(schema)
     if isinstance(value, str):
         text = value.strip()
+        if "(asc|desc" in str(schema.get("pattern") or "") and ":" not in text:
+            return _coerce_order_by(text) or value
         if types & {"array", "object"} and "string" not in types and text[:1] in "[{":
             try:
                 return json_repair.loads(text)
